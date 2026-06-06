@@ -75,6 +75,14 @@ type LocalWhisperStatus = {
     chunksReturnedFromSidecar: number;
     chunksEmpty: number;
     chunksFailed: number;
+    queueLength: number;
+    maxQueueLength: number;
+    lastChunkSequence: number;
+    processingSequence: number;
+    lastTranscriptionDurationMs: number;
+    avgTranscriptionDurationMs: number;
+    droppedDueToOverflow: number;
+    droppedDueToSilence: number;
     lastChunkBytes: number;
     lastChunkFormat: string;
     lastMimeType: string;
@@ -198,6 +206,14 @@ let localWhisperStatus: LocalWhisperStatus = {
     chunksReturnedFromSidecar: 0,
     chunksEmpty: 0,
     chunksFailed: 0,
+    queueLength: 0,
+    maxQueueLength: 4,
+    lastChunkSequence: 0,
+    processingSequence: 0,
+    lastTranscriptionDurationMs: 0,
+    avgTranscriptionDurationMs: 0,
+    droppedDueToOverflow: 0,
+    droppedDueToSilence: 0,
     lastChunkBytes: 0,
     lastChunkFormat: '',
     lastMimeType: '',
@@ -694,6 +710,7 @@ async function startLocalWhisperSidecar(settings: LocalWhisperSettings) {
         lastSidecarError: null,
         warningMessage: null,
         pendingResponses: 0
+        // queue* and timing fields carried by spread from current status
       }
     });
     const processReady = waitForProcessReady();

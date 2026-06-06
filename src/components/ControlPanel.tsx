@@ -359,6 +359,14 @@ export function ControlPanel(props: Props) {
               <dd>{localWhisperStatus.chunk.chunksEmpty}</dd>
               <dt>Failed</dt>
               <dd>{localWhisperStatus.chunk.chunksFailed}</dd>
+              <dt>Queue</dt>
+              <dd>{localWhisperStatus.chunk.queueLength}/{localWhisperStatus.chunk.maxQueueLength}</dd>
+              <dt>Seq (c/p)</dt>
+              <dd>c{localWhisperStatus.chunk.lastChunkSequence || 0}/p{localWhisperStatus.chunk.processingSequence || 0}</dd>
+              <dt>Transcribe</dt>
+              <dd>{localWhisperStatus.chunk.lastTranscriptionDurationMs || 0}ms / ~{Math.round(localWhisperStatus.chunk.avgTranscriptionDurationMs || 0)}ms</dd>
+              <dt>Dropped (ovf/sil)</dt>
+              <dd>{localWhisperStatus.chunk.droppedDueToOverflow || 0}/{localWhisperStatus.chunk.droppedDueToSilence || 0}</dd>
               <dt>Bytes</dt>
               <dd>{localWhisperStatus.chunk.lastChunkBytes || 'None'}</dd>
               <dt>Format</dt>

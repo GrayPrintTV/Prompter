@@ -36,6 +36,7 @@ export type LocalWhisperPcmChunk = {
   sampleRate: number;
   durationSeconds: number;
   sequence: number;
+  rmsLevel?: number; // optional level for silence-aware drop preference on overflow
 };
 
 type PcmChunkRecorder = {
@@ -64,6 +65,8 @@ type LocalWhisperDeps = {
 const MAX_MIC_LOG_LINES = 18;
 const MAX_TRANSCRIPT_HISTORY = 25;
 const DEFAULT_CHUNK_RESPONSE_TIMEOUT_MS = 15000;
+const MAX_CHUNK_QUEUE_LENGTH = 4; // bounded FIFO, 3-5 recommended for narration latency vs. drop tradeoff
+const SILENCE_RMS_THRESHOLD = 0.005; // conservative threshold for pre-transcribe silence detection on PCM samples (0..1)
 const PROVIDER_STATUS_TEXT = new Set([
   'sidecar is running',
   'local whisper sidecar is running',
@@ -169,6 +172,14 @@ function createDefaultChunkDiagnostics(): LocalWhisperChunkDiagnostics {
     chunksReturnedFromSidecar: 0,
     chunksEmpty: 0,
     chunksFailed: 0,
+    queueLength: 0,
+    maxQueueLength: 4,
+    lastChunkSequence: 0,
+    processingSequence: 0,
+    lastTranscriptionDurationMs: 0,
+    avgTranscriptionDurationMs: 0,
+    droppedDueToOverflow: 0,
+    droppedDueToSilence: 0,
     lastChunkBytes: 0,
     lastChunkFormat: '',
     lastMimeType: '',
@@ -233,7 +244,10 @@ export class LocalWhisperAsrProvider implements AsrProvider {
   private pcmRecorder: PcmChunkRecorder | null = null;
   private statusOff: (() => void) | null = null;
   private busy = false;
-  private pendingChunk: any = null;
+  private chunkQueue: any[] = [];
+  private processingSequence = 0;
+  private totalTranscriptionTimeMs = 0;
+  private transcriptionCount = 0;
   private connectionStatus: LocalWhisperStatus = {
     ...DEFAULT_LOCAL_WHISPER_STATUS,
     mic: createDefaultMicDiagnostics(),
@@ -405,7 +419,10 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       await this.pcmRecorder.start();
       this.updateMic({ captureState: 'pcm-capturing' }, 'PCM WAV capture started.');
       this.startChunkWatchdog();
-      this.pendingChunk = null;
+      this.chunkQueue = [];
+      this.processingSequence = 0;
+      this.totalTranscriptionTimeMs = 0;
+      this.transcriptionCount = 0;
       this.setProviderStatus('listening', null);
     } catch (error) {
       await this.stop();
@@ -418,7 +435,10 @@ export class LocalWhisperAsrProvider implements AsrProvider {
     this.pcmRecorder?.stop();
     this.pcmRecorder = null;
     this.stopChunkWatchdog();
-    this.pendingChunk = null;
+    this.chunkQueue = [];
+    this.processingSequence = 0;
+    this.totalTranscriptionTimeMs = 0;
+    this.transcriptionCount = 0;
 
     if (this.mediaStream && !this.connectionStatus.mic.monitorActive) {
       this.stopStream(this.mediaStream);
@@ -558,8 +578,10 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       sampleRate: chunk.sampleRate,
       durationSeconds: chunk.durationSeconds,
       headerSignature: audioHeaderSignature(chunk.audioData),
-      logLabel: 'PCM WAV'
-    });
+      logLabel: 'PCM WAV',
+      rmsLevel: chunk.rmsLevel,
+      sequence: chunk.sequence
+    } as any);
   }
 
   async acceptRecordedAudioChunk(blob: Blob) {
@@ -576,7 +598,8 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       durationSeconds: 0,
       headerSignature,
       logLabel: 'Legacy MediaRecorder'
-    });
+      // no sequence/rms for legacy path
+    } as any);
   }
 
   private async acceptEncodedAudioChunk(chunk: {
@@ -588,6 +611,8 @@ export class LocalWhisperAsrProvider implements AsrProvider {
     durationSeconds: number;
     headerSignature: string;
     logLabel: string;
+    rmsLevel?: number; // for silence-aware overflow drops
+    sequence?: number;
   }) {
     const byteLength = chunk.audioData.byteLength;
     this.updateChunk({
@@ -599,7 +624,9 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       lastHeaderSignature: chunk.headerSignature,
       lastSampleRate: chunk.sampleRate,
       lastChunkDurationSeconds: chunk.durationSeconds,
-      warningMessage: null
+      warningMessage: null,
+      queueLength: this.chunkQueue.length,
+      maxQueueLength: MAX_CHUNK_QUEUE_LENGTH
     });
     if (byteLength > 0) {
       this.updateMic(
@@ -609,36 +636,76 @@ export class LocalWhisperAsrProvider implements AsrProvider {
     }
     if (byteLength === 0) {
       this.updateMic({}, 'Chunk skipped: PCM WAV encoder emitted an empty chunk.');
+      this.updateChunk({ chunksEmpty: (this.connectionStatus.chunk.chunksEmpty || 0) + 1 });
       return;
     }
+
+    const isSilenceChunk = (chunk.rmsLevel ?? 1) < SILENCE_RMS_THRESHOLD;
+
+    // FIFO queue for order preservation in narration (oldest spoken first).
     if (this.busy) {
-      // Latest-chunk-wins backpressure: drop any previous pending, queue this one as latest.
-      // Never fatal, never error status; just diagnostic.
-      if (this.pendingChunk) {
-        this.updateChunk({ chunksDropped: (this.connectionStatus.chunk.chunksDropped || 0) + 1 });
-        this.updateMic({}, 'Chunk dropped (backpressure: keeping latest while in flight).');
+      // Enqueue this arrival (with silence flag for smart drop on overflow)
+      const queuedItem = { ...chunk, isSilence: isSilenceChunk };
+      this.chunkQueue.push(queuedItem);
+      this.updateChunk({
+        chunksQueued: (this.connectionStatus.chunk.chunksQueued || 0) + 1,
+        queueLength: this.chunkQueue.length
+      });
+      this.updateMic({}, `Chunk queued (FIFO, seq=${(chunk as any).sequence ?? '?'}, silence=${isSilenceChunk}).`);
+
+      // On overflow, prefer dropping silence/empty/low-level first; last resort oldest (speech).
+      while (this.chunkQueue.length > MAX_CHUNK_QUEUE_LENGTH) {
+        let dropIdx = -1;
+        for (let i = 0; i < this.chunkQueue.length; i++) {
+          if (this.chunkQueue[i].isSilence) {
+            dropIdx = i;
+            break;
+          }
+        }
+        if (dropIdx >= 0) {
+          this.chunkQueue.splice(dropIdx, 1);
+          this.updateChunk({
+            droppedDueToSilence: (this.connectionStatus.chunk.droppedDueToSilence || 0) + 1,
+            chunksDropped: (this.connectionStatus.chunk.chunksDropped || 0) + 1,
+            queueLength: this.chunkQueue.length
+          });
+          this.updateMic({}, 'Chunk dropped (silence during backpressure; preserving speech order in FIFO).');
+        } else {
+          this.chunkQueue.shift();
+          this.updateChunk({
+            droppedDueToOverflow: (this.connectionStatus.chunk.droppedDueToOverflow || 0) + 1,
+            chunksDropped: (this.connectionStatus.chunk.chunksDropped || 0) + 1,
+            queueLength: this.chunkQueue.length
+          });
+          this.updateMic({}, 'Chunk dropped (oldest speech; FIFO overflow after exhausting silence).');
+        }
       }
-      this.pendingChunk = chunk;
-      this.updateChunk({ chunksQueued: (this.connectionStatus.chunk.chunksQueued || 0) + 1 });
-      this.updateMic({}, 'Chunk queued (latest wins; request already in flight).');
+      this.updateChunk({ queueLength: this.chunkQueue.length });
       return;
     }
+
     if (this.status !== 'listening') {
       this.updateMic({}, `Chunk skipped: provider status is ${this.status}.`);
       return;
     }
+
     this.busy = true;
     const receivedBefore = this.connectionStatus.chunk.chunksReceivedBySidecar;
     const returnedBefore = this.connectionStatus.chunk.chunksReturnedFromSidecar;
     const timeoutHandle = this.setResponseTimeout();
+    const transcribeStart = (this.now ? this.now() : Date.now());
     try {
+      this.processingSequence += 1;
       this.updateChunk({
         chunksSentToMain: this.connectionStatus.chunk.chunksSentToMain + 1,
         pendingResponses: this.connectionStatus.chunk.pendingResponses + 1,
-        warningMessage: null
+        warningMessage: null,
+        processingSequence: this.processingSequence,
+        lastChunkSequence: (chunk as any).sequence ?? this.processingSequence,
+        queueLength: this.chunkQueue.length
       });
       this.setConnectionStatus({ modelPhase: 'transcribing' });
-      this.updateMic({ captureState: 'chunk-sent' }, `IPC send to main: ${byteLength} byte ${chunk.format} chunk.`);
+      this.updateMic({ captureState: 'chunk-sent' }, `IPC send to main: ${byteLength} byte ${chunk.format} chunk. (seq=${(chunk as any).sequence ?? '?'})`);
       const result = await this.getBridge().transcribeLocalWhisperChunk({
         audioData: chunk.audioData,
         mimeType: chunk.mimeType,
@@ -649,13 +716,33 @@ export class LocalWhisperAsrProvider implements AsrProvider {
         headerSignature: chunk.headerSignature,
         settings: this.settings
       });
+      const transcribeEnd = (this.now ? this.now() : Date.now());
+      const durationMs = transcribeEnd - transcribeStart;
+      this.totalTranscriptionTimeMs += durationMs;
+      this.transcriptionCount += 1;
+      const avgMs = this.transcriptionCount > 0 ? this.totalTranscriptionTimeMs / this.transcriptionCount : 0;
       if (this.connectionStatus.chunk.chunksReceivedBySidecar <= receivedBefore) {
         this.updateChunk({ chunksReceivedBySidecar: receivedBefore + 1 });
       }
       if (this.connectionStatus.chunk.chunksReturnedFromSidecar <= returnedBefore) {
         this.updateChunk({ chunksReturnedFromSidecar: returnedBefore + 1 });
       }
-      this.updateChunk({ warningMessage: null, lastSidecarError: null });
+      this.updateChunk({
+        warningMessage: null,
+        lastSidecarError: null,
+        lastTranscriptionDurationMs: durationMs,
+        avgTranscriptionDurationMs: avgMs,
+        queueLength: this.chunkQueue.length
+      });
+
+      // Realtime warning if backing up
+      const chunkDurMs = (chunk.durationSeconds || 4) * 1000;
+      if (avgMs > chunkDurMs * 0.9) {
+        const rec = ' Consider smaller/faster model (e.g. "tiny" or "base" with int8) or CUDA device in Local Whisper settings.';
+        this.updateChunk({ warningMessage: `Whisper is slower than realtime; queue is backing up.${rec}` });
+        this.updateMic({}, `Whisper slower than realtime (avg ${avgMs.toFixed(0)}ms vs chunk ~${chunkDurMs.toFixed(0)}ms).${rec}`);
+      }
+
       this.updateMic({ captureState: 'chunk-returned' }, 'Sidecar response received.');
       await this.acceptTranscriptResult(result);
     } catch (error) {
@@ -668,11 +755,10 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       this.updateChunk({ pendingResponses: Math.max(0, this.connectionStatus.chunk.pendingResponses - 1) });
       this.busy = false;
       this.startChunkWatchdog();
-      // Drain latest queued (if any) after this response; latest-wins means intermediates were dropped already.
-      if (this.pendingChunk) {
-        const next = this.pendingChunk;
-        this.pendingChunk = null;
-        // Defer to avoid deep stack after await; will hit non-busy path and send.
+      // FIFO drain: process oldest next (preserves spoken order). Defer to not stack after await.
+      if (this.chunkQueue.length > 0) {
+        const next = this.chunkQueue.shift();
+        this.updateChunk({ queueLength: this.chunkQueue.length });
         void Promise.resolve().then(() => this.acceptEncodedAudioChunk(next).catch((e) => {
           this.updateMic({}, `Queued chunk dispatch error: ${this.errorMessage(e, 'unknown')}`);
         }));
@@ -870,6 +956,14 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       chunksReturnedFromSidecar: Math.max(current.chunksReturnedFromSidecar, remote.chunksReturnedFromSidecar),
       chunksEmpty: Math.max(current.chunksEmpty, remote.chunksEmpty),
       chunksFailed: Math.max(current.chunksFailed, remote.chunksFailed),
+      queueLength: Math.max(current.queueLength, remote.queueLength || 0),
+      maxQueueLength: Math.max(current.maxQueueLength, remote.maxQueueLength || 4),
+      lastChunkSequence: Math.max(current.lastChunkSequence, remote.lastChunkSequence || 0),
+      processingSequence: Math.max(current.processingSequence, remote.processingSequence || 0),
+      lastTranscriptionDurationMs: remote.lastTranscriptionDurationMs || current.lastTranscriptionDurationMs,
+      avgTranscriptionDurationMs: remote.avgTranscriptionDurationMs || current.avgTranscriptionDurationMs,
+      droppedDueToOverflow: Math.max(current.droppedDueToOverflow, remote.droppedDueToOverflow || 0),
+      droppedDueToSilence: Math.max(current.droppedDueToSilence, remote.droppedDueToSilence || 0),
       pendingResponses: Math.max(current.pendingResponses, remote.pendingResponses),
       lastChunkBytes: Math.max(current.lastChunkBytes, remote.lastChunkBytes),
       lastChunkFormat: remote.lastChunkFormat || current.lastChunkFormat,
@@ -1149,12 +1243,17 @@ export class LocalWhisperAsrProvider implements AsrProvider {
               const samples = takeSamples(buffers, targetSamples);
               bufferedSamples -= targetSamples;
               sequence += 1;
+              // Compute simple RMS for pre-transcribe silence detection (for overflow drop preference)
+              let sumSq = 0;
+              for (let i = 0; i < samples.length; i++) sumSq += samples[i] * samples[i];
+              const rmsLevel = samples.length > 0 ? Math.sqrt(sumSq / samples.length) : 0;
               const audioData = encodePcmWav(samples, sampleRate);
               options.onChunk({
                 audioData,
                 sampleRate,
                 durationSeconds: samples.length / sampleRate,
-                sequence
+                sequence,
+                rmsLevel
               });
             }
           } catch (error) {
