@@ -2,6 +2,7 @@ import type { ChangeEvent } from 'react';
 import { DebugPanel } from './DebugPanel';
 import { ShortcutHelp } from './ShortcutHelp';
 import { StatusIndicator } from './StatusIndicator';
+import { TortureTestPanel } from './TortureTestPanel';
 import type { AlignmentResult, DisplaySettings, FollowState, ManuscriptModel, TranscriptDelta } from '../domain/types';
 
 type Props = {
@@ -180,6 +181,12 @@ export function ControlPanel(props: Props) {
           <button type="button" onClick={onStopMock} disabled={!isMockPlaying}>Stop Mock</button>
         </div>
       </section>
+
+      <TortureTestPanel
+        model={model}
+        currentTokenIndex={currentTokenIndex}
+        onLoadManuscript={onManuscriptTextChange}
+      />
 
       <section className="panel-section">
         <h2>Search</h2>

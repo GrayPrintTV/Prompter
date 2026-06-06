@@ -14,6 +14,7 @@ Windows-first Electron + React desktop teleprompter for audiobook and voiceover 
 - Manual sentence and paragraph recovery controls.
 - Keyboard shortcuts suitable for Stream Deck hotkey mapping.
 - Debug panel with transcript buffer, match, confidence, token position, search window, and reason.
+- Developer torture-test harness for stepping or autoplaying simulated transcript chunks against the current manuscript.
 - Unit tests for normalization and alignment edge cases.
 
 ## Install
@@ -62,6 +63,22 @@ npm start
 Use the Mock Playback box to enter one transcript chunk per line, then press `Play Mock`. Blank lines or `[pause]` simulate silence. Off-script chunks should hold the prompter instead of moving it.
 
 The Manual Transcript box emits a single transcript delta. Press `Ctrl+Enter` inside the box or click `Inject Transcript`.
+
+## Alignment torture-test harness
+
+Use the `Torture Test` panel to stress-test the aligner without live ASR:
+
+1. Pick a fixture from the dropdown and click `Load Case`, or paste transcript chunks directly into the panel.
+2. Click `Step` to process one transcript chunk at a time.
+3. Click `Auto` to autoplay the sequence, and adjust `Delay` for chunk timing.
+4. Click `Reset` to rerun the sequence from the fixture start point.
+5. Click `Start Current` to run the current script against the app's current manuscript position.
+
+After each chunk, the panel shows the raw chunk, normalized transcript tokens, best manuscript match, confidence score, previous/new/alignment positions, app state, diagnostic code, search window, and movement or hold reason.
+
+Included fixtures cover normal reading, long pauses, off-script profanity/slate notes, repeated sentence flubs, skipped phrases, duplicate common phrases, local backward retakes, false jumps far ahead, chapter headings, and numbers/abbreviations.
+
+Known Phase 0.5 fragility: the repeated-sentence-after-flub fixture currently reproduces a duplicate-phrase failure where the aligner jumps to the later duplicate instead of retreating. The numbers/abbreviations fixture also intentionally holds because Phase 0 normalization does not convert spoken number words such as `two fourteen` into digits like `214`.
 
 ## Keyboard shortcuts
 
