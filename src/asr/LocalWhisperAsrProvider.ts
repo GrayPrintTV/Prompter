@@ -67,6 +67,7 @@ const MAX_TRANSCRIPT_HISTORY = 25;
 const DEFAULT_CHUNK_RESPONSE_TIMEOUT_MS = 15000;
 const MAX_CHUNK_QUEUE_LENGTH = 4; // bounded FIFO, 3-5 recommended for narration latency vs. drop tradeoff
 const SILENCE_RMS_THRESHOLD = 0.005; // conservative threshold for pre-transcribe silence detection on PCM samples (0..1)
+const MAX_QUEUE_LATENCY_MS = 7000; // 6-8s latency budget; if estimated queued audio time exceeds, drop stale (oldest) chunks to prefer current narration over backlog
 const PROVIDER_STATUS_TEXT = new Set([
   'sidecar is running',
   'local whisper sidecar is running',
@@ -174,12 +175,17 @@ function createDefaultChunkDiagnostics(): LocalWhisperChunkDiagnostics {
     chunksFailed: 0,
     queueLength: 0,
     maxQueueLength: 4,
+    estimatedQueueLatencyMs: 0,
     lastChunkSequence: 0,
     processingSequence: 0,
     lastTranscriptionDurationMs: 0,
     avgTranscriptionDurationMs: 0,
+    lastRealtimeFactor: 0,
+    avgRealtimeFactor: 0,
     droppedDueToOverflow: 0,
     droppedDueToSilence: 0,
+    staleChunksDropped: 0,
+    silenceChunksSuppressed: 0,
     lastChunkBytes: 0,
     lastChunkFormat: '',
     lastMimeType: '',
@@ -248,6 +254,8 @@ export class LocalWhisperAsrProvider implements AsrProvider {
   private processingSequence = 0;
   private totalTranscriptionTimeMs = 0;
   private transcriptionCount = 0;
+  private totalRealtimeFactor = 0;
+  private realtimeFactorCount = 0;
   private connectionStatus: LocalWhisperStatus = {
     ...DEFAULT_LOCAL_WHISPER_STATUS,
     mic: createDefaultMicDiagnostics(),
@@ -423,6 +431,8 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       this.processingSequence = 0;
       this.totalTranscriptionTimeMs = 0;
       this.transcriptionCount = 0;
+      this.totalRealtimeFactor = 0;
+      this.realtimeFactorCount = 0;
       this.setProviderStatus('listening', null);
     } catch (error) {
       await this.stop();
@@ -439,6 +449,10 @@ export class LocalWhisperAsrProvider implements AsrProvider {
     this.processingSequence = 0;
     this.totalTranscriptionTimeMs = 0;
     this.transcriptionCount = 0;
+    this.totalRealtimeFactor = 0;
+    this.realtimeFactorCount = 0;
+    this.totalRealtimeFactor = 0;
+    this.realtimeFactorCount = 0;
 
     if (this.mediaStream && !this.connectionStatus.mic.monitorActive) {
       this.stopStream(this.mediaStream);
@@ -628,6 +642,7 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       queueLength: this.chunkQueue.length,
       maxQueueLength: MAX_CHUNK_QUEUE_LENGTH
     });
+    this.updateQueueDiagnostics();
     if (byteLength > 0) {
       this.updateMic(
         {},
@@ -642,45 +657,51 @@ export class LocalWhisperAsrProvider implements AsrProvider {
 
     const isSilenceChunk = (chunk.rmsLevel ?? 1) < SILENCE_RMS_THRESHOLD;
 
-    // FIFO queue for order preservation in narration (oldest spoken first).
+    // Silence suppression *before queueing* (per req): do not send silence to Whisper (prevents post-speech silence backlog).
+    // Count as suppressed (diagnostic), not [empty transcript] in Heard. Still count as recorded.
+    if (isSilenceChunk) {
+      this.updateChunk({ silenceChunksSuppressed: (this.connectionStatus.chunk.silenceChunksSuppressed || 0) + 1 });
+      this.updateQueueDiagnostics();
+      this.updateMic({}, 'Chunk silence-suppressed (below RMS; not queued or sent to Whisper).');
+      return;
+    }
+
+    // FIFO queue for order preservation when short. Latency-aware stale drop if backlog exceeds budget (prefer current over old audio).
     if (this.busy) {
-      // Enqueue this arrival (with silence flag for smart drop on overflow)
-      const queuedItem = { ...chunk, isSilence: isSilenceChunk };
+      // Enqueue this arrival
+      const queuedItem = { ...chunk, isSilence: false };
       this.chunkQueue.push(queuedItem);
       this.updateChunk({
-        chunksQueued: (this.connectionStatus.chunk.chunksQueued || 0) + 1,
-        queueLength: this.chunkQueue.length
+        chunksQueued: (this.connectionStatus.chunk.chunksQueued || 0) + 1
       });
-      this.updateMic({}, `Chunk queued (FIFO, seq=${(chunk as any).sequence ?? '?'}, silence=${isSilenceChunk}).`);
+      this.updateQueueDiagnostics();
+      this.updateMic({}, `Chunk queued (FIFO, seq=${(chunk as any).sequence ?? '?'}) .`);
 
-      // On overflow, prefer dropping silence/empty/low-level first; last resort oldest (speech).
+      // Length-based overflow drop (keep some silence bias if any slipped, but silence suppressed pre).
       while (this.chunkQueue.length > MAX_CHUNK_QUEUE_LENGTH) {
-        let dropIdx = -1;
-        for (let i = 0; i < this.chunkQueue.length; i++) {
-          if (this.chunkQueue[i].isSilence) {
-            dropIdx = i;
-            break;
-          }
-        }
-        if (dropIdx >= 0) {
-          this.chunkQueue.splice(dropIdx, 1);
-          this.updateChunk({
-            droppedDueToSilence: (this.connectionStatus.chunk.droppedDueToSilence || 0) + 1,
-            chunksDropped: (this.connectionStatus.chunk.chunksDropped || 0) + 1,
-            queueLength: this.chunkQueue.length
-          });
-          this.updateMic({}, 'Chunk dropped (silence during backpressure; preserving speech order in FIFO).');
-        } else {
-          this.chunkQueue.shift();
-          this.updateChunk({
-            droppedDueToOverflow: (this.connectionStatus.chunk.droppedDueToOverflow || 0) + 1,
-            chunksDropped: (this.connectionStatus.chunk.chunksDropped || 0) + 1,
-            queueLength: this.chunkQueue.length
-          });
-          this.updateMic({}, 'Chunk dropped (oldest speech; FIFO overflow after exhausting silence).');
-        }
+        // drop oldest (stale) as last resort for length
+        this.chunkQueue.shift();
+        this.updateChunk({
+          droppedDueToOverflow: (this.connectionStatus.chunk.droppedDueToOverflow || 0) + 1,
+          chunksDropped: (this.connectionStatus.chunk.chunksDropped || 0) + 1
+        });
+        this.updateQueueDiagnostics();
+        this.updateMic({}, 'Chunk dropped (length overflow; oldest).');
       }
-      this.updateChunk({ queueLength: this.chunkQueue.length });
+
+      // Latency-aware: drop stale (oldest) if estimated queued audio duration > budget (6-8s). This is the key for teleprompter: drop backlog rather than process forever-old chunks.
+      let latency = this.computeQueueLatencyMs();
+      while (latency > MAX_QUEUE_LATENCY_MS && this.chunkQueue.length > 0) {
+        this.chunkQueue.shift();
+        this.updateChunk({
+          staleChunksDropped: (this.connectionStatus.chunk.staleChunksDropped || 0) + 1,
+          chunksDropped: (this.connectionStatus.chunk.chunksDropped || 0) + 1
+        });
+        this.updateQueueDiagnostics();
+        latency = this.computeQueueLatencyMs();
+        this.updateMic({}, 'Chunk dropped (stale; queue latency budget exceeded, prefer current narration).');
+      }
+      this.updateQueueDiagnostics();
       return;
     }
 
@@ -721,6 +742,14 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       this.totalTranscriptionTimeMs += durationMs;
       this.transcriptionCount += 1;
       const avgMs = this.transcriptionCount > 0 ? this.totalTranscriptionTimeMs / this.transcriptionCount : 0;
+
+      // Realtime factor for this chunk: transcribe time / audio duration ( >1 means behind realtime)
+      const audioDurMs = (chunk.durationSeconds || 2) * 1000;
+      const rtFactor = audioDurMs > 0 ? durationMs / audioDurMs : 0;
+      this.totalRealtimeFactor += rtFactor;
+      this.realtimeFactorCount += 1;
+      const avgRtFactor = this.realtimeFactorCount > 0 ? this.totalRealtimeFactor / this.realtimeFactorCount : 0;
+
       if (this.connectionStatus.chunk.chunksReceivedBySidecar <= receivedBefore) {
         this.updateChunk({ chunksReceivedBySidecar: receivedBefore + 1 });
       }
@@ -732,15 +761,21 @@ export class LocalWhisperAsrProvider implements AsrProvider {
         lastSidecarError: null,
         lastTranscriptionDurationMs: durationMs,
         avgTranscriptionDurationMs: avgMs,
+        lastRealtimeFactor: rtFactor,
+        avgRealtimeFactor: avgRtFactor,
         queueLength: this.chunkQueue.length
       });
+      this.updateQueueDiagnostics();
 
-      // Realtime warning if backing up
-      const chunkDurMs = (chunk.durationSeconds || 4) * 1000;
-      if (avgMs > chunkDurMs * 0.9) {
-        const rec = ' Consider smaller/faster model (e.g. "tiny" or "base" with int8) or CUDA device in Local Whisper settings.';
-        this.updateChunk({ warningMessage: `Whisper is slower than realtime; queue is backing up.${rec}` });
-        this.updateMic({}, `Whisper slower than realtime (avg ${avgMs.toFixed(0)}ms vs chunk ~${chunkDurMs.toFixed(0)}ms).${rec}`);
+      // Latency / backlog warning with recommendation (per req)
+      const estLatency = this.computeQueueLatencyMs();
+      const chunkDurMs = audioDurMs;
+      const isBehind = (avgMs > chunkDurMs * 0.8) || (estLatency > MAX_QUEUE_LATENCY_MS * 0.5) || (avgRtFactor > 0.9);
+      if (isBehind) {
+        const rec = ' try base.en, tiny.en, shorter chunks, or CUDA';
+        const msg = `Whisper behind (RT factor ~${avgRtFactor.toFixed(1)}, queue latency ~${estLatency}ms); queue backing up.${rec}`;
+        this.updateChunk({ warningMessage: msg });
+        this.updateMic({}, msg);
       }
 
       this.updateMic({ captureState: 'chunk-returned' }, 'Sidecar response received.');
@@ -755,10 +790,11 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       this.updateChunk({ pendingResponses: Math.max(0, this.connectionStatus.chunk.pendingResponses - 1) });
       this.busy = false;
       this.startChunkWatchdog();
+      this.updateQueueDiagnostics();
       // FIFO drain: process oldest next (preserves spoken order). Defer to not stack after await.
       if (this.chunkQueue.length > 0) {
         const next = this.chunkQueue.shift();
-        this.updateChunk({ queueLength: this.chunkQueue.length });
+        this.updateQueueDiagnostics();
         void Promise.resolve().then(() => this.acceptEncodedAudioChunk(next).catch((e) => {
           this.updateMic({}, `Queued chunk dispatch error: ${this.errorMessage(e, 'unknown')}`);
         }));
@@ -942,6 +978,18 @@ export class LocalWhisperAsrProvider implements AsrProvider {
     });
   }
 
+  private computeQueueLatencyMs(): number {
+    return this.chunkQueue.reduce((sum: number, c: any) => sum + ((c.durationSeconds || 0) * 1000), 0);
+  }
+
+  private updateQueueDiagnostics() {
+    const latency = this.computeQueueLatencyMs();
+    this.updateChunk({
+      queueLength: this.chunkQueue.length,
+      estimatedQueueLatencyMs: latency
+    });
+  }
+
   private mergeChunkDiagnostics(remote?: LocalWhisperChunkDiagnostics) {
     const current = this.connectionStatus.chunk;
     if (!remote) return current;
@@ -958,12 +1006,17 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       chunksFailed: Math.max(current.chunksFailed, remote.chunksFailed),
       queueLength: Math.max(current.queueLength, remote.queueLength || 0),
       maxQueueLength: Math.max(current.maxQueueLength, remote.maxQueueLength || 4),
+      estimatedQueueLatencyMs: Math.max(current.estimatedQueueLatencyMs, remote.estimatedQueueLatencyMs || 0),
       lastChunkSequence: Math.max(current.lastChunkSequence, remote.lastChunkSequence || 0),
       processingSequence: Math.max(current.processingSequence, remote.processingSequence || 0),
       lastTranscriptionDurationMs: remote.lastTranscriptionDurationMs || current.lastTranscriptionDurationMs,
       avgTranscriptionDurationMs: remote.avgTranscriptionDurationMs || current.avgTranscriptionDurationMs,
+      lastRealtimeFactor: remote.lastRealtimeFactor || current.lastRealtimeFactor,
+      avgRealtimeFactor: remote.avgRealtimeFactor || current.avgRealtimeFactor,
       droppedDueToOverflow: Math.max(current.droppedDueToOverflow, remote.droppedDueToOverflow || 0),
       droppedDueToSilence: Math.max(current.droppedDueToSilence, remote.droppedDueToSilence || 0),
+      staleChunksDropped: Math.max(current.staleChunksDropped, remote.staleChunksDropped || 0),
+      silenceChunksSuppressed: Math.max(current.silenceChunksSuppressed, remote.silenceChunksSuppressed || 0),
       pendingResponses: Math.max(current.pendingResponses, remote.pendingResponses),
       lastChunkBytes: Math.max(current.lastChunkBytes, remote.lastChunkBytes),
       lastChunkFormat: remote.lastChunkFormat || current.lastChunkFormat,

@@ -361,12 +361,18 @@ export function ControlPanel(props: Props) {
               <dd>{localWhisperStatus.chunk.chunksFailed}</dd>
               <dt>Queue</dt>
               <dd>{localWhisperStatus.chunk.queueLength}/{localWhisperStatus.chunk.maxQueueLength}</dd>
+              <dt>Est Latency</dt>
+              <dd>{localWhisperStatus.chunk.estimatedQueueLatencyMs || 0}ms</dd>
               <dt>Seq (c/p)</dt>
               <dd>c{localWhisperStatus.chunk.lastChunkSequence || 0}/p{localWhisperStatus.chunk.processingSequence || 0}</dd>
               <dt>Transcribe</dt>
               <dd>{localWhisperStatus.chunk.lastTranscriptionDurationMs || 0}ms / ~{Math.round(localWhisperStatus.chunk.avgTranscriptionDurationMs || 0)}ms</dd>
-              <dt>Dropped (ovf/sil)</dt>
-              <dd>{localWhisperStatus.chunk.droppedDueToOverflow || 0}/{localWhisperStatus.chunk.droppedDueToSilence || 0}</dd>
+              <dt>RT Factor</dt>
+              <dd>{(localWhisperStatus.chunk.lastRealtimeFactor || 0).toFixed(1)} / ~{(localWhisperStatus.chunk.avgRealtimeFactor || 0).toFixed(1)}</dd>
+              <dt>Dropped (ovf/sil/stale)</dt>
+              <dd>{localWhisperStatus.chunk.droppedDueToOverflow || 0}/{localWhisperStatus.chunk.droppedDueToSilence || 0}/{localWhisperStatus.chunk.staleChunksDropped || 0}</dd>
+              <dt>Sil Suppressed</dt>
+              <dd>{localWhisperStatus.chunk.silenceChunksSuppressed || 0}</dd>
               <dt>Bytes</dt>
               <dd>{localWhisperStatus.chunk.lastChunkBytes || 'None'}</dd>
               <dt>Format</dt>

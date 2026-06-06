@@ -176,12 +176,17 @@ export type LocalWhisperChunkDiagnostics = {
   chunksFailed: number;
   queueLength: number;
   maxQueueLength: number;
+  estimatedQueueLatencyMs: number;
   lastChunkSequence: number;
   processingSequence: number;
   lastTranscriptionDurationMs: number;
   avgTranscriptionDurationMs: number;
+  lastRealtimeFactor: number;
+  avgRealtimeFactor: number;
   droppedDueToOverflow: number;
   droppedDueToSilence: number;
+  staleChunksDropped: number;
+  silenceChunksSuppressed: number;
   lastChunkBytes: number;
   lastChunkFormat: string;
   lastMimeType: string;

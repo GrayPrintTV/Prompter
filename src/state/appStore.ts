@@ -15,7 +15,7 @@ export const DEFAULT_LOCAL_WHISPER_SETTINGS: LocalWhisperSettings = {
   modelName: 'turbo',
   device: 'cpu',
   computeType: 'int8',
-  chunkDurationSeconds: 4
+  chunkDurationSeconds: 2
 };
 
 export const SAMPLE_MANUSCRIPT = `The studio light blinked once, and Mara took that as permission to begin.
