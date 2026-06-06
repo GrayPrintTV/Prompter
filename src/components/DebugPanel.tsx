@@ -45,7 +45,7 @@ export function DebugPanel({
         </dd>
         <dt>Reason</dt>
         <dd>{alignment.reason}</dd>
-        <dt>Trace (recv \u2192 align \u2192 state \u2192 scroll)</dt>
+        <dt>Alignment Trace (raw/norm/match/conf/action/scroll; collapsed by default in dev tools)</dt>
         <dd>
           {traceLog && traceLog.length ? (
             traceLog.slice(-6).map((entry, i) => (
