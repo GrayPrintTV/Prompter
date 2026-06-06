@@ -258,6 +258,42 @@ export function ControlPanel(props: Props) {
               <dd>{formatDiagnosticBoolean(localWhisperStatus.bridge.localWhisperBridgeAvailable)}</dd>
               <dt>IPC handlers</dt>
               <dd>{formatDiagnosticBoolean(localWhisperStatus.bridge.ipcHandlersRegistered)}</dd>
+              <dt>prompterApi</dt>
+              <dd>{localWhisperStatus.bridge.prompterApiType}</dd>
+              <dt>ping</dt>
+              <dd>
+                {localWhisperStatus.bridge.pingType === 'function'
+                  ? localWhisperStatus.bridge.pingResult ?? 'No result'
+                  : localWhisperStatus.bridge.pingType}
+              </dd>
+              <dt>App path</dt>
+              <dd>{localWhisperStatus.bridge.appPath ?? 'Unknown'}</dd>
+              <dt>CWD</dt>
+              <dd>{localWhisperStatus.bridge.cwd ?? 'Unknown'}</dd>
+              <dt>Main dir</dt>
+              <dd>{localWhisperStatus.bridge.mainDirname ?? 'Unknown'}</dd>
+              <dt>Preload</dt>
+              <dd>{localWhisperStatus.bridge.preloadPath ?? 'Unknown'}</dd>
+              <dt>Preload exists</dt>
+              <dd>{formatDiagnosticBoolean(localWhisperStatus.bridge.preloadExists)}</dd>
+              <dt>Dev mode</dt>
+              <dd>{formatDiagnosticBoolean(localWhisperStatus.bridge.isDev)}</dd>
+              <dt>Dev URL</dt>
+              <dd>{localWhisperStatus.bridge.viteDevServerUrl ?? 'None'}</dd>
+              <dt>Preload status</dt>
+              <dd>
+                {localWhisperStatus.bridge.preloadDiagnosticStarted === null
+                  ? 'Unknown'
+                  : localWhisperStatus.bridge.preloadDiagnosticExposed
+                    ? 'prompterApi exposed'
+                    : 'preload started, API not exposed'}
+              </dd>
+              <dt>Preload error</dt>
+              <dd>
+                {localWhisperStatus.bridge.preloadErrorMessage ??
+                  localWhisperStatus.bridge.preloadDiagnosticErrorMessage ??
+                  'None'}
+              </dd>
               <dt>Sidecar</dt>
               <dd>{formatSidecarPhase(localWhisperStatus.modelPhase)}</dd>
             </>

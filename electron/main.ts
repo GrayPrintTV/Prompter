@@ -80,7 +80,52 @@ type LocalWhisperStatus = {
     localWhisperBridgeAvailable: boolean;
     ipcHandlersRegistered: boolean | null;
     errorMessage: string | null;
+    prompterApiType: string;
+    pingType: string;
+    pingResult: string | null;
+    appPath: string | null;
+    cwd: string | null;
+    mainDirname: string | null;
+    preloadPath: string | null;
+    preloadExists: boolean | null;
+    isDev: boolean | null;
+    viteDevServerUrl: string | null;
+    preloadErrorMessage: string | null;
+    preloadErrorStack: string | null;
+    preloadDiagnosticStarted: boolean | null;
+    preloadDiagnosticExposed: boolean | null;
+    preloadDiagnosticErrorMessage: string | null;
+    preloadDiagnosticErrorStack: string | null;
   };
+};
+
+type PreloadExposeDiagnostics = {
+  started: boolean;
+  exposed: boolean;
+  errorMessage: string | null;
+  errorStack: string | null;
+};
+
+type MainPreloadError = {
+  preloadPath: string;
+  message: string;
+  stack: string | null;
+};
+
+type MainRuntimeDiagnostics = {
+  appPath: string | null;
+  cwd: string | null;
+  mainDirname: string | null;
+  preloadPath: string | null;
+  preloadExists: boolean | null;
+  isDev: boolean | null;
+  viteDevServerUrl: string | null;
+  preloadErrorMessage: string | null;
+  preloadErrorStack: string | null;
+  preloadDiagnosticStarted: boolean | null;
+  preloadDiagnosticExposed: boolean | null;
+  preloadDiagnosticErrorMessage: string | null;
+  preloadDiagnosticErrorStack: string | null;
 };
 
 type PendingWhisperRequest = {
@@ -102,6 +147,8 @@ let localWhisperSidecarReady = false;
 const pendingWhisperRequests = new Map<string, PendingWhisperRequest>();
 const sidecarReadyWaiters = new Set<SidecarReadyWaiter>();
 let nextWhisperRequestId = 1;
+let latestPreloadDiagnostics: PreloadExposeDiagnostics | null = null;
+let latestPreloadError: MainPreloadError | null = null;
 let localWhisperStatus: LocalWhisperStatus = {
   providerId: 'local-whisper',
   configured: true,
@@ -135,9 +182,92 @@ let localWhisperStatus: LocalWhisperStatus = {
     electronBridgeAvailable: true,
     localWhisperBridgeAvailable: true,
     ipcHandlersRegistered: true,
-    errorMessage: null
+    errorMessage: null,
+    prompterApiType: 'object',
+    pingType: 'function',
+    pingResult: 'pong',
+    appPath: null,
+    cwd: null,
+    mainDirname: null,
+    preloadPath: null,
+    preloadExists: null,
+    isDev: null,
+    viteDevServerUrl: null,
+    preloadErrorMessage: null,
+    preloadErrorStack: null,
+    preloadDiagnosticStarted: null,
+    preloadDiagnosticExposed: null,
+    preloadDiagnosticErrorMessage: null,
+    preloadDiagnosticErrorStack: null
   }
 };
+
+function safeString(value: () => string) {
+  try {
+    return value();
+  } catch (error) {
+    return error instanceof Error ? `Unavailable: ${error.message}` : 'Unavailable';
+  }
+}
+
+function runtimeDiagnostics(preloadPath: string): MainRuntimeDiagnostics {
+  return {
+    appPath: safeString(() => app.getAppPath()),
+    cwd: safeString(() => process.cwd()),
+    mainDirname: __dirname,
+    preloadPath,
+    preloadExists: existsSync(preloadPath),
+    isDev,
+    viteDevServerUrl: process.env.VITE_DEV_SERVER_URL ?? null,
+    preloadErrorMessage: latestPreloadError?.message ?? null,
+    preloadErrorStack: latestPreloadError?.stack ?? null,
+    preloadDiagnosticStarted: latestPreloadDiagnostics?.started ?? null,
+    preloadDiagnosticExposed: latestPreloadDiagnostics?.exposed ?? null,
+    preloadDiagnosticErrorMessage: latestPreloadDiagnostics?.errorMessage ?? null,
+    preloadDiagnosticErrorStack: latestPreloadDiagnostics?.errorStack ?? null
+  };
+}
+
+function currentPreloadPath() {
+  return path.join(__dirname, 'preload.js');
+}
+
+function mainBridgeDiagnostics() {
+  const diagnostics = runtimeDiagnostics(currentPreloadPath());
+  return {
+    electronBridgeAvailable: true,
+    localWhisperBridgeAvailable: true,
+    ipcHandlersRegistered: true,
+    errorMessage: latestPreloadError?.message ?? latestPreloadDiagnostics?.errorMessage ?? null,
+    prompterApiType: 'object',
+    pingType: 'function',
+    pingResult: 'pong',
+    ...diagnostics
+  };
+}
+
+function localWhisperStatusForRenderer(): LocalWhisperStatus {
+  return {
+    ...localWhisperStatus,
+    bridge: mainBridgeDiagnostics()
+  };
+}
+
+function logRuntimeDiagnostics(preloadPath: string) {
+  const diagnostics = runtimeDiagnostics(preloadPath);
+  console.log('[main] Electron runtime diagnostics', diagnostics);
+}
+
+function publishPreloadErrorToRenderer() {
+  if (!mainWindow || !latestPreloadError) return;
+  const payload = JSON.stringify(latestPreloadError).replace(/</g, '\\u003c');
+  void mainWindow.webContents.executeJavaScript(
+    `window.__prompterMainPreloadError = ${payload};` +
+      `window.dispatchEvent(new CustomEvent('prompter-main-preload-error', { detail: ${payload} }));`
+  ).catch((error) => {
+    console.error('[main] failed to publish preload error to renderer', error);
+  });
+}
 
 function parseEnvFile(filePath: string) {
   if (!existsSync(filePath)) return;
@@ -225,7 +355,7 @@ function patchLocalWhisperStatus(patch: Partial<LocalWhisperStatus>) {
     },
     transcriptHistory: patch.transcriptHistory ?? localWhisperStatus.transcriptHistory
   };
-  mainWindow?.webContents.send('local-whisper:status', localWhisperStatus);
+  mainWindow?.webContents.send('local-whisper:status', localWhisperStatusForRenderer());
 }
 
 function localWhisperTranscriptHistoryItem(text: string) {
@@ -453,10 +583,13 @@ async function startLocalWhisperSidecar(settings: LocalWhisperSettings) {
     device: settings.device,
     computeType: settings.computeType
   });
-  return localWhisperStatus;
+  return localWhisperStatusForRenderer();
 }
 
 function createMainWindow() {
+  const preloadPath = currentPreloadPath();
+  logRuntimeDiagnostics(preloadPath);
+
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 920,
@@ -466,11 +599,29 @@ function createMainWindow() {
     backgroundColor: '#101418',
     title: 'Narration Prompter',
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: preloadPath,
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      sandbox: false
     }
   });
+
+  mainWindow.webContents.on('preload-error', (_event, failedPreloadPath, error) => {
+    latestPreloadError = {
+      preloadPath: failedPreloadPath,
+      message: error.message,
+      stack: error.stack ?? null
+    };
+    console.error('[main] preload-error', latestPreloadError);
+    publishPreloadErrorToRenderer();
+  });
+
+  mainWindow.webContents.on('console-message', (_event, level, message, lineNumber, sourceId) => {
+    const levelName = ['verbose', 'info', 'warning', 'error'][level] ?? String(level);
+    console.log(`[renderer-console:${levelName}] ${message} (${sourceId}:${lineNumber})`);
+  });
+
+  mainWindow.webContents.on('did-finish-load', publishPreloadErrorToRenderer);
 
   mainWindow.once('ready-to-show', () => {
     mainWindow?.show();
@@ -605,14 +756,21 @@ ipcMain.handle('openai-realtime:createClientSession', async () => {
   };
 });
 
-ipcMain.handle('bridge:getDiagnostics', () => ({
-  electronBridgeAvailable: true,
-  localWhisperBridgeAvailable: true,
-  ipcHandlersRegistered: true,
-  errorMessage: null
-}));
+ipcMain.on('preload:diagnostic', (_event, diagnostics: PreloadExposeDiagnostics) => {
+  latestPreloadDiagnostics = {
+    started: Boolean(diagnostics.started),
+    exposed: Boolean(diagnostics.exposed),
+    errorMessage: diagnostics.errorMessage ? String(diagnostics.errorMessage) : null,
+    errorStack: diagnostics.errorStack ? String(diagnostics.errorStack) : null
+  };
+  console.log('[main] preload diagnostic', latestPreloadDiagnostics);
+});
 
-ipcMain.handle('local-whisper:getStatus', () => localWhisperStatus);
+ipcMain.handle('bridge:getDiagnostics', () => {
+  return mainBridgeDiagnostics();
+});
+
+ipcMain.handle('local-whisper:getStatus', () => localWhisperStatusForRenderer());
 
 ipcMain.handle('local-whisper:start', async (_event, settings: LocalWhisperSettings) => {
   return startLocalWhisperSidecar(settings);
@@ -635,7 +793,7 @@ ipcMain.handle('local-whisper:stop', () => {
       pendingResponses: 0
     }
   });
-  return localWhisperStatus;
+  return localWhisperStatusForRenderer();
 });
 
 ipcMain.handle(

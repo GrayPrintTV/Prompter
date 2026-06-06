@@ -265,6 +265,17 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const refreshLocalWhisperDiagnostics = () => {
+      localWhisperProviderRef.current
+        .refreshStatus()
+        .then(setLocalWhisperStatus)
+        .catch(() => undefined);
+    };
+    window.addEventListener('prompter-main-preload-error', refreshLocalWhisperDiagnostics);
+    return () => window.removeEventListener('prompter-main-preload-error', refreshLocalWhisperDiagnostics);
+  }, []);
+
+  useEffect(() => {
     const timer = window.setInterval(() => {
       setInputLevel((level) => Math.max(0, level - 0.08));
     }, 240);

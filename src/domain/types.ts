@@ -180,6 +180,35 @@ export type ElectronBridgeDiagnostics = {
   localWhisperBridgeAvailable: boolean;
   ipcHandlersRegistered: boolean | null;
   errorMessage: string | null;
+  prompterApiType: string;
+  pingType: string;
+  pingResult: string | null;
+  appPath: string | null;
+  cwd: string | null;
+  mainDirname: string | null;
+  preloadPath: string | null;
+  preloadExists: boolean | null;
+  isDev: boolean | null;
+  viteDevServerUrl: string | null;
+  preloadErrorMessage: string | null;
+  preloadErrorStack: string | null;
+  preloadDiagnosticStarted: boolean | null;
+  preloadDiagnosticExposed: boolean | null;
+  preloadDiagnosticErrorMessage: string | null;
+  preloadDiagnosticErrorStack: string | null;
+};
+
+export type PreloadExposeDiagnostics = {
+  started: boolean;
+  exposed: boolean;
+  errorMessage: string | null;
+  errorStack: string | null;
+};
+
+export type MainPreloadError = {
+  preloadPath: string;
+  message: string;
+  stack: string | null;
 };
 
 export type LocalWhisperStatus = {

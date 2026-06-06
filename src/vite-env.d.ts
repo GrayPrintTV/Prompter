@@ -6,6 +6,7 @@ import type {
   LocalWhisperSettings,
   LocalWhisperStatus,
   LocalWhisperTranscriptResult,
+  MainPreloadError,
   OpenAiRealtimeClientSession
 } from './domain/types';
 
@@ -17,7 +18,17 @@ type ImportedTextFile = {
 
 declare global {
   interface Window {
+    __prompterMainPreloadError?: MainPreloadError;
+    prompterPreloadDiagnostics?: {
+      getDiagnostics(): {
+        started: boolean;
+        exposed: boolean;
+        errorMessage: string | null;
+        errorStack: string | null;
+      };
+    };
     prompterApi?: {
+      ping(): string;
       openTextFile(): Promise<ImportedTextFile | null>;
       toggleFullScreen(): Promise<boolean>;
       toggleAlwaysOnTop(): Promise<boolean>;

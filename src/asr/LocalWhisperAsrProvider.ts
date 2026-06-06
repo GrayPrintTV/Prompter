@@ -13,6 +13,7 @@ type Listener = (delta: TranscriptDelta) => void;
 type StatusListener = (status: LocalWhisperStatus) => void;
 
 type LocalWhisperBridge = {
+  ping(): string;
   getBridgeDiagnostics?(): Promise<ElectronBridgeDiagnostics>;
   getLocalWhisperStatus(): Promise<LocalWhisperStatus>;
   startLocalWhisper(settings: LocalWhisperSettings): Promise<LocalWhisperStatus>;
@@ -70,7 +71,23 @@ function createDefaultBridgeDiagnostics(): ElectronBridgeDiagnostics {
     electronBridgeAvailable: false,
     localWhisperBridgeAvailable: false,
     ipcHandlersRegistered: null,
-    errorMessage: 'Bridge has not been checked.'
+    errorMessage: 'Bridge has not been checked.',
+    prompterApiType: 'undefined',
+    pingType: 'undefined',
+    pingResult: null,
+    appPath: null,
+    cwd: null,
+    mainDirname: null,
+    preloadPath: null,
+    preloadExists: null,
+    isDev: null,
+    viteDevServerUrl: null,
+    preloadErrorMessage: null,
+    preloadErrorStack: null,
+    preloadDiagnosticStarted: null,
+    preloadDiagnosticExposed: null,
+    preloadDiagnosticErrorMessage: null,
+    preloadDiagnosticErrorStack: null
   };
 }
 
@@ -668,21 +685,56 @@ export class LocalWhisperAsrProvider implements AsrProvider {
 
   private inspectBridge(): ElectronBridgeDiagnostics {
     const bridge = (this.deps.bridge ?? this.windowBridge()) as Partial<LocalWhisperBridge> | undefined;
+    const preloadDiagnostics = this.readPreloadDiagnostics();
+    const mainPreloadError = this.readMainPreloadError();
     const electronBridgeAvailable = Boolean(bridge);
+    const prompterApiType = this.deps.bridge
+      ? 'object'
+      : typeof window === 'undefined'
+        ? 'undefined'
+        : typeof window.prompterApi;
+    const pingType = typeof bridge?.ping;
+    let pingResult: string | null = null;
+    if (typeof bridge?.ping === 'function') {
+      try {
+        pingResult = bridge.ping();
+      } catch (error) {
+        pingResult = `error: ${this.errorMessage(error, 'Ping failed.')}`;
+      }
+    }
     const localWhisperBridgeAvailable = Boolean(
+      pingType === 'function' &&
       typeof bridge?.getLocalWhisperStatus === 'function' &&
       typeof bridge.startLocalWhisper === 'function' &&
       typeof bridge.stopLocalWhisper === 'function' &&
       typeof bridge.transcribeLocalWhisperChunk === 'function' &&
       typeof bridge.onLocalWhisperStatus === 'function'
     );
+    const preloadErrorMessage =
+      mainPreloadError?.message ?? preloadDiagnostics?.errorMessage ?? null;
     return {
       electronBridgeAvailable,
       localWhisperBridgeAvailable,
       ipcHandlersRegistered: bridge?.getBridgeDiagnostics ? null : localWhisperBridgeAvailable ? null : false,
+      prompterApiType,
+      pingType,
+      pingResult,
+      appPath: null,
+      cwd: null,
+      mainDirname: null,
+      preloadPath: mainPreloadError?.preloadPath ?? null,
+      preloadExists: null,
+      isDev: null,
+      viteDevServerUrl: null,
+      preloadErrorMessage: mainPreloadError?.message ?? null,
+      preloadErrorStack: mainPreloadError?.stack ?? null,
+      preloadDiagnosticStarted: preloadDiagnostics?.started ?? null,
+      preloadDiagnosticExposed: preloadDiagnostics?.exposed ?? null,
+      preloadDiagnosticErrorMessage: preloadDiagnostics?.errorMessage ?? null,
+      preloadDiagnosticErrorStack: preloadDiagnostics?.errorStack ?? null,
       errorMessage: localWhisperBridgeAvailable
-        ? null
-        : 'Local Whisper bridge unavailable. Are you running inside Electron?'
+        ? preloadErrorMessage
+        : preloadErrorMessage ?? 'Local Whisper bridge unavailable. Are you running inside Electron?'
     };
   }
 
@@ -701,17 +753,36 @@ export class LocalWhisperAsrProvider implements AsrProvider {
 
     try {
       const remoteDiagnostics = await bridge.getBridgeDiagnostics();
-      const diagnostics = {
+      const diagnostics: ElectronBridgeDiagnostics = {
+        ...localDiagnostics,
         ...remoteDiagnostics,
-        electronBridgeAvailable: true,
+        electronBridgeAvailable: localDiagnostics.electronBridgeAvailable,
         localWhisperBridgeAvailable: localDiagnostics.localWhisperBridgeAvailable && remoteDiagnostics.localWhisperBridgeAvailable,
-        errorMessage: remoteDiagnostics.errorMessage
+        prompterApiType: localDiagnostics.prompterApiType,
+        pingType: localDiagnostics.pingType,
+        pingResult: localDiagnostics.pingResult,
+        preloadErrorMessage: remoteDiagnostics.preloadErrorMessage ?? localDiagnostics.preloadErrorMessage,
+        preloadErrorStack: remoteDiagnostics.preloadErrorStack ?? localDiagnostics.preloadErrorStack,
+        preloadDiagnosticStarted:
+          remoteDiagnostics.preloadDiagnosticStarted ?? localDiagnostics.preloadDiagnosticStarted,
+        preloadDiagnosticExposed:
+          remoteDiagnostics.preloadDiagnosticExposed ?? localDiagnostics.preloadDiagnosticExposed,
+        preloadDiagnosticErrorMessage:
+          remoteDiagnostics.preloadDiagnosticErrorMessage ?? localDiagnostics.preloadDiagnosticErrorMessage,
+        preloadDiagnosticErrorStack:
+          remoteDiagnostics.preloadDiagnosticErrorStack ?? localDiagnostics.preloadDiagnosticErrorStack,
+        errorMessage:
+          remoteDiagnostics.errorMessage ??
+          localDiagnostics.errorMessage ??
+          remoteDiagnostics.preloadErrorMessage ??
+          remoteDiagnostics.preloadDiagnosticErrorMessage
       };
       this.setConnectionStatus({ bridge: diagnostics });
       return diagnostics;
     } catch (error) {
       const diagnostics: ElectronBridgeDiagnostics = {
-        electronBridgeAvailable: true,
+        ...localDiagnostics,
+        electronBridgeAvailable: localDiagnostics.electronBridgeAvailable,
         localWhisperBridgeAvailable: localDiagnostics.localWhisperBridgeAvailable,
         ipcHandlersRegistered: false,
         errorMessage: this.errorMessage(error, 'Electron IPC bridge diagnostics failed.')
@@ -765,7 +836,8 @@ export class LocalWhisperAsrProvider implements AsrProvider {
   private getBridge() {
     const bridge = this.deps.bridge ?? this.windowBridge();
     if (
-      !bridge?.getLocalWhisperStatus ||
+      !bridge?.ping ||
+      !bridge.getLocalWhisperStatus ||
       !bridge.startLocalWhisper ||
       !bridge.stopLocalWhisper ||
       !bridge.transcribeLocalWhisperChunk ||
@@ -778,6 +850,24 @@ export class LocalWhisperAsrProvider implements AsrProvider {
 
   private windowBridge() {
     return typeof window === 'undefined' ? undefined : window.prompterApi;
+  }
+
+  private readPreloadDiagnostics() {
+    if (typeof window === 'undefined') return null;
+    try {
+      return window.prompterPreloadDiagnostics?.getDiagnostics?.() ?? null;
+    } catch (error) {
+      return {
+        started: true,
+        exposed: false,
+        errorMessage: this.errorMessage(error, 'Unable to read preload diagnostics.'),
+        errorStack: error instanceof Error ? error.stack ?? null : null
+      };
+    }
+  }
+
+  private readMainPreloadError() {
+    return typeof window === 'undefined' ? null : window.__prompterMainPreloadError ?? null;
   }
 
   private getUserMedia(constraints: MediaStreamConstraints) {

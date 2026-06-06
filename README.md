@@ -98,8 +98,13 @@ The bridge diagnostics show whether the renderer can see Electron preload IPC:
 - `Electron bridge`: `window.prompterApi` is available.
 - `Whisper bridge`: Local Whisper preload methods are available.
 - `IPC handlers`: Electron main answered the bridge diagnostic call.
+- `prompterApi` / `ping`: renderer startup checks for `window.prompterApi.ping() -> pong`.
+- `App path`, `CWD`, `Main dir`, `Preload`, `Preload exists`, `Dev mode`, and `Dev URL`: Electron main runtime paths printed in the terminal and surfaced in the UI.
+- `Preload status` / `Preload error`: whether preload started, exposed the API, or threw while exposing it.
 
 If `Whisper bridge` is `No`, `Start Following` is disabled and the app shows `Local Whisper bridge unavailable. Are you running inside Electron?`. Mic Monitor can still work in a browser-like renderer because it only uses `getUserMedia`, but transcription needs the Electron preload/main bridge.
+
+After changing `electron/main.ts`, `electron/preload.ts`, or the dev launcher, stop `npm run dev`, close the Electron window, and restart `npm run dev`. Renderer hot reload is not enough for preload/main-process changes.
 
 If `Start Following` fails before the app asks for microphone permission, check the Local Whisper error and mic diagnostics first. A Python path, missing `faster-whisper` install, or sidecar startup failure is reported as setup failure before `getUserMedia`.
 

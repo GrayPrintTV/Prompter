@@ -3,7 +3,12 @@ import { DEFAULT_LOCAL_WHISPER_STATUS, LocalWhisperAsrProvider } from '../asr/Lo
 import { OpenAiRealtimeAsrProvider } from '../asr/OpenAiRealtimeAsrProvider';
 import { coerceSelectedProvider, getAsrProviderOptions, isLocalWhisperConfigured } from '../asr/providerRegistry';
 import { getActiveAsrTranscriptHistory } from '../components/ControlPanel';
-import type { LiveAsrConfigStatus, LocalWhisperSettings, TranscriptDelta } from '../domain/types';
+import type {
+  ElectronBridgeDiagnostics,
+  LiveAsrConfigStatus,
+  LocalWhisperSettings,
+  TranscriptDelta
+} from '../domain/types';
 
 const UNCONFIGURED_LIVE: LiveAsrConfigStatus = {
   configured: false,
@@ -24,6 +29,29 @@ const LOCAL_WHISPER_SETTINGS: LocalWhisperSettings = {
   device: 'cpu',
   computeType: 'int8',
   chunkDurationSeconds: 4
+};
+
+const BRIDGE_OK: ElectronBridgeDiagnostics = {
+  electronBridgeAvailable: true,
+  localWhisperBridgeAvailable: true,
+  ipcHandlersRegistered: true,
+  errorMessage: null,
+  prompterApiType: 'object',
+  pingType: 'function',
+  pingResult: 'pong',
+  appPath: 'C:\\dev\\Prompter',
+  cwd: 'C:\\dev\\Prompter',
+  mainDirname: 'C:\\dev\\Prompter\\dist-electron',
+  preloadPath: 'C:\\dev\\Prompter\\dist-electron\\preload.js',
+  preloadExists: true,
+  isDev: true,
+  viteDevServerUrl: 'http://127.0.0.1:5173',
+  preloadErrorMessage: null,
+  preloadErrorStack: null,
+  preloadDiagnosticStarted: true,
+  preloadDiagnosticExposed: true,
+  preloadDiagnosticErrorMessage: null,
+  preloadDiagnosticErrorStack: null
 };
 
 describe('ASR provider selection', () => {
@@ -106,12 +134,8 @@ describe('OpenAI Realtime ASR provider', () => {
 describe('Local Whisper ASR provider', () => {
   function localWhisperBridge(overrides: Partial<typeof window.prompterApi> = {}) {
     return {
-      getBridgeDiagnostics: vi.fn(async () => ({
-        electronBridgeAvailable: true,
-        localWhisperBridgeAvailable: true,
-        ipcHandlersRegistered: true,
-        errorMessage: null
-      })),
+      ping: vi.fn(() => 'pong'),
+      getBridgeDiagnostics: vi.fn(async () => BRIDGE_OK),
       getLocalWhisperStatus: vi.fn(async () => DEFAULT_LOCAL_WHISPER_STATUS),
       startLocalWhisper: vi.fn(async () => ({
         ...DEFAULT_LOCAL_WHISPER_STATUS,
@@ -216,6 +240,104 @@ describe('Local Whisper ASR provider', () => {
     expect(status.errorMessage).toBe('Local Whisper bridge unavailable. Are you running inside Electron?');
     expect(status.chunk.chunksRecorded).toBe(0);
     expect(status.chunk.chunksSentToMain).toBe(0);
+  });
+
+  it('reports renderer ping and main-process runtime diagnostics when the bridge is healthy', async () => {
+    const bridge = localWhisperBridge();
+    const provider = new LocalWhisperAsrProvider(LOCAL_WHISPER_SETTINGS, { bridge });
+
+    const status = await provider.refreshStatus();
+
+    expect(bridge.ping).toHaveBeenCalled();
+    expect(status.bridge).toMatchObject({
+      electronBridgeAvailable: true,
+      localWhisperBridgeAvailable: true,
+      ipcHandlersRegistered: true,
+      prompterApiType: 'object',
+      pingType: 'function',
+      pingResult: 'pong',
+      appPath: 'C:\\dev\\Prompter',
+      preloadExists: true,
+      isDev: true,
+      viteDevServerUrl: 'http://127.0.0.1:5173'
+    });
+  });
+
+  it('treats an old preload without ping as an unavailable Local Whisper bridge', async () => {
+    const bridge = localWhisperBridge({
+      ping: undefined as unknown as () => string
+    });
+    const provider = new LocalWhisperAsrProvider(LOCAL_WHISPER_SETTINGS, { bridge });
+
+    const status = await provider.refreshStatus();
+
+    expect(status.bridge.electronBridgeAvailable).toBe(true);
+    expect(status.bridge.prompterApiType).toBe('object');
+    expect(status.bridge.pingType).toBe('undefined');
+    expect(status.bridge.localWhisperBridgeAvailable).toBe(false);
+    await expect(provider.start()).rejects.toThrow('Local Whisper bridge unavailable. Are you running inside Electron?');
+  });
+
+  it('surfaces preload exposure diagnostics when prompterApi is missing', async () => {
+    const previousApi = window.prompterApi;
+    const previousPreloadDiagnostics = window.prompterPreloadDiagnostics;
+    Object.defineProperty(window, 'prompterApi', {
+      value: undefined,
+      configurable: true
+    });
+    Object.defineProperty(window, 'prompterPreloadDiagnostics', {
+      value: {
+        getDiagnostics: () => ({
+          started: true,
+          exposed: false,
+          errorMessage: 'contextBridge expose failed',
+          errorStack: 'stack trace'
+        })
+      },
+      configurable: true
+    });
+
+    const provider = new LocalWhisperAsrProvider(LOCAL_WHISPER_SETTINGS);
+    const status = await provider.refreshStatus();
+
+    expect(status.bridge.electronBridgeAvailable).toBe(false);
+    expect(status.bridge.preloadDiagnosticStarted).toBe(true);
+    expect(status.bridge.preloadDiagnosticExposed).toBe(false);
+    expect(status.bridge.preloadDiagnosticErrorMessage).toBe('contextBridge expose failed');
+    expect(status.errorMessage).toBe('contextBridge expose failed');
+
+    Object.defineProperty(window, 'prompterApi', {
+      value: previousApi,
+      configurable: true
+    });
+    Object.defineProperty(window, 'prompterPreloadDiagnostics', {
+      value: previousPreloadDiagnostics,
+      configurable: true
+    });
+  });
+
+  it('surfaces main-process preload errors when Electron publishes them into the renderer', async () => {
+    const previousMainPreloadError = window.__prompterMainPreloadError;
+    Object.defineProperty(window, '__prompterMainPreloadError', {
+      value: {
+        preloadPath: 'C:\\dev\\Prompter\\dist-electron\\preload.js',
+        message: 'Unable to load preload script',
+        stack: 'preload stack'
+      },
+      configurable: true
+    });
+
+    const provider = new LocalWhisperAsrProvider(LOCAL_WHISPER_SETTINGS);
+    const status = await provider.refreshStatus();
+
+    expect(status.bridge.preloadPath).toBe('C:\\dev\\Prompter\\dist-electron\\preload.js');
+    expect(status.bridge.preloadErrorMessage).toBe('Unable to load preload script');
+    expect(status.errorMessage).toBe('Unable to load preload script');
+
+    Object.defineProperty(window, '__prompterMainPreloadError', {
+      value: previousMainPreloadError,
+      configurable: true
+    });
   });
 
   it('still allows Mic Monitor when the sidecar bridge is absent', async () => {

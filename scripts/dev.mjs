@@ -114,7 +114,8 @@ spawnLogged('electron-tsc', process.execPath, [
 
 await Promise.all([
   waitForPort(5173),
-  waitForFile(path.join(root, 'dist-electron', 'main.js'))
+  waitForFile(path.join(root, 'dist-electron', 'main.js')),
+  waitForFile(path.join(root, 'dist-electron', 'preload.js'))
 ]);
 
 spawnLogged('electron', electronBinary, ['.'], {
