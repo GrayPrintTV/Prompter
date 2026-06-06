@@ -70,6 +70,7 @@ type Props = {
   transcriptBuffer: string[];
   alignment: AlignmentResult;
   currentTokenIndex: number;
+  traceLog?: string[];
 };
 
 function formatMicCaptureState(state: MicCaptureState) {
@@ -107,13 +108,13 @@ export function getActiveAsrTranscriptHistory(
   localWhisperStatus: LocalWhisperStatus
 ) {
   if (providerId === 'local-whisper' && localWhisperStatus.transcriptHistory.length > 0) {
-    return localWhisperStatus.transcriptHistory.slice(-5);
+    return localWhisperStatus.transcriptHistory.slice(-12);
   }
 
   const source = sourceForProvider(providerId);
   return deltas
     .filter((delta) => delta.source === source)
-    .slice(-5)
+    .slice(-12)
     .map((delta) => ({
       ...delta,
       displayText: delta.text || '[empty transcript]',
@@ -172,7 +173,8 @@ export function ControlPanel(props: Props) {
     deltas,
     transcriptBuffer,
     alignment,
-    currentTokenIndex
+    currentTokenIndex,
+    traceLog
   } = props;
   const providerOptions = getAsrProviderOptions(liveConfig, localWhisperSettings);
   const selectedProviderLabel =
@@ -383,6 +385,17 @@ export function ControlPanel(props: Props) {
           <div className="asr-transcript-header">
             <span>Heard</span>
             <span>{transcriptHistory.length} recent</span>
+            <button
+              type="button"
+              onClick={() => {
+                const lines = transcriptHistory.map((item, i) => `${i + 1}. ${item.displayText}`).join('\n');
+                const text = `ASR log (${selectedProviderLabel}):\n${lines}`;
+                void navigator.clipboard.writeText(text).catch(() => undefined);
+              }}
+              title="Copy ASR transcript log to clipboard"
+            >
+              Copy
+            </button>
           </div>
           <div className="asr-latest-transcript">{latestHeard}</div>
           <ol className="asr-transcript-history">
@@ -623,6 +636,7 @@ export function ControlPanel(props: Props) {
         alignment={alignment}
         currentTokenIndex={currentTokenIndex}
         followState={followState}
+        traceLog={traceLog}
       />
     </aside>
   );

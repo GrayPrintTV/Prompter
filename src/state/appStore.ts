@@ -24,7 +24,11 @@ She drew a quiet breath, settled her eyes on the page, and read the first senten
 
 Halfway through the paragraph, she missed a word, stopped, and smiled at nobody. She backed up to the previous sentence and began again. The room did not answer. That was the bargain.
 
-By noon, the manuscript had become less like a stack of pages and more like a trail through familiar woods. When she lost the path, she did not panic. She found the last true sentence, placed her voice there, and moved forward.`;
+By noon, the manuscript had become less like a stack of pages and more like a trail through familiar woods. When she lost the path, she did not panic. She found the last true sentence, placed her voice there, and moved forward.
+
+She continued through the next chapter without pause. The light held steady above the desk. Every sentence landed where it belonged, one after another.
+
+The final page turned under her hand. She spoke the last line clearly, then let the silence settle. The room did not answer. That was the bargain, kept.`;
 
 export const DEFAULT_MOCK_SCRIPT = `The studio light blinked once
 and Mara took that as permission to begin
@@ -37,4 +41,9 @@ Halfway through the paragraph she missed a word
 damn let me take that again
 She backed up to the previous sentence and began again
 The room did not answer that was the bargain
-By noon the manuscript had become less like a stack of pages`;
+By noon the manuscript had become less like a stack of pages
+She continued through the next chapter without pause
+The light held steady above the desk
+Every sentence landed where it belonged
+The final page turned under her hand
+She spoke the last line clearly then let the silence settle`;

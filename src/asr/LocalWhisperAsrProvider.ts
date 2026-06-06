@@ -62,7 +62,7 @@ type LocalWhisperDeps = {
 };
 
 const MAX_MIC_LOG_LINES = 18;
-const MAX_TRANSCRIPT_HISTORY = 12;
+const MAX_TRANSCRIPT_HISTORY = 25;
 const DEFAULT_CHUNK_RESPONSE_TIMEOUT_MS = 15000;
 const PROVIDER_STATUS_TEXT = new Set([
   'sidecar is running',

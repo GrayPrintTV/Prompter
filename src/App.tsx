@@ -103,6 +103,7 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [transcriptBuffer, setTranscriptBuffer] = useState<string[]>([]);
   const [deltas, setDeltas] = useState<TranscriptDelta[]>([]);
+  const [traceLog, setTraceLog] = useState<string[]>([]);
   const [inputLevel, setInputLevel] = useState(0);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -158,12 +159,18 @@ export default function App() {
     setFollowState(nextState);
   }, []);
 
+  const appendTrace = useCallback((entry: string) => {
+    setTraceLog((prev) => [...prev.slice(-7), entry]);
+  }, []);
+
   const processDelta = useCallback((delta: TranscriptDelta) => {
-    setDeltas((previous) => [...previous.slice(-19), delta]);
+    appendTrace(`recv ${delta.source}: "${delta.text.slice(0, 32)}${delta.text.length > 32 ? '...' : ''}"`);
+    setDeltas((previous) => [...previous.slice(-24), delta]);
     const words = transcriptToTokens(delta.text);
     setInputLevel(delta.text.trim() ? clamp(0.25 + words.length / 10, 0.25, 1) : 0);
 
     if (words.length === 0) {
+      appendTrace('empty transcript -> holding');
       setFollowState((previous) => (previous === 'manual' ? 'manual' : 'holding'));
       return;
     }
@@ -179,22 +186,28 @@ export default function App() {
 
       setAlignment(result);
       resyncArmedRef.current = false;
+      appendTrace(`align conf=${result.confidence.toFixed(2)} s${result.sentenceIndex} t${result.tokenIndex} "${result.matchedText.slice(0, 18)}" | ${result.reason}`);
 
       if (followStateRef.current === 'manual' || followStateRef.current === 'paused') {
+        appendTrace('manual/paused: no follow update');
         return next;
       }
 
       if (result.confidence >= 0.76) {
         lowConfidenceCountRef.current = 0;
-        moveToToken(result.tokenIndex, stateFromAlignment(result, previousToken, wasResyncing, 0));
+        const nextState = stateFromAlignment(result, previousToken, wasResyncing, 0);
+        moveToToken(result.tokenIndex, nextState);
+        appendTrace(`high-conf -> move s${result.sentenceIndex} state=${nextState}`);
       } else {
         lowConfidenceCountRef.current += 1;
-        setFollowState(stateFromAlignment(result, previousToken, wasResyncing, lowConfidenceCountRef.current));
+        const nextState = stateFromAlignment(result, previousToken, wasResyncing, lowConfidenceCountRef.current);
+        setFollowState(nextState);
+        appendTrace(`low-conf -> state=${nextState} (no move)`);
       }
 
       return next;
     });
-  }, [moveToToken]);
+  }, [moveToToken, appendTrace]);
 
   useEffect(() => {
     const manualOff = manualProviderRef.current.onDelta(processDelta);
@@ -640,6 +653,7 @@ export default function App() {
         transcriptBuffer={transcriptBuffer}
         alignment={alignment}
         currentTokenIndex={currentTokenIndex}
+        traceLog={traceLog}
       />
       <PrompterView
         model={manuscript}
@@ -647,6 +661,7 @@ export default function App() {
         followState={followState}
         confidence={alignment.confidence}
         settings={displaySettings}
+        onTraceScroll={(info) => appendTrace(`scroll s${info.sentenceIndex} ${info.didScroll ? 'SCROLLED' : 'NO-SCROLL'} (${info.reason})`)}
       />
     </div>
   );

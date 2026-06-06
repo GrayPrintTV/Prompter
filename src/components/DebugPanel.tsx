@@ -7,6 +7,7 @@ type Props = {
   alignment: AlignmentResult;
   currentTokenIndex: number;
   followState: FollowState;
+  traceLog?: string[];
 };
 
 export function DebugPanel({
@@ -15,7 +16,8 @@ export function DebugPanel({
   transcriptBuffer,
   alignment,
   currentTokenIndex,
-  followState
+  followState,
+  traceLog
 }: Props) {
   if (!visible) return null;
 
@@ -43,6 +45,14 @@ export function DebugPanel({
         </dd>
         <dt>Reason</dt>
         <dd>{alignment.reason}</dd>
+        <dt>Trace (recv \u2192 align \u2192 state \u2192 scroll)</dt>
+        <dd>
+          {traceLog && traceLog.length ? (
+            traceLog.slice(-6).map((entry, i) => (
+              <div key={i} style={{ fontFamily: 'monospace', fontSize: '10px', lineHeight: '1.2' }}>{entry}</div>
+            ))
+          ) : '—'}
+        </dd>
       </dl>
     </section>
   );

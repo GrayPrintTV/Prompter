@@ -8,6 +8,7 @@ type Props = {
   followState: FollowState;
   confidence: number;
   settings: DisplaySettings;
+  onTraceScroll?: (info: { sentenceIndex: number; didScroll: boolean; reason: string }) => void;
 };
 
 export function PrompterView({
@@ -15,7 +16,8 @@ export function PrompterView({
   currentSentenceIndex,
   followState,
   confidence,
-  settings
+  settings,
+  onTraceScroll
 }: Props) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
@@ -23,12 +25,26 @@ export function PrompterView({
     if (!shouldScrollForState(followState, confidence)) return;
     const container = scrollRef.current;
     const active = container?.querySelector<HTMLElement>(`[data-sentence-index="${currentSentenceIndex}"]`);
-    if (!container || !active) return;
+    if (!container || !active) {
+      onTraceScroll?.({ sentenceIndex: currentSentenceIndex, didScroll: false, reason: 'no container or active element' });
+      return;
+    }
 
     const readingZone = container.clientHeight * (settings.readingZonePercent / 100);
-    const top = active.offsetTop - readingZone + active.offsetHeight / 2;
-    container.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
-  }, [confidence, currentSentenceIndex, followState, settings.readingZonePercent]);
+    const desiredTop = Math.max(0, active.offsetTop - readingZone + active.offsetHeight / 2);
+    const currentScrollTop = container.scrollTop;
+    const delta = Math.abs(desiredTop - currentScrollTop);
+    const TOLERANCE = 24;
+    const didScroll = delta > TOLERANCE;
+    const reason = didScroll
+      ? 'high-conf advance to reading zone'
+      : 'matched but target already visible (within tolerance of reading zone)';
+    onTraceScroll?.({ sentenceIndex: currentSentenceIndex, didScroll, reason });
+
+    if (didScroll) {
+      container.scrollTo({ top: desiredTop, behavior: 'smooth' });
+    }
+  }, [confidence, currentSentenceIndex, followState, settings.readingZonePercent, onTraceScroll]);
 
   return (
     <main className={`prompter-pane theme-${settings.theme}`}>
