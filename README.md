@@ -93,6 +93,14 @@ Use `Start Monitor` first. Mic Monitor only requests microphone access and holds
 
 The Local Whisper panel shows mic state, selected/default input label when Chromium exposes it, sidecar phase, chunk counters, last chunk size, last transcript text, recent ASR transcript history under `Heard`, and warnings for missing MediaRecorder chunks or sidecar response timeouts. Empty Whisper returns are shown as `[empty transcript]` so silence is visible instead of looking like nothing happened.
 
+The bridge diagnostics show whether the renderer can see Electron preload IPC:
+
+- `Electron bridge`: `window.prompterApi` is available.
+- `Whisper bridge`: Local Whisper preload methods are available.
+- `IPC handlers`: Electron main answered the bridge diagnostic call.
+
+If `Whisper bridge` is `No`, `Start Following` is disabled and the app shows `Local Whisper bridge unavailable. Are you running inside Electron?`. Mic Monitor can still work in a browser-like renderer because it only uses `getUserMedia`, but transcription needs the Electron preload/main bridge.
+
 If `Start Following` fails before the app asks for microphone permission, check the Local Whisper error and mic diagnostics first. A Python path, missing `faster-whisper` install, or sidecar startup failure is reported as setup failure before `getUserMedia`.
 
 ## Legacy Codex environment workaround

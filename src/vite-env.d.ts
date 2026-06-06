@@ -1,6 +1,7 @@
 /// <reference types="vite/client" />
 
 import type {
+  ElectronBridgeDiagnostics,
   LiveAsrConfigStatus,
   LocalWhisperSettings,
   LocalWhisperStatus,
@@ -22,6 +23,7 @@ declare global {
       toggleAlwaysOnTop(): Promise<boolean>;
       getOpenAiRealtimeConfigStatus(): Promise<LiveAsrConfigStatus>;
       createOpenAiRealtimeClientSession(): Promise<OpenAiRealtimeClientSession>;
+      getBridgeDiagnostics(): Promise<ElectronBridgeDiagnostics>;
       getLocalWhisperStatus(): Promise<LocalWhisperStatus>;
       startLocalWhisper(settings: LocalWhisperSettings): Promise<LocalWhisperStatus>;
       stopLocalWhisper(): Promise<LocalWhisperStatus>;

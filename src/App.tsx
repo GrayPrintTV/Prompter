@@ -395,6 +395,12 @@ export default function App() {
         await localWhisperProviderRef.current.stop();
         if (followStateRef.current !== 'manual') setFollowState('paused');
       } else {
+        if (!localWhisperStatus.bridge.localWhisperBridgeAvailable) {
+          await localWhisperProviderRef.current.refreshStatus().catch(() => undefined);
+          if (!localWhisperProviderRef.current.getConnectionStatus().bridge.localWhisperBridgeAvailable) {
+            return;
+          }
+        }
         try {
           await localWhisperProviderRef.current.start();
           if (followStateRef.current === 'paused' || followStateRef.current === 'manual') {
@@ -418,7 +424,15 @@ export default function App() {
         setFollowState('following');
       }
     }
-  }, [isListening, isMockPlaying, liveStatus.listening, localWhisperStatus.listening, playMock, stopMock]);
+  }, [
+    isListening,
+    isMockPlaying,
+    liveStatus.listening,
+    localWhisperStatus.bridge.localWhisperBridgeAvailable,
+    localWhisperStatus.listening,
+    playMock,
+    stopMock
+  ]);
 
   const importTxt = useCallback(async () => {
     if (window.prompterApi?.openTextFile) {

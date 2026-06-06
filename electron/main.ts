@@ -75,6 +75,12 @@ type LocalWhisperStatus = {
     timestampMs: number;
     source: 'local-whisper';
   }>;
+  bridge: {
+    electronBridgeAvailable: boolean;
+    localWhisperBridgeAvailable: boolean;
+    ipcHandlersRegistered: boolean | null;
+    errorMessage: string | null;
+  };
 };
 
 type PendingWhisperRequest = {
@@ -124,7 +130,13 @@ let localWhisperStatus: LocalWhisperStatus = {
     warningMessage: null,
     pendingResponses: 0
   },
-  transcriptHistory: []
+  transcriptHistory: [],
+  bridge: {
+    electronBridgeAvailable: true,
+    localWhisperBridgeAvailable: true,
+    ipcHandlersRegistered: true,
+    errorMessage: null
+  }
 };
 
 function parseEnvFile(filePath: string) {
@@ -592,6 +604,13 @@ ipcMain.handle('openai-realtime:createClientSession', async () => {
     model: config.transcriptionModel
   };
 });
+
+ipcMain.handle('bridge:getDiagnostics', () => ({
+  electronBridgeAvailable: true,
+  localWhisperBridgeAvailable: true,
+  ipcHandlersRegistered: true,
+  errorMessage: null
+}));
 
 ipcMain.handle('local-whisper:getStatus', () => localWhisperStatus);
 

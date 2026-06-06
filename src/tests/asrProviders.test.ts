@@ -106,6 +106,12 @@ describe('OpenAI Realtime ASR provider', () => {
 describe('Local Whisper ASR provider', () => {
   function localWhisperBridge(overrides: Partial<typeof window.prompterApi> = {}) {
     return {
+      getBridgeDiagnostics: vi.fn(async () => ({
+        electronBridgeAvailable: true,
+        localWhisperBridgeAvailable: true,
+        ipcHandlersRegistered: true,
+        errorMessage: null
+      })),
       getLocalWhisperStatus: vi.fn(async () => DEFAULT_LOCAL_WHISPER_STATUS),
       startLocalWhisper: vi.fn(async () => ({
         ...DEFAULT_LOCAL_WHISPER_STATUS,
@@ -186,6 +192,45 @@ describe('Local Whisper ASR provider', () => {
     expect(provider.getConnectionStatus().mic.captureState).toBe('not-requested');
     expect(provider.getConnectionStatus().mic.errorMessage).toContain('Setup failed before microphone request');
     expect(provider.getConnectionStatus().mic.log.join('\n')).toContain('before getUserMedia');
+  });
+
+  it('keeps Start Following unavailable when the Electron bridge is absent', async () => {
+    const getUserMedia = vi.fn(async () => fakeMediaStream());
+    const provider = new LocalWhisperAsrProvider(LOCAL_WHISPER_SETTINGS, {
+      getUserMedia
+    });
+
+    await expect(provider.refreshStatus()).resolves.toMatchObject({
+      bridge: {
+        electronBridgeAvailable: false,
+        localWhisperBridgeAvailable: false
+      }
+    });
+    await expect(provider.start()).rejects.toThrow('Local Whisper bridge unavailable. Are you running inside Electron?');
+
+    const status = provider.getConnectionStatus();
+    expect(getUserMedia).not.toHaveBeenCalled();
+    expect(provider.getStatus()).toBe('idle');
+    expect(status.listening).toBe(false);
+    expect(status.sidecarRunning).toBe(false);
+    expect(status.errorMessage).toBe('Local Whisper bridge unavailable. Are you running inside Electron?');
+    expect(status.chunk.chunksRecorded).toBe(0);
+    expect(status.chunk.chunksSentToMain).toBe(0);
+  });
+
+  it('still allows Mic Monitor when the sidecar bridge is absent', async () => {
+    const provider = new LocalWhisperAsrProvider(LOCAL_WHISPER_SETTINGS, {
+      getUserMedia: vi.fn(async () => fakeMediaStream('Studio microphone'))
+    });
+
+    await provider.startMicMonitoring();
+
+    const status = provider.getConnectionStatus();
+    expect(status.mic.monitorActive).toBe(true);
+    expect(status.mic.captureState).toBe('stream-active');
+    expect(status.mic.deviceLabel).toBe('Studio microphone');
+    expect(status.bridge.localWhisperBridgeAvailable).toBe(false);
+    expect(status.chunk.chunksRecorded).toBe(0);
   });
 
   it('reports permission denial after Local Whisper setup succeeds', async () => {

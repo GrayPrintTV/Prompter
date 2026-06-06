@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('prompterApi', {
   toggleAlwaysOnTop: () => ipcRenderer.invoke('window:toggleAlwaysOnTop'),
   getOpenAiRealtimeConfigStatus: () => ipcRenderer.invoke('openai-realtime:getConfigStatus'),
   createOpenAiRealtimeClientSession: () => ipcRenderer.invoke('openai-realtime:createClientSession'),
+  getBridgeDiagnostics: () => ipcRenderer.invoke('bridge:getDiagnostics'),
   getLocalWhisperStatus: () => ipcRenderer.invoke('local-whisper:getStatus'),
   startLocalWhisper: (settings: unknown) => ipcRenderer.invoke('local-whisper:start', settings),
   stopLocalWhisper: () => ipcRenderer.invoke('local-whisper:stop'),

@@ -1,6 +1,7 @@
 import type { AsrProvider, AsrStatus, TranscriptDelta } from './AsrProvider';
 import type {
   AsrTranscriptHistoryItem,
+  ElectronBridgeDiagnostics,
   LocalWhisperChunkDiagnostics,
   LocalWhisperSettings,
   LocalWhisperStatus,
@@ -12,6 +13,7 @@ type Listener = (delta: TranscriptDelta) => void;
 type StatusListener = (status: LocalWhisperStatus) => void;
 
 type LocalWhisperBridge = {
+  getBridgeDiagnostics?(): Promise<ElectronBridgeDiagnostics>;
   getLocalWhisperStatus(): Promise<LocalWhisperStatus>;
   startLocalWhisper(settings: LocalWhisperSettings): Promise<LocalWhisperStatus>;
   stopLocalWhisper(): Promise<LocalWhisperStatus>;
@@ -63,6 +65,15 @@ function createDefaultChunkDiagnostics(): LocalWhisperChunkDiagnostics {
   };
 }
 
+function createDefaultBridgeDiagnostics(): ElectronBridgeDiagnostics {
+  return {
+    electronBridgeAvailable: false,
+    localWhisperBridgeAvailable: false,
+    ipcHandlersRegistered: null,
+    errorMessage: 'Bridge has not been checked.'
+  };
+}
+
 export const DEFAULT_LOCAL_WHISPER_STATUS: LocalWhisperStatus = {
   providerId: 'local-whisper',
   configured: true,
@@ -74,7 +85,8 @@ export const DEFAULT_LOCAL_WHISPER_STATUS: LocalWhisperStatus = {
   errorMessage: null,
   mic: createDefaultMicDiagnostics(),
   chunk: createDefaultChunkDiagnostics(),
-  transcriptHistory: []
+  transcriptHistory: [],
+  bridge: createDefaultBridgeDiagnostics()
 };
 
 export class LocalWhisperAsrProvider implements AsrProvider {
@@ -91,7 +103,8 @@ export class LocalWhisperAsrProvider implements AsrProvider {
     ...DEFAULT_LOCAL_WHISPER_STATUS,
     mic: createDefaultMicDiagnostics(),
     chunk: createDefaultChunkDiagnostics(),
-    transcriptHistory: []
+    transcriptHistory: [],
+    bridge: createDefaultBridgeDiagnostics()
   };
   private audioContext: AudioContext | null = null;
   private micAnalyser: AnalyserNode | null = null;
@@ -100,7 +113,9 @@ export class LocalWhisperAsrProvider implements AsrProvider {
   private lastLevelUpdateMs = 0;
   private recorderWatchdogTimeout: number | null = null;
 
-  constructor(private settings: LocalWhisperSettings, private deps: LocalWhisperDeps = {}) {}
+  constructor(private settings: LocalWhisperSettings, private deps: LocalWhisperDeps = {}) {
+    this.setConnectionStatus({ bridge: this.inspectBridge() });
+  }
 
   setSettings(settings: LocalWhisperSettings) {
     this.settings = settings;
@@ -108,10 +123,45 @@ export class LocalWhisperAsrProvider implements AsrProvider {
   }
 
   async refreshStatus() {
-    const status = await this.getBridge().getLocalWhisperStatus();
+    const bridgeDiagnostics = await this.refreshBridgeDiagnostics();
+    if (!bridgeDiagnostics.localWhisperBridgeAvailable) {
+      this.status = 'idle';
+      this.setConnectionStatus({
+        status: 'idle',
+        listening: false,
+        sidecarRunning: false,
+        modelPhase: 'stopped',
+        errorMessage: bridgeDiagnostics.errorMessage,
+        bridge: bridgeDiagnostics
+      });
+      return this.connectionStatus;
+    }
+
+    let status: LocalWhisperStatus;
+    try {
+      status = await this.getBridge().getLocalWhisperStatus();
+    } catch (error) {
+      const message = this.errorMessage(error, 'Local Whisper IPC status handler is unavailable.');
+      const diagnostics: ElectronBridgeDiagnostics = {
+        ...bridgeDiagnostics,
+        ipcHandlersRegistered: false,
+        errorMessage: message
+      };
+      this.status = 'idle';
+      this.setConnectionStatus({
+        status: 'idle',
+        listening: false,
+        sidecarRunning: false,
+        modelPhase: 'stopped',
+        errorMessage: message,
+        bridge: diagnostics
+      });
+      return this.connectionStatus;
+    }
     this.setConnectionStatus({
       ...status,
       configured: this.isConfigured(),
+      bridge: bridgeDiagnostics,
       mic: {
         ...createDefaultMicDiagnostics(),
         ...status.mic,
@@ -127,6 +177,22 @@ export class LocalWhisperAsrProvider implements AsrProvider {
 
   async start() {
     if (this.status === 'listening' || this.status === 'starting') return;
+    const bridgeDiagnostics = await this.refreshBridgeDiagnostics();
+    if (!bridgeDiagnostics.localWhisperBridgeAvailable) {
+      const message = 'Local Whisper bridge unavailable. Are you running inside Electron?';
+      this.status = 'idle';
+      this.setConnectionStatus({
+        status: 'idle',
+        listening: false,
+        sidecarRunning: false,
+        modelPhase: 'stopped',
+        errorMessage: message,
+        bridge: { ...bridgeDiagnostics, errorMessage: message }
+      });
+      this.updateMic({}, message);
+      throw new Error(message);
+    }
+
     if (!this.isConfigured()) {
       const message = 'Local Whisper is not configured. Set Python executable and model name.';
       this.setProviderStatus('error', message);
@@ -236,7 +302,9 @@ export class LocalWhisperAsrProvider implements AsrProvider {
 
     this.statusOff?.();
     this.statusOff = null;
-    await this.getBridge().stopLocalWhisper().catch(() => undefined);
+    if (this.inspectBridge().localWhisperBridgeAvailable) {
+      await this.getBridge().stopLocalWhisper().catch(() => undefined);
+    }
     this.setProviderStatus('stopped', null);
     this.setConnectionStatus({ sidecarRunning: false, modelPhase: 'stopped' });
   }
@@ -598,6 +666,61 @@ export class LocalWhisperAsrProvider implements AsrProvider {
     };
   }
 
+  private inspectBridge(): ElectronBridgeDiagnostics {
+    const bridge = (this.deps.bridge ?? this.windowBridge()) as Partial<LocalWhisperBridge> | undefined;
+    const electronBridgeAvailable = Boolean(bridge);
+    const localWhisperBridgeAvailable = Boolean(
+      typeof bridge?.getLocalWhisperStatus === 'function' &&
+      typeof bridge.startLocalWhisper === 'function' &&
+      typeof bridge.stopLocalWhisper === 'function' &&
+      typeof bridge.transcribeLocalWhisperChunk === 'function' &&
+      typeof bridge.onLocalWhisperStatus === 'function'
+    );
+    return {
+      electronBridgeAvailable,
+      localWhisperBridgeAvailable,
+      ipcHandlersRegistered: bridge?.getBridgeDiagnostics ? null : localWhisperBridgeAvailable ? null : false,
+      errorMessage: localWhisperBridgeAvailable
+        ? null
+        : 'Local Whisper bridge unavailable. Are you running inside Electron?'
+    };
+  }
+
+  private async refreshBridgeDiagnostics() {
+    const localDiagnostics = this.inspectBridge();
+    if (!localDiagnostics.localWhisperBridgeAvailable) {
+      this.setConnectionStatus({ bridge: localDiagnostics });
+      return localDiagnostics;
+    }
+
+    const bridge = this.deps.bridge ?? this.windowBridge();
+    if (!bridge?.getBridgeDiagnostics) {
+      this.setConnectionStatus({ bridge: localDiagnostics });
+      return localDiagnostics;
+    }
+
+    try {
+      const remoteDiagnostics = await bridge.getBridgeDiagnostics();
+      const diagnostics = {
+        ...remoteDiagnostics,
+        electronBridgeAvailable: true,
+        localWhisperBridgeAvailable: localDiagnostics.localWhisperBridgeAvailable && remoteDiagnostics.localWhisperBridgeAvailable,
+        errorMessage: remoteDiagnostics.errorMessage
+      };
+      this.setConnectionStatus({ bridge: diagnostics });
+      return diagnostics;
+    } catch (error) {
+      const diagnostics: ElectronBridgeDiagnostics = {
+        electronBridgeAvailable: true,
+        localWhisperBridgeAvailable: localDiagnostics.localWhisperBridgeAvailable,
+        ipcHandlersRegistered: false,
+        errorMessage: this.errorMessage(error, 'Electron IPC bridge diagnostics failed.')
+      };
+      this.setConnectionStatus({ bridge: diagnostics });
+      return diagnostics;
+    }
+  }
+
   private setProviderStatus(status: AsrStatus, errorMessage: string | null) {
     this.status = status;
     this.setConnectionStatus({
@@ -640,7 +763,7 @@ export class LocalWhisperAsrProvider implements AsrProvider {
   }
 
   private getBridge() {
-    const bridge = this.deps.bridge ?? window.prompterApi;
+    const bridge = this.deps.bridge ?? this.windowBridge();
     if (
       !bridge?.getLocalWhisperStatus ||
       !bridge.startLocalWhisper ||
@@ -648,9 +771,13 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       !bridge.transcribeLocalWhisperChunk ||
       !bridge.onLocalWhisperStatus
     ) {
-      throw new Error('Local Whisper bridge is unavailable.');
+      throw new Error('Local Whisper bridge unavailable. Are you running inside Electron?');
     }
     return bridge;
+  }
+
+  private windowBridge() {
+    return typeof window === 'undefined' ? undefined : window.prompterApi;
   }
 
   private getUserMedia(constraints: MediaStreamConstraints) {

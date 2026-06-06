@@ -175,6 +175,13 @@ export type LocalWhisperChunkDiagnostics = {
   pendingResponses: number;
 };
 
+export type ElectronBridgeDiagnostics = {
+  electronBridgeAvailable: boolean;
+  localWhisperBridgeAvailable: boolean;
+  ipcHandlersRegistered: boolean | null;
+  errorMessage: string | null;
+};
+
 export type LocalWhisperStatus = {
   providerId: 'local-whisper';
   configured: boolean;
@@ -187,6 +194,7 @@ export type LocalWhisperStatus = {
   mic: MicCaptureDiagnostics;
   chunk: LocalWhisperChunkDiagnostics;
   transcriptHistory: AsrTranscriptHistoryItem[];
+  bridge: ElectronBridgeDiagnostics;
 };
 
 export type LocalWhisperTranscriptResult = {

@@ -88,6 +88,11 @@ function formatSidecarPhase(phase: LocalWhisperSidecarPhase) {
     .join(' ');
 }
 
+function formatDiagnosticBoolean(value: boolean | null) {
+  if (value === null) return 'Unknown';
+  return value ? 'Yes' : 'No';
+}
+
 function sourceForProvider(providerId: AsrProviderId) {
   if (providerId === 'openai-realtime') return 'openai-realtime';
   if (providerId === 'local-whisper') return 'local-whisper';
@@ -172,6 +177,8 @@ export function ControlPanel(props: Props) {
   const selectedProviderLabel =
     providerOptions.find((option) => option.id === selectedAsrProviderId)?.label ?? 'Manual';
   const localMic = selectedAsrProviderId === 'local-whisper' ? localWhisperStatus.mic : null;
+  const localBridgeUnavailable =
+    selectedAsrProviderId === 'local-whisper' && !localWhisperStatus.bridge.localWhisperBridgeAvailable;
   const transcriptHistory = getActiveAsrTranscriptHistory(selectedAsrProviderId, deltas, localWhisperStatus);
   const latestHeard = transcriptHistory.at(-1)?.displayText ||
     (selectedAsrProviderId === 'openai-realtime'
@@ -183,6 +190,7 @@ export function ControlPanel(props: Props) {
   const startStopLabel = selectedAsrProviderId === 'local-whisper'
     ? isListening ? 'Stop Following' : 'Start Following'
     : isListening ? 'Stop' : 'Start';
+  const startStopDisabled = localBridgeUnavailable && !isListening;
 
   return (
     <aside className="control-panel">
@@ -244,6 +252,12 @@ export function ControlPanel(props: Props) {
           </dd>
           {selectedAsrProviderId === 'local-whisper' ? (
             <>
+              <dt>Electron bridge</dt>
+              <dd>{formatDiagnosticBoolean(localWhisperStatus.bridge.electronBridgeAvailable)}</dd>
+              <dt>Whisper bridge</dt>
+              <dd>{formatDiagnosticBoolean(localWhisperStatus.bridge.localWhisperBridgeAvailable)}</dd>
+              <dt>IPC handlers</dt>
+              <dd>{formatDiagnosticBoolean(localWhisperStatus.bridge.ipcHandlersRegistered)}</dd>
               <dt>Sidecar</dt>
               <dd>{formatSidecarPhase(localWhisperStatus.modelPhase)}</dd>
             </>
@@ -257,7 +271,7 @@ export function ControlPanel(props: Props) {
             {selectedAsrProviderId === 'openai-realtime'
               ? liveStatus.errorMessage ?? 'None'
               : selectedAsrProviderId === 'local-whisper'
-                ? localWhisperStatus.errorMessage ?? 'None'
+                ? localWhisperStatus.errorMessage ?? localWhisperStatus.bridge.errorMessage ?? 'None'
                 : 'None'}
           </dd>
           {localMic ? (
@@ -269,7 +283,9 @@ export function ControlPanel(props: Props) {
               <dt>Mic error</dt>
               <dd>{localMic.errorMessage ?? 'None'}</dd>
               <dt>Warning</dt>
-              <dd>{localWhisperStatus.chunk.warningMessage ?? 'None'}</dd>
+              <dd>{localBridgeUnavailable
+                ? 'Local Whisper bridge unavailable. Are you running inside Electron?'
+                : localWhisperStatus.chunk.warningMessage ?? 'None'}</dd>
             </>
           ) : null}
         </dl>
@@ -403,7 +419,7 @@ export function ControlPanel(props: Props) {
       </section>
 
       <section className="panel-section button-grid">
-        <button type="button" onClick={onStartStop}>{startStopLabel}</button>
+        <button type="button" onClick={onStartStop} disabled={startStopDisabled}>{startStopLabel}</button>
         <button type="button" onClick={onToggleFollow}>{followState === 'manual' ? 'Follow' : 'Manual'}</button>
         <button type="button" onClick={onTogglePause}>{followState === 'paused' ? 'Resume' : 'Pause'}</button>
         <button type="button" onClick={onResync}>Resync</button>
