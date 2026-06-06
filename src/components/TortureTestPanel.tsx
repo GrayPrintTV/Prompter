@@ -190,6 +190,16 @@ export function TortureTestPanel({ model, currentTokenIndex, onLoadManuscript }:
           <dd>{lastReport.appState}</dd>
           <dt>Diagnostic</dt>
           <dd>{lastReport.diagnosticCode}</dd>
+          <dt>Retake bias</dt>
+          <dd>{lastReport.alignmentDiagnostics.retakeBiasApplied ? 'Applied' : 'No'}</dd>
+          <dt>Duplicate/jump</dt>
+          <dd>
+            {lastReport.alignmentDiagnostics.duplicateJumpPenaltyApplied
+              ? lastReport.alignmentDiagnostics.duplicateJumpCandidateRejected
+                ? 'Penalty applied; candidate rejected'
+                : 'Penalty applied'
+              : 'No'}
+          </dd>
           <dt>Search window</dt>
           <dd>{lastReport.searchWindow.fromToken} - {lastReport.searchWindow.toToken}</dd>
           <dt>Reason</dt>

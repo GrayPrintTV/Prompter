@@ -15,12 +15,22 @@ type AlignmentOptions = {
 type Candidate = {
   startIndex: number;
   endIndex: number;
+  baseConfidence: number;
   confidence: number;
   matchedTokens: number;
   matchedWeight: number;
+  coverage: number;
+  exactPhrase: boolean;
+  completePhrase: boolean;
+  distance: number;
+  direction: 'backward' | 'forward' | 'overlap';
   matchedText: string;
+  matchedKey: string;
   reason: string;
   spanDistance: number;
+  retakeBiasApplied: boolean;
+  duplicateJumpPenaltyApplied: boolean;
+  duplicateJumpCandidateRejected: boolean;
 };
 
 const DEFAULT_BACKWARD_WINDOW = 300;
@@ -94,6 +104,7 @@ function candidateScore(
   let consecutive = 0;
   let bestConsecutive = 0;
   const matchedWords: string[] = [];
+  const matchedTokenTexts: string[] = [];
   const totalWeight = fragment.reduce((sum, token) => sum + wordWeight(model, token), 0);
 
   for (const fragmentToken of fragment) {
@@ -118,6 +129,7 @@ function candidateScore(
       matchedTokens += 1;
       matchedWeight += wordWeight(model, fragmentToken) * bestQuality;
       matchedWords.push(model.tokens[matchedIndex].originalText);
+      matchedTokenTexts.push(model.tokens[matchedIndex].text);
 
       gapPenalty += Math.max(0, bestOffset - 1) * 0.016;
       consecutive = bestOffset <= 1 ? consecutive + 1 : 1;
@@ -133,14 +145,19 @@ function candidateScore(
   const coverage = totalWeight > 0 ? matchedWeight / totalWeight : 0;
   const density = matchedTokens / fragment.length;
   const sequenceBonus = Math.min(bestConsecutive / Math.min(fragment.length, 6), 1) * 0.12;
-  const exactPhraseBonus =
+  const exactPhrase =
     fragment.length >= 3 &&
     model.tokens
       .slice(startIndex, startIndex + fragment.length)
       .every((token, index) => token.text === fragment[index])
-      ? 0.12
-      : 0;
+  const exactPhraseBonus = exactPhrase ? 0.12 : 0;
   const distance = lastMatch - currentTokenIndex;
+  const direction =
+    lastMatch < currentTokenIndex - 6
+      ? 'backward'
+      : firstMatch > currentTokenIndex + 6
+        ? 'forward'
+        : 'overlap';
   const spanDistance =
     currentTokenIndex < firstMatch
       ? firstMatch - currentTokenIndex
@@ -175,6 +192,8 @@ function candidateScore(
   }
 
   confidence = clamp(confidence, 0, 0.99);
+  const matchedKey = matchedTokenTexts.join(' ');
+  const completePhrase = matchedTokens === fragment.length && matchedKey === fragment.join(' ');
   const reasonParts = [
     `${matchedTokens}/${fragment.length} words`,
     `coverage ${coverage.toFixed(2)}`,
@@ -188,12 +207,95 @@ function candidateScore(
   return {
     startIndex: firstMatch,
     endIndex: lastMatch,
+    baseConfidence: confidence,
     confidence,
     matchedTokens,
     matchedWeight,
+    coverage,
+    exactPhrase,
+    completePhrase,
+    distance,
+    direction,
     matchedText: matchedWords.join(' '),
+    matchedKey,
     reason: reasonParts.join('; '),
-    spanDistance
+    spanDistance,
+    retakeBiasApplied: false,
+    duplicateJumpPenaltyApplied: false,
+    duplicateJumpCandidateRejected: false
+  };
+}
+
+function isStrongBackwardRepeat(candidate: Candidate, currentTokenIndex: number) {
+  return (
+    candidate.direction === 'backward' &&
+    candidate.completePhrase &&
+    candidate.matchedTokens >= 4 &&
+    candidate.coverage >= 0.72 &&
+    currentTokenIndex - candidate.endIndex <= 220 &&
+    candidate.confidence >= 0.68
+  );
+}
+
+function findBackwardRepeatForCandidate(candidate: Candidate, backwardRepeats: Map<string, Candidate>) {
+  const exact = backwardRepeats.get(candidate.matchedKey);
+  if (exact) return exact;
+
+  for (const repeat of backwardRepeats.values()) {
+    const candidateInsideRepeat = repeat.matchedKey.includes(candidate.matchedKey);
+    const repeatInsideCandidate = candidate.matchedKey.includes(repeat.matchedKey);
+    if (
+      (candidateInsideRepeat || repeatInsideCandidate) &&
+      candidate.matchedTokens >= Math.max(4, repeat.matchedTokens - 1)
+    ) {
+      return repeat;
+    }
+  }
+
+  return undefined;
+}
+
+function applyContextualCandidateAdjustments(candidates: Candidate[], currentTokenIndex: number) {
+  const backwardRepeats = new Map<string, Candidate>();
+
+  for (const candidate of candidates) {
+    if (!isStrongBackwardRepeat(candidate, currentTokenIndex)) continue;
+    const existing = backwardRepeats.get(candidate.matchedKey);
+    if (!existing || candidate.confidence > existing.confidence) {
+      backwardRepeats.set(candidate.matchedKey, candidate);
+    }
+  }
+
+  for (const candidate of backwardRepeats.values()) {
+    candidate.confidence = clamp(candidate.confidence + 0.08, 0, 0.99);
+    candidate.retakeBiasApplied = true;
+    candidate.reason = `${candidate.reason}; retake bias applied`;
+  }
+
+  for (const candidate of candidates) {
+    const backwardTwin = findBackwardRepeatForCandidate(candidate, backwardRepeats);
+    const isLaterDuplicate =
+      backwardTwin &&
+      candidate.startIndex > currentTokenIndex &&
+      candidate.endIndex > currentTokenIndex &&
+      candidate.matchedTokens >= 4;
+
+    if (!isLaterDuplicate) continue;
+
+    candidate.confidence = clamp(candidate.confidence - 0.18, 0, 0.99);
+    candidate.duplicateJumpPenaltyApplied = true;
+    candidate.reason = `${candidate.reason}; duplicate/jump penalty applied`;
+    backwardTwin.duplicateJumpCandidateRejected = true;
+    backwardTwin.reason = `${backwardTwin.reason}; duplicate forward jump candidate rejected`;
+  }
+}
+
+function emptyDiagnostics(): NonNullable<AlignmentResult['diagnostics']> {
+  return {
+    retakeBiasApplied: false,
+    duplicateJumpPenaltyApplied: false,
+    duplicateJumpCandidateRejected: false,
+    selectedDirection: 'overlap'
   };
 }
 
@@ -225,15 +327,23 @@ export function alignTranscript(
       confidence: 0,
       matchedText: '',
       reason: 'No manuscript tokens or no transcript words to align.',
+      diagnostics: emptyDiagnostics(),
       searchWindow: { fromToken, toToken }
     };
   }
 
   let best: Candidate | null = null;
+  const candidates: Candidate[] = [];
 
   for (let startIndex = fromToken; startIndex < toToken; startIndex += 1) {
     const candidate = candidateScore(model, fragment, startIndex, clampedCurrent, widenWindow);
     if (!candidate) continue;
+    candidates.push(candidate);
+  }
+
+  applyContextualCandidateAdjustments(candidates, clampedCurrent);
+
+  for (const candidate of candidates) {
     if (
       !best ||
       candidate.confidence > best.confidence + 0.0001 ||
@@ -255,6 +365,7 @@ export function alignTranscript(
       confidence: 0,
       matchedText: '',
       reason: 'No plausible local match found; holding position.',
+      diagnostics: emptyDiagnostics(),
       searchWindow: { fromToken, toToken }
     };
   }
@@ -270,6 +381,12 @@ export function alignTranscript(
     confidence,
     matchedText: best.matchedText,
     reason: best.reason,
+    diagnostics: {
+      retakeBiasApplied: best.retakeBiasApplied,
+      duplicateJumpPenaltyApplied: candidates.some((candidate) => candidate.duplicateJumpPenaltyApplied),
+      duplicateJumpCandidateRejected: best.duplicateJumpCandidateRejected,
+      selectedDirection: best.direction
+    },
     searchWindow: { fromToken, toToken }
   };
 }

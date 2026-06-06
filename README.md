@@ -23,13 +23,6 @@ Windows-first Electron + React desktop teleprompter for audiobook and voiceover 
 npm install
 ```
 
-If `npm` is not on PATH in this Codex desktop environment, use the local bootstrap that was created during setup:
-
-```powershell
-$env:PATH = 'C:\Users\fmgee\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin;' + $env:PATH
-& 'C:\Users\fmgee\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe' '.tools\npm\bin\npm-cli.js' install
-```
-
 ## Run
 
 ```powershell
@@ -37,13 +30,6 @@ npm run dev
 ```
 
 The dev script starts Vite, compiles the Electron main process, and opens the desktop app.
-
-With the local npm bootstrap:
-
-```powershell
-$env:PATH = 'C:\Users\fmgee\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin;' + $env:PATH
-& 'C:\Users\fmgee\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe' '.tools\npm\bin\npm-cli.js' run dev
-```
 
 ## Test
 
@@ -56,6 +42,16 @@ npm test
 ```powershell
 npm run build
 npm start
+```
+
+## Legacy Codex environment workaround
+
+Prefer normal Node.js/npm installed on Windows. Older Codex desktop shells may not expose `npm` on `PATH`; in that case only, use the local bundled runtime path for this machine:
+
+```powershell
+$env:PATH = 'C:\Users\fmgee\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin;' + $env:PATH
+& 'C:\Users\fmgee\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe' '.tools\npm\bin\npm-cli.js' install
+& 'C:\Users\fmgee\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe' '.tools\npm\bin\npm-cli.js' run dev
 ```
 
 ## Mock transcript system
@@ -78,7 +74,7 @@ After each chunk, the panel shows the raw chunk, normalized transcript tokens, b
 
 Included fixtures cover normal reading, long pauses, off-script profanity/slate notes, repeated sentence flubs, skipped phrases, duplicate common phrases, local backward retakes, false jumps far ahead, chapter headings, and numbers/abbreviations.
 
-Known Phase 0.5 fragility: the repeated-sentence-after-flub fixture currently reproduces a duplicate-phrase failure where the aligner jumps to the later duplicate instead of retreating. The numbers/abbreviations fixture also intentionally holds because Phase 0 normalization does not convert spoken number words such as `two fourteen` into digits like `214`.
+Phase 0.5 alignment hardening covers the repeated-sentence-after-flub fixture, duplicate common phrases, and conservative number/abbreviation forms such as `two fourteen`, `twenty twenty-six`, `doctor`, and `p.m.`. The diagnostics call out when retake bias or duplicate/jump penalties affect candidate selection.
 
 ## Keyboard shortcuts
 

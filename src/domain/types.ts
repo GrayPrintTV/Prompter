@@ -63,6 +63,12 @@ export type AlignmentResult = {
   confidence: number;
   matchedText: string;
   reason: string;
+  diagnostics?: {
+    retakeBiasApplied: boolean;
+    duplicateJumpPenaltyApplied: boolean;
+    duplicateJumpCandidateRejected: boolean;
+    selectedDirection: 'backward' | 'forward' | 'overlap';
+  };
   searchWindow: {
     fromToken: number;
     toToken: number;

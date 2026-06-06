@@ -73,6 +73,22 @@ describe('alignment torture-test fixtures', () => {
       expect(finalReport.reason).toContain(expectation.reasonIncludes);
       expectMovement(expectation.expectedMovement, finalReport, outcome, startToken);
 
+      if (expectation.retakeBiasApplied !== undefined) {
+        expect(finalReport.alignmentDiagnostics.retakeBiasApplied).toBe(expectation.retakeBiasApplied);
+      }
+
+      if (expectation.duplicateJumpPenaltyApplied !== undefined) {
+        expect(finalReport.alignmentDiagnostics.duplicateJumpPenaltyApplied).toBe(
+          expectation.duplicateJumpPenaltyApplied
+        );
+      }
+
+      if (expectation.duplicateJumpCandidateRejected !== undefined) {
+        expect(finalReport.alignmentDiagnostics.duplicateJumpCandidateRejected).toBe(
+          expectation.duplicateJumpCandidateRejected
+        );
+      }
+
       if (expectation.minFinalConfidence !== undefined) {
         expect(finalReport.confidenceScore).toBeGreaterThanOrEqual(expectation.minFinalConfidence);
       }

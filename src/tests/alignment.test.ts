@@ -1,6 +1,21 @@
 import { describe, expect, it } from 'vitest';
 import { alignTranscript } from '../domain/alignment';
 import { buildManuscript } from '../domain/manuscript';
+import { transcriptToTokens } from '../domain/normalize';
+
+function findTokenIndex(model: ReturnType<typeof buildManuscript>, phrase: string, occurrence = 0) {
+  const phraseTokens = transcriptToTokens(phrase);
+  let seen = 0;
+
+  for (let startIndex = 0; startIndex <= model.tokens.length - phraseTokens.length; startIndex += 1) {
+    const matched = phraseTokens.every((token, index) => model.tokens[startIndex + index]?.text === token);
+    if (!matched) continue;
+    if (seen === occurrence) return startIndex;
+    seen += 1;
+  }
+
+  throw new Error(`Phrase not found: ${phrase}`);
+}
 
 describe('alignment engine', () => {
   it('matches a nearby exact phrase with high confidence', () => {
@@ -49,5 +64,42 @@ describe('alignment engine', () => {
     const model = buildManuscript('The house stood near the road. The road turned near the river.');
     const result = alignTranscript(model, 'the', 0);
     expect(result.confidence).toBeLessThan(0.55);
+  });
+
+  it('retreats to a repeated sentence after a flub instead of jumping to the later duplicate', () => {
+    const model = buildManuscript(
+      'The room did not answer. That was the bargain. Mara missed the line, cursed softly, and started the sentence again. The room did not answer. That was the bargain.'
+    );
+    const currentAfterFlub = findTokenIndex(model, 'started the sentence again');
+    const result = alignTranscript(model, 'the room did not answer that was the bargain', currentAfterFlub);
+
+    expect(result.confidence).toBeGreaterThanOrEqual(0.76);
+    expect(result.tokenIndex).toBeLessThan(currentAfterFlub);
+    expect(result.reason).toContain('retake bias applied');
+    expect(result.diagnostics?.retakeBiasApplied).toBe(true);
+    expect(result.diagnostics?.duplicateJumpPenaltyApplied).toBe(true);
+    expect(result.diagnostics?.duplicateJumpCandidateRejected).toBe(true);
+  });
+
+  it('keeps a later duplicate when the expected position already overlaps that occurrence', () => {
+    const model = buildManuscript(
+      'The room did not answer. That was the bargain. Mara took a breath. The room did not answer. That was the bargain.'
+    );
+    const currentAtSecondOccurrence = findTokenIndex(model, 'the room did not answer', 1);
+    const result = alignTranscript(model, 'the room did not answer that was the bargain', currentAtSecondOccurrence);
+
+    expect(result.confidence).toBeGreaterThanOrEqual(0.76);
+    expect(result.tokenIndex).toBeGreaterThan(currentAtSecondOccurrence);
+    expect(result.diagnostics?.retakeBiasApplied).toBe(false);
+    expect(result.diagnostics?.selectedDirection).toBe('overlap');
+  });
+
+  it('aligns conservative spoken numbers and abbreviations against manuscript tokens', () => {
+    const model = buildManuscript('Dr. Smith checked Room 214 at 6 p.m. The log closed.');
+    const result = alignTranscript(model, 'doctor smith checked room two fourteen at six pm', 0);
+
+    expect(result.confidence).toBeGreaterThanOrEqual(0.76);
+    expect(result.matchedText).toContain('Room 214');
+    expect(result.matchedText).toContain('p.m.');
   });
 });

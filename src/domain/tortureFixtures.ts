@@ -23,6 +23,9 @@ export type TortureFixtureExpectation = {
   expectedMovement: 'advance' | 'hold' | 'move-backward' | 'reject-jump';
   diagnosticCode: TortureDiagnosticCode;
   reasonIncludes: string;
+  retakeBiasApplied?: boolean;
+  duplicateJumpPenaltyApplied?: boolean;
+  duplicateJumpCandidateRejected?: boolean;
   minFinalConfidence?: number;
   maxFinalConfidence?: number;
   matchedTextIncludes?: string;
@@ -89,15 +92,18 @@ export const TORTURE_FIXTURES: TortureFixtureCase[] = [
   {
     id: 'repeated-sentence-after-flub',
     label: 'Repeated sentence after flub',
-    description: 'Current Phase 0 behavior jumps to the later duplicate; this fixture keeps that failure reproducible.',
+    description: 'A repeated previous sentence should retreat instead of jumping to the later duplicate.',
     manuscriptText: TORTURE_MANUSCRIPT,
-    startTokenSearch: 'cursed softly and started the sentence again',
+    startTokenSearch: 'started the sentence again',
     chunks: ['the brass lantern swung above the map table while the rain counted the windows'],
     expectation: {
-      expectedState: 'following',
-      expectedMovement: 'advance',
+      expectedState: 'retake',
+      expectedMovement: 'move-backward',
       diagnosticCode: 'moved-high-confidence',
-      reasonIncludes: 'Moved on high confidence',
+      reasonIncludes: 'retake bias applied',
+      retakeBiasApplied: true,
+      duplicateJumpPenaltyApplied: true,
+      duplicateJumpCandidateRejected: true,
       minFinalConfidence: 0.76,
       matchedTextIncludes: 'brass lantern swung'
     }
@@ -185,16 +191,17 @@ export const TORTURE_FIXTURES: TortureFixtureCase[] = [
   {
     id: 'numbers-abbreviations',
     label: 'Numbers and abbreviations',
-    description: 'Spoken number words and expanded abbreviations are a known fragile case for the Phase 0 normalizer.',
+    description: 'Conservative spoken number and abbreviation aliases should align with manuscript digits and initials.',
     manuscriptText: TORTURE_MANUSCRIPT,
     startTokenSearch: 'dr smith checked room',
     chunks: ['doctor smith checked room two fourteen at six pm'],
     expectation: {
-      expectedState: 'holding',
-      expectedMovement: 'hold',
-      diagnosticCode: 'held-low-confidence',
-      reasonIncludes: 'below 0.76',
-      maxFinalConfidence: 0.76,
+      expectedState: 'following',
+      expectedMovement: 'advance',
+      diagnosticCode: 'moved-high-confidence',
+      reasonIncludes: 'Moved on high confidence',
+      minFinalConfidence: 0.76,
+      matchedTextIncludes: 'Dr Smith checked Room 214 at 6 p.m.'
     }
   }
 ];

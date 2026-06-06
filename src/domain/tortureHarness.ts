@@ -40,6 +40,7 @@ export type TortureStepReport = {
   alignmentPosition: TorturePosition;
   appState: FollowState;
   diagnosticCode: TortureDiagnosticCode;
+  alignmentDiagnostics: NonNullable<AlignmentResult['diagnostics']>;
   reason: string;
   moved: boolean;
   searchWindow: AlignmentResult['searchWindow'];
@@ -104,6 +105,12 @@ function buildReport(
     alignmentPosition: positionForToken(model, alignment.tokenIndex),
     appState,
     diagnosticCode,
+    alignmentDiagnostics: alignment.diagnostics ?? {
+      retakeBiasApplied: false,
+      duplicateJumpPenaltyApplied: false,
+      duplicateJumpCandidateRejected: false,
+      selectedDirection: 'overlap'
+    },
     reason,
     moved: newTokenIndex !== previousTokenIndex,
     searchWindow: alignment.searchWindow

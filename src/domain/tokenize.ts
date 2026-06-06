@@ -1,7 +1,7 @@
 import { normalizeToken } from './normalize';
 import type { ManuscriptToken } from './types';
 
-const TOKEN_PATTERN = /[\p{L}\p{N}]+(?:[’'\-][\p{L}\p{N}]+)*/gu;
+const TOKEN_PATTERN = /(?:[\p{L}]\.){2,}|[\p{L}\p{N}]+(?:[â€™'\-][\p{L}\p{N}]+)*/gu;
 
 export function tokenizeSentence(
   sentenceText: string,

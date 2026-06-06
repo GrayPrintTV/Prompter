@@ -22,6 +22,18 @@ function trimDraft(text: string, baseStart: number): ParagraphDraft | null {
   };
 }
 
+function protectAbbreviationStops(text: string) {
+  return text
+    .replace(/\b([ap])\.m\./gi, (_match, hourPrefix: string) => `${hourPrefix}~m~`)
+    .replace(/\b(Dr|Mr|Mrs|Ms|Prof|Sr|Jr)\./g, (_match, title: string) => `${title}~`);
+}
+
+function restoreAbbreviationStops(text: string) {
+  return text
+    .replace(/\b([ap])~m~/gi, (_match, hourPrefix: string) => `${hourPrefix}.m.`)
+    .replace(/\b(Dr|Mr|Mrs|Ms|Prof|Sr|Jr)~/g, (_match, title: string) => `${title}.`);
+}
+
 export function splitParagraphs(rawText: string) {
   const text = rawText.replace(/\r\n/g, '\n');
   const paragraphs: ParagraphDraft[] = [];
@@ -42,12 +54,13 @@ export function splitParagraphs(rawText: string) {
 }
 
 export function splitSentences(paragraphText: string, paragraphStart: number) {
+  const protectedText = protectAbbreviationStops(paragraphText);
   const sentences: SentenceDraft[] = [];
   const sentencePattern = /[^.!?]+(?:[.!?]+["')\]]*)?|[^.!?]+$/g;
   let match: RegExpExecArray | null;
 
-  while ((match = sentencePattern.exec(paragraphText)) !== null) {
-    const draft = trimDraft(match[0], paragraphStart + match.index);
+  while ((match = sentencePattern.exec(protectedText)) !== null) {
+    const draft = trimDraft(restoreAbbreviationStops(match[0]), paragraphStart + match.index);
     if (draft) sentences.push(draft);
   }
 
