@@ -211,6 +211,10 @@ textarea {
   background: linear-gradient(90deg, #55b7a7, #d7a84d);
 }
 
+.live-level-meter {
+  margin-top: 8px;
+}
+
 .position-line,
 .inline-actions {
   display: flex;
@@ -300,6 +304,34 @@ textarea {
 .local-whisper-settings input,
 .local-whisper-settings select {
   width: 100%;
+}
+
+.mic-diagnostics {
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #12191e;
+}
+
+.mic-diagnostics-header {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.mic-log {
+  display: grid;
+  gap: 4px;
+  margin: 10px 0 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
 }
 
 .torture-case-row {

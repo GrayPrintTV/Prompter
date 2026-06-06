@@ -129,6 +129,27 @@ export type LocalWhisperSettings = {
   chunkDurationSeconds: number;
 };
 
+export type MicCaptureState =
+  | 'not-requested'
+  | 'requesting-permission'
+  | 'permission-granted'
+  | 'permission-denied'
+  | 'stream-active'
+  | 'stream-muted-ended'
+  | 'media-recorder-recording'
+  | 'chunk-sent'
+  | 'chunk-returned';
+
+export type MicCaptureDiagnostics = {
+  captureState: MicCaptureState;
+  inputLevel: number;
+  deviceLabel: string;
+  testActive: boolean;
+  lastChunkBytes: number;
+  errorMessage: string | null;
+  log: string[];
+};
+
 export type LocalWhisperSidecarPhase = 'stopped' | 'starting' | 'model-loading' | 'model-loaded' | 'error';
 
 export type LocalWhisperStatus = {
@@ -140,6 +161,7 @@ export type LocalWhisperStatus = {
   status: AsrStatus;
   lastTranscriptDelta: string;
   errorMessage: string | null;
+  mic: MicCaptureDiagnostics;
 };
 
 export type LocalWhisperTranscriptResult = {

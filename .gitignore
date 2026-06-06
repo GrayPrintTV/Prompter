@@ -11,3 +11,5 @@ out/
 dist-electron/
 
 .venv/
+__pycache__/
+*.pyc

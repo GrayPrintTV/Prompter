@@ -14,6 +14,7 @@ import type {
   LocalWhisperSettings,
   LocalWhisperStatus,
   ManuscriptModel,
+  MicCaptureState,
   TranscriptDelta
 } from '../domain/types';
 
@@ -41,6 +42,8 @@ type Props = {
   currentSentenceIndex: number;
   currentParagraphIndex: number;
   onStartStop(): void;
+  onTestMic(): void;
+  onStopMicTest(): void;
   onToggleFollow(): void;
   onTogglePause(): void;
   onStepSentence(direction: -1 | 1): void;
@@ -68,6 +71,13 @@ type Props = {
   currentTokenIndex: number;
 };
 
+function formatMicCaptureState(state: MicCaptureState) {
+  return state
+    .split('-')
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
 export function ControlPanel(props: Props) {
   const {
     projectTitle,
@@ -93,6 +103,8 @@ export function ControlPanel(props: Props) {
     currentSentenceIndex,
     currentParagraphIndex,
     onStartStop,
+    onTestMic,
+    onStopMicTest,
     onToggleFollow,
     onTogglePause,
     onStepSentence,
@@ -122,6 +134,7 @@ export function ControlPanel(props: Props) {
   const providerOptions = getAsrProviderOptions(liveConfig, localWhisperSettings);
   const selectedProviderLabel =
     providerOptions.find((option) => option.id === selectedAsrProviderId)?.label ?? 'Manual';
+  const localMic = selectedAsrProviderId === 'local-whisper' ? localWhisperStatus.mic : null;
 
   return (
     <aside className="control-panel">
@@ -199,7 +212,41 @@ export function ControlPanel(props: Props) {
                 ? localWhisperStatus.errorMessage ?? 'None'
                 : 'None'}
           </dd>
+          {localMic ? (
+            <>
+              <dt>Mic state</dt>
+              <dd>{formatMicCaptureState(localMic.captureState)}</dd>
+              <dt>Input</dt>
+              <dd>{localMic.deviceLabel || 'Unavailable until permission is granted'}</dd>
+              <dt>Mic error</dt>
+              <dd>{localMic.errorMessage ?? 'None'}</dd>
+              <dt>Chunk bytes</dt>
+              <dd>{localMic.lastChunkBytes ? localMic.lastChunkBytes.toLocaleString() : 'None'}</dd>
+            </>
+          ) : null}
         </dl>
+        {localMic ? (
+          <div className="mic-diagnostics">
+            <div className="mic-diagnostics-header">
+              <span>Live Input</span>
+              <button
+                type="button"
+                onClick={localMic.testActive ? onStopMicTest : onTestMic}
+                disabled={localWhisperStatus.listening}
+              >
+                {localMic.testActive ? 'Stop Test' : 'Test Mic'}
+              </button>
+            </div>
+            <div className="level-meter live-level-meter" aria-label="Live microphone input level">
+              <div style={{ width: `${Math.round(inputLevel * 100)}%` }} />
+            </div>
+            <ol className="mic-log">
+              {(localMic.log.length ? localMic.log.slice(-6) : ['No microphone activity yet.']).map((entry, index) => (
+                <li key={`${entry}-${index}`}>{entry}</li>
+              ))}
+            </ol>
+          </div>
+        ) : null}
         {selectedAsrProviderId === 'local-whisper' ? (
           <div className="local-whisper-settings">
             <label>

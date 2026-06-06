@@ -39,6 +39,24 @@ type LocalWhisperStatus = {
   status: 'idle' | 'starting' | 'listening' | 'error' | 'stopped';
   lastTranscriptDelta: string;
   errorMessage: string | null;
+  mic: {
+    captureState:
+      | 'not-requested'
+      | 'requesting-permission'
+      | 'permission-granted'
+      | 'permission-denied'
+      | 'stream-active'
+      | 'stream-muted-ended'
+      | 'media-recorder-recording'
+      | 'chunk-sent'
+      | 'chunk-returned';
+    inputLevel: number;
+    deviceLabel: string;
+    testActive: boolean;
+    lastChunkBytes: number;
+    errorMessage: string | null;
+    log: string[];
+  };
 };
 
 type PendingWhisperRequest = {
@@ -47,10 +65,18 @@ type PendingWhisperRequest = {
   audioPath: string;
 };
 
+type SidecarReadyWaiter = {
+  resolve(): void;
+  reject(error: Error): void;
+  timeout: NodeJS.Timeout;
+};
+
 let localWhisperProcess: ChildProcessWithoutNullStreams | null = null;
 let localWhisperBuffer = '';
 let localWhisperSettings: LocalWhisperSettings | null = null;
+let localWhisperSidecarReady = false;
 const pendingWhisperRequests = new Map<string, PendingWhisperRequest>();
+const sidecarReadyWaiters = new Set<SidecarReadyWaiter>();
 let nextWhisperRequestId = 1;
 let localWhisperStatus: LocalWhisperStatus = {
   providerId: 'local-whisper',
@@ -60,7 +86,16 @@ let localWhisperStatus: LocalWhisperStatus = {
   listening: false,
   status: 'idle',
   lastTranscriptDelta: '',
-  errorMessage: null
+  errorMessage: null,
+  mic: {
+    captureState: 'not-requested',
+    inputLevel: 0,
+    deviceLabel: '',
+    testActive: false,
+    lastChunkBytes: 0,
+    errorMessage: null,
+    log: []
+  }
 };
 
 function parseEnvFile(filePath: string) {
@@ -137,7 +172,12 @@ function patchLocalWhisperStatus(patch: Partial<LocalWhisperStatus>) {
     ...localWhisperStatus,
     ...patch,
     providerId: 'local-whisper',
-    configured: localWhisperSettings ? localWhisperConfigured(localWhisperSettings) : true
+    configured: localWhisperSettings ? localWhisperConfigured(localWhisperSettings) : true,
+    mic: {
+      ...localWhisperStatus.mic,
+      ...patch.mic,
+      log: patch.mic?.log ?? localWhisperStatus.mic.log
+    }
   };
   mainWindow?.webContents.send('local-whisper:status', localWhisperStatus);
 }
@@ -154,6 +194,39 @@ function sendLocalWhisperCommand(command: Record<string, unknown>) {
   localWhisperProcess.stdin.write(`${JSON.stringify(command)}\n`);
 }
 
+function resolveSidecarReadyWaiters() {
+  localWhisperSidecarReady = true;
+  for (const waiter of sidecarReadyWaiters) {
+    clearTimeout(waiter.timeout);
+    waiter.resolve();
+  }
+  sidecarReadyWaiters.clear();
+}
+
+function rejectSidecarReadyWaiters(error: Error) {
+  localWhisperSidecarReady = false;
+  for (const waiter of sidecarReadyWaiters) {
+    clearTimeout(waiter.timeout);
+    waiter.reject(error);
+  }
+  sidecarReadyWaiters.clear();
+}
+
+function waitForSidecarReady(timeoutMs = 10000) {
+  if (localWhisperSidecarReady) return Promise.resolve();
+  return new Promise<void>((resolve, reject) => {
+    const waiter: SidecarReadyWaiter = {
+      resolve,
+      reject,
+      timeout: setTimeout(() => {
+        sidecarReadyWaiters.delete(waiter);
+        reject(new Error('Local Whisper sidecar did not become ready. Check Python and faster-whisper setup.'));
+      }, timeoutMs)
+    };
+    sidecarReadyWaiters.add(waiter);
+  });
+}
+
 function rejectPendingWhisperRequests(error: Error) {
   for (const request of pendingWhisperRequests.values()) {
     request.reject(error);
@@ -165,6 +238,7 @@ function rejectPendingWhisperRequests(error: Error) {
 function handleLocalWhisperMessage(message: Record<string, unknown>) {
   const messageType = message.type;
   if (messageType === 'ready') {
+    resolveSidecarReadyWaiters();
     return;
   }
   if (messageType === 'model-loading') {
@@ -192,6 +266,7 @@ function handleLocalWhisperMessage(message: Record<string, unknown>) {
   if (messageType === 'error') {
     const error = new Error(String(message.message ?? 'Local Whisper sidecar error.'));
     patchLocalWhisperStatus({ modelPhase: 'error', status: 'error', errorMessage: error.message });
+    rejectSidecarReadyWaiters(error);
     rejectPendingWhisperRequests(error);
   }
 }
@@ -213,7 +288,7 @@ function handleLocalWhisperStdout(chunk: Buffer) {
   }
 }
 
-function startLocalWhisperSidecar(settings: LocalWhisperSettings) {
+async function startLocalWhisperSidecar(settings: LocalWhisperSettings) {
   localWhisperSettings = settings;
   if (!localWhisperConfigured(settings)) {
     throw new Error('Local Whisper is not configured. Set Python executable and model name.');
@@ -221,6 +296,7 @@ function startLocalWhisperSidecar(settings: LocalWhisperSettings) {
 
   if (!localWhisperProcess) {
     localWhisperBuffer = '';
+    localWhisperSidecarReady = false;
     patchLocalWhisperStatus({
       configured: true,
       sidecarRunning: false,
@@ -229,6 +305,7 @@ function startLocalWhisperSidecar(settings: LocalWhisperSettings) {
       status: 'starting',
       errorMessage: null
     });
+    const ready = waitForSidecarReady();
     localWhisperProcess = spawn(settings.pythonExecutablePath, [sidecarPath()], {
       cwd: process.cwd(),
       windowsHide: true
@@ -240,16 +317,34 @@ function startLocalWhisperSidecar(settings: LocalWhisperSettings) {
         patchLocalWhisperStatus({ errorMessage: message.slice(0, 500) });
       }
     });
+    localWhisperProcess.on('error', (error) => {
+      localWhisperProcess = null;
+      patchLocalWhisperStatus({
+        sidecarRunning: false,
+        modelPhase: 'error',
+        listening: false,
+        status: 'error',
+        errorMessage: error.message
+      });
+      rejectSidecarReadyWaiters(error);
+      rejectPendingWhisperRequests(error);
+    });
     localWhisperProcess.on('exit', () => {
       localWhisperProcess = null;
+      localWhisperSidecarReady = false;
       patchLocalWhisperStatus({
         sidecarRunning: false,
         modelPhase: 'stopped',
         listening: false,
         status: 'stopped'
       });
-      rejectPendingWhisperRequests(new Error('Local Whisper sidecar stopped.'));
+      const stoppedError = new Error('Local Whisper sidecar stopped.');
+      rejectSidecarReadyWaiters(stoppedError);
+      rejectPendingWhisperRequests(stoppedError);
     });
+    await ready;
+  } else if (!localWhisperSidecarReady) {
+    await waitForSidecarReady();
   }
 
   patchLocalWhisperStatus({ sidecarRunning: true, listening: true, status: 'starting' });
@@ -413,7 +508,7 @@ ipcMain.handle('openai-realtime:createClientSession', async () => {
 
 ipcMain.handle('local-whisper:getStatus', () => localWhisperStatus);
 
-ipcMain.handle('local-whisper:start', (_event, settings: LocalWhisperSettings) => {
+ipcMain.handle('local-whisper:start', async (_event, settings: LocalWhisperSettings) => {
   return startLocalWhisperSidecar(settings);
 });
 
@@ -436,7 +531,7 @@ ipcMain.handle('local-whisper:stop', () => {
 ipcMain.handle(
   'local-whisper:transcribeChunk',
   async (_event, payload: { audioData: ArrayBuffer; mimeType: string; settings: LocalWhisperSettings }) => {
-    startLocalWhisperSidecar(payload.settings);
+    await startLocalWhisperSidecar(payload.settings);
     const tempDir = path.join(app.getPath('temp'), 'narration-prompter-local-whisper');
     await mkdir(tempDir, { recursive: true });
     const extension = payload.mimeType.includes('wav')

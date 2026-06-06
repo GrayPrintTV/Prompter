@@ -89,6 +89,10 @@ python -m pip install -r python/requirements.txt
 
 Then select `Local Whisper` in the ASR Provider dropdown. The settings panel lets you adjust the Python path, model, device, compute type, and chunk duration. A little chunk latency is expected; the aligner only needs enough recognized words every sentence or two.
 
+Before pressing `Start`, use `Test Mic` in the Local Whisper panel. It only requests microphone access and starts the live input meter; it does not start Whisper transcription or move the prompter. The panel shows the mic capture state, selected/default input label when Chromium exposes it, any permission/setup error, the latest chunk size, and recent diagnostics such as `getUserMedia start`, `MediaRecorder start`, `IPC send to main`, and `Sidecar response received`.
+
+If `Start` fails before the app asks for microphone permission, check the Local Whisper error and mic diagnostics first. A Python path, missing `faster-whisper` install, or sidecar startup failure is reported as setup failure before `getUserMedia`.
+
 ## Legacy Codex environment workaround
 
 Prefer normal Node.js/npm installed on Windows. Older Codex desktop shells may not expose `npm` on `PATH`; in that case only, use the local bundled runtime path for this machine:

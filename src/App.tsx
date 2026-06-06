@@ -350,6 +350,19 @@ export default function App() {
     setIsMockPlaying(false);
   }, []);
 
+  const testMic = useCallback(async () => {
+    if (selectedAsrProviderRef.current !== 'local-whisper') return;
+    try {
+      await localWhisperProviderRef.current.testMicrophone();
+    } catch {
+      // Provider diagnostics already carry the user-facing microphone error.
+    }
+  }, []);
+
+  const stopMicTest = useCallback(async () => {
+    await localWhisperProviderRef.current.stopMicTest();
+  }, []);
+
   const toggleListening = useCallback(async () => {
     if (selectedAsrProviderRef.current === 'mock') {
       if (isMockPlaying) {
@@ -544,6 +557,10 @@ export default function App() {
         : selectedAsrProviderId === 'local-whisper'
           ? localWhisperStatus.listening
           : isListening;
+  const selectedInputLevel =
+    selectedAsrProviderId === 'local-whisper'
+      ? localWhisperStatus.mic.inputLevel
+      : inputLevel;
 
   return (
     <div className="app-shell">
@@ -565,12 +582,14 @@ export default function App() {
         localWhisperStatus={localWhisperStatus}
         isListening={selectedProviderListening}
         isMockPlaying={isMockPlaying}
-        inputLevel={inputLevel}
+        inputLevel={selectedInputLevel}
         followState={followState}
         confidence={alignment.confidence}
         currentSentenceIndex={currentSentenceIndex}
         currentParagraphIndex={currentParagraphIndex}
         onStartStop={toggleListening}
+        onTestMic={testMic}
+        onStopMicTest={stopMicTest}
         onToggleFollow={toggleFollow}
         onTogglePause={togglePause}
         onStepSentence={stepSentence}
