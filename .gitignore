@@ -1,15 +1,22 @@
 node_modules/
 dist/
+dist-electron/
 out/
 .vite/
 .env
+.env.*
+!.env.example
 .env.local
 .env.*.local
+logs/
 *.log
 .DS_Store
-
-dist-electron/
 
 .venv/
 __pycache__/
 *.pyc
+temp-audio/
+tmp-audio/
+chunk-*.webm
+chunk-*.wav
+chunk-*.ogg

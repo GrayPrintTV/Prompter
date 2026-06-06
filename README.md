@@ -2,6 +2,8 @@
 
 Windows-first Electron + React desktop teleprompter for audiobook and voiceover narration. Phase 1 adds optional live OpenAI Realtime transcription behind the same alignment engine used by manual and mock transcript input.
 
+Future coding agents should start with `AGENTS.md` and `docs/current-state.md` before changing code.
+
 ## What works in Phase 0
 
 - Paste or import TXT/Markdown manuscript text.
@@ -104,7 +106,7 @@ The bridge diagnostics show whether the renderer can see Electron preload IPC:
 
 If `Whisper bridge` is `No`, `Start Following` is disabled and the app shows `Local Whisper bridge unavailable. Are you running inside Electron?`. Mic Monitor can still work in a browser-like renderer because it only uses `getUserMedia`, but transcription needs the Electron preload/main bridge.
 
-After changing `electron/main.ts`, `electron/preload.ts`, or the dev launcher, stop `npm run dev`, close the Electron window, and restart `npm run dev`. Renderer hot reload is not enough for preload/main-process changes.
+After changing `electron/main.ts`, `electron/preload.cts`, Electron build config, or the dev launcher, stop `npm run dev`, close the Electron window, and restart `npm run dev`. Renderer hot reload is not enough for preload/main-process changes.
 
 If `Start Following` fails before the app asks for microphone permission, check the Local Whisper error and mic diagnostics first. A Python path, missing `faster-whisper` install, or sidecar startup failure is reported as setup failure before `getUserMedia`.
 

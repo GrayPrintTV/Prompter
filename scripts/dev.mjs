@@ -46,6 +46,25 @@ function spawnLogged(name, command, args, extraEnv = {}) {
   return child;
 }
 
+function runLogged(name, command, args, extraEnv = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: root,
+      env: buildEnv(extraEnv),
+      stdio: 'inherit',
+      shell: false
+    });
+    child.on('error', reject);
+    child.on('exit', (code) => {
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(`${name} exited with code ${code}`));
+      }
+    });
+  });
+}
+
 async function waitForFile(filePath, timeoutMs = 30000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
@@ -104,6 +123,13 @@ spawnLogged('renderer', process.execPath, [
   '--port',
   '5173'
 ]);
+
+await runLogged('electron-tsc-build', process.execPath, [
+  nodeModuleScript('typescript', 'bin', 'tsc'),
+  '-p',
+  'tsconfig.electron.json'
+]);
+
 spawnLogged('electron-tsc', process.execPath, [
   nodeModuleScript('typescript', 'bin', 'tsc'),
   '-p',
@@ -115,7 +141,7 @@ spawnLogged('electron-tsc', process.execPath, [
 await Promise.all([
   waitForPort(5173),
   waitForFile(path.join(root, 'dist-electron', 'main.js')),
-  waitForFile(path.join(root, 'dist-electron', 'preload.js'))
+  waitForFile(path.join(root, 'dist-electron', 'preload.cjs'))
 ]);
 
 spawnLogged('electron', electronBinary, ['.'], {

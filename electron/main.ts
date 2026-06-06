@@ -229,7 +229,7 @@ function runtimeDiagnostics(preloadPath: string): MainRuntimeDiagnostics {
 }
 
 function currentPreloadPath() {
-  return path.join(__dirname, 'preload.js');
+  return path.join(__dirname, 'preload.cjs');
 }
 
 function mainBridgeDiagnostics() {

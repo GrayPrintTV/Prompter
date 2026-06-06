@@ -42,7 +42,7 @@ const BRIDGE_OK: ElectronBridgeDiagnostics = {
   appPath: 'C:\\dev\\Prompter',
   cwd: 'C:\\dev\\Prompter',
   mainDirname: 'C:\\dev\\Prompter\\dist-electron',
-  preloadPath: 'C:\\dev\\Prompter\\dist-electron\\preload.js',
+  preloadPath: 'C:\\dev\\Prompter\\dist-electron\\preload.cjs',
   preloadExists: true,
   isDev: true,
   viteDevServerUrl: 'http://127.0.0.1:5173',
@@ -320,7 +320,7 @@ describe('Local Whisper ASR provider', () => {
     const previousMainPreloadError = window.__prompterMainPreloadError;
     Object.defineProperty(window, '__prompterMainPreloadError', {
       value: {
-        preloadPath: 'C:\\dev\\Prompter\\dist-electron\\preload.js',
+        preloadPath: 'C:\\dev\\Prompter\\dist-electron\\preload.cjs',
         message: 'Unable to load preload script',
         stack: 'preload stack'
       },
@@ -330,7 +330,7 @@ describe('Local Whisper ASR provider', () => {
     const provider = new LocalWhisperAsrProvider(LOCAL_WHISPER_SETTINGS);
     const status = await provider.refreshStatus();
 
-    expect(status.bridge.preloadPath).toBe('C:\\dev\\Prompter\\dist-electron\\preload.js');
+    expect(status.bridge.preloadPath).toBe('C:\\dev\\Prompter\\dist-electron\\preload.cjs');
     expect(status.bridge.preloadErrorMessage).toBe('Unable to load preload script');
     expect(status.errorMessage).toBe('Unable to load preload script');
 
