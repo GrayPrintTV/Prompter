@@ -56,12 +56,30 @@ export function splitParagraphs(rawText: string) {
 export function splitSentences(paragraphText: string, paragraphStart: number) {
   const protectedText = protectAbbreviationStops(paragraphText);
   const sentences: SentenceDraft[] = [];
-  const sentencePattern = /[^.!?]+(?:[.!?]+["')\]]*)?|[^.!?]+$/g;
-  let match: RegExpExecArray | null;
 
-  while ((match = sentencePattern.exec(protectedText)) !== null) {
-    const draft = trimDraft(restoreAbbreviationStops(match[0]), paragraphStart + match.index);
-    if (draft) sentences.push(draft);
+  // Conservative support for line/paragraph breaks as soft sentence boundaries for
+  // teleprompter display/highlighting (finer steps when ms uses newlines without terminal punct).
+  // Split on \n first (preserving relative indices), then apply punct split per segment.
+  // This does not affect inputs without internal \n (same as before) and preserves behavior
+  // for test fixtures that use standard punctuation.
+  const lineSegments = protectedText.split(/(\n+)/);
+  let segOffset = 0;
+  for (const seg of lineSegments) {
+    if (!seg) {
+      segOffset += 0;
+      continue;
+    }
+    if (/^\n+$/.test(seg)) {
+      segOffset += seg.length;
+      continue;
+    }
+    const sentencePattern = /[^.!?]+(?:[.!?]+["')\]]*)?|[^.!?]+$/g;
+    let match: RegExpExecArray | null;
+    while ((match = sentencePattern.exec(seg)) !== null) {
+      const draft = trimDraft(restoreAbbreviationStops(match[0]), paragraphStart + segOffset + match.index);
+      if (draft) sentences.push(draft);
+    }
+    segOffset += seg.length;
   }
 
   if (sentences.length === 0 && paragraphText.trim()) {

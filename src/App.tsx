@@ -168,9 +168,11 @@ export default function App() {
   }, [appendTrace]);
 
   const processDelta = useCallback((delta: TranscriptDelta) => {
-    appendTrace(`recv ${delta.source}: "${delta.text.slice(0, 32)}${delta.text.length > 32 ? '...' : ''}"`);
+    const raw = delta.text;
+    appendTrace(`recv ${delta.source}: raw="${raw}"`);
     setDeltas((previous) => [...previous.slice(-24), delta]);
     const words = transcriptToTokens(delta.text);
+    appendTrace(`norm tokens: [${words.join(' ')}]`);
     setInputLevel(delta.text.trim() ? clamp(0.25 + words.length / 10, 0.25, 1) : 0);
 
     if (words.length === 0) {
@@ -190,7 +192,7 @@ export default function App() {
 
       setAlignment(result);
       resyncArmedRef.current = false;
-      appendTrace(`align conf=${result.confidence.toFixed(2)} s${result.sentenceIndex} t${result.tokenIndex} "${result.matchedText.slice(0, 18)}" | ${result.reason}`);
+      appendTrace(`align matched="${result.matchedText}" conf=${result.confidence.toFixed(2)} s${result.sentenceIndex} p${result.paragraphIndex} t${result.tokenIndex} | ${result.reason}`);
 
       if (followStateRef.current === 'manual' || followStateRef.current === 'paused') {
         appendTrace('manual/paused: no follow update');
@@ -201,12 +203,12 @@ export default function App() {
         lowConfidenceCountRef.current = 0;
         const nextState = stateFromAlignment(result, previousToken, wasResyncing, 0);
         moveToToken(result.tokenIndex, nextState);
-        appendTrace(`high-conf -> move s${result.sentenceIndex} state=${nextState}`);
+        appendTrace(`action: MOVED s${result.sentenceIndex} state=${nextState} (high-conf)`);
       } else {
         lowConfidenceCountRef.current += 1;
         const nextState = stateFromAlignment(result, previousToken, wasResyncing, lowConfidenceCountRef.current);
         setFollowState(nextState);
-        appendTrace(`low-conf -> state=${nextState} (no move)`);
+        appendTrace(`action: HELD state=${nextState} (low-conf)`);
       }
 
       return next;

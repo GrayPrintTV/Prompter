@@ -108,13 +108,13 @@ export function getActiveAsrTranscriptHistory(
   localWhisperStatus: LocalWhisperStatus
 ) {
   if (providerId === 'local-whisper' && localWhisperStatus.transcriptHistory.length > 0) {
-    return localWhisperStatus.transcriptHistory.slice(-12);
+    return localWhisperStatus.transcriptHistory.slice(-25);
   }
 
   const source = sourceForProvider(providerId);
   return deltas
     .filter((delta) => delta.source === source)
-    .slice(-12)
+    .slice(-25)
     .map((delta) => ({
       ...delta,
       displayText: delta.text || '[empty transcript]',
@@ -345,12 +345,20 @@ export function ControlPanel(props: Props) {
             <dl className="chunk-counter-grid">
               <dt>Recorded</dt>
               <dd>{localWhisperStatus.chunk.chunksRecorded}</dd>
+              <dt>Queued</dt>
+              <dd>{localWhisperStatus.chunk.chunksQueued}</dd>
               <dt>Sent</dt>
               <dd>{localWhisperStatus.chunk.chunksSentToMain}</dd>
+              <dt>Dropped</dt>
+              <dd>{localWhisperStatus.chunk.chunksDropped}</dd>
               <dt>Sidecar</dt>
               <dd>{localWhisperStatus.chunk.chunksReceivedBySidecar}</dd>
               <dt>Returned</dt>
               <dd>{localWhisperStatus.chunk.chunksReturnedFromSidecar}</dd>
+              <dt>Empty</dt>
+              <dd>{localWhisperStatus.chunk.chunksEmpty}</dd>
+              <dt>Failed</dt>
+              <dd>{localWhisperStatus.chunk.chunksFailed}</dd>
               <dt>Bytes</dt>
               <dd>{localWhisperStatus.chunk.lastChunkBytes || 'None'}</dd>
               <dt>Format</dt>

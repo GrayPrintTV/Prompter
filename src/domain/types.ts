@@ -167,9 +167,13 @@ export type LocalWhisperSidecarPhase =
 
 export type LocalWhisperChunkDiagnostics = {
   chunksRecorded: number;
+  chunksQueued: number;
   chunksSentToMain: number;
+  chunksDropped: number;
   chunksReceivedBySidecar: number;
   chunksReturnedFromSidecar: number;
+  chunksEmpty: number;
+  chunksFailed: number;
   lastChunkBytes: number;
   lastChunkFormat: string;
   lastMimeType: string;

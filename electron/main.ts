@@ -68,9 +68,13 @@ type LocalWhisperStatus = {
   };
   chunk: {
     chunksRecorded: number;
+    chunksQueued: number;
     chunksSentToMain: number;
+    chunksDropped: number;
     chunksReceivedBySidecar: number;
     chunksReturnedFromSidecar: number;
+    chunksEmpty: number;
+    chunksFailed: number;
     lastChunkBytes: number;
     lastChunkFormat: string;
     lastMimeType: string;
@@ -187,9 +191,13 @@ let localWhisperStatus: LocalWhisperStatus = {
   },
   chunk: {
     chunksRecorded: 0,
+    chunksQueued: 0,
     chunksSentToMain: 0,
+    chunksDropped: 0,
     chunksReceivedBySidecar: 0,
     chunksReturnedFromSidecar: 0,
+    chunksEmpty: 0,
+    chunksFailed: 0,
     lastChunkBytes: 0,
     lastChunkFormat: '',
     lastMimeType: '',
@@ -582,7 +590,7 @@ function handleLocalWhisperMessage(message: Record<string, unknown>) {
         warningMessage: null,
         pendingResponses: Math.max(0, localWhisperStatus.chunk.pendingResponses - 1)
       },
-      transcriptHistory: [...localWhisperStatus.transcriptHistory, historyItem].slice(-12)
+      transcriptHistory: [...localWhisperStatus.transcriptHistory, historyItem].slice(-25)
     });
     pending.resolve({
       text,

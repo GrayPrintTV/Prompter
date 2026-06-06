@@ -162,9 +162,13 @@ function createDefaultMicDiagnostics(): MicCaptureDiagnostics {
 function createDefaultChunkDiagnostics(): LocalWhisperChunkDiagnostics {
   return {
     chunksRecorded: 0,
+    chunksQueued: 0,
     chunksSentToMain: 0,
+    chunksDropped: 0,
     chunksReceivedBySidecar: 0,
     chunksReturnedFromSidecar: 0,
+    chunksEmpty: 0,
+    chunksFailed: 0,
     lastChunkBytes: 0,
     lastChunkFormat: '',
     lastMimeType: '',
@@ -229,6 +233,7 @@ export class LocalWhisperAsrProvider implements AsrProvider {
   private pcmRecorder: PcmChunkRecorder | null = null;
   private statusOff: (() => void) | null = null;
   private busy = false;
+  private pendingChunk: any = null;
   private connectionStatus: LocalWhisperStatus = {
     ...DEFAULT_LOCAL_WHISPER_STATUS,
     mic: createDefaultMicDiagnostics(),
@@ -400,6 +405,7 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       await this.pcmRecorder.start();
       this.updateMic({ captureState: 'pcm-capturing' }, 'PCM WAV capture started.');
       this.startChunkWatchdog();
+      this.pendingChunk = null;
       this.setProviderStatus('listening', null);
     } catch (error) {
       await this.stop();
@@ -412,6 +418,7 @@ export class LocalWhisperAsrProvider implements AsrProvider {
     this.pcmRecorder?.stop();
     this.pcmRecorder = null;
     this.stopChunkWatchdog();
+    this.pendingChunk = null;
 
     if (this.mediaStream && !this.connectionStatus.mic.monitorActive) {
       this.stopStream(this.mediaStream);
@@ -527,6 +534,7 @@ export class LocalWhisperAsrProvider implements AsrProvider {
     });
     this.updateChunk({ lastTranscriptText: displayText });
     if (!text) {
+      this.updateChunk({ chunksEmpty: (this.connectionStatus.chunk.chunksEmpty || 0) + 1 });
       this.updateMic({}, 'Sidecar returned empty transcript.');
       return;
     }
@@ -604,7 +612,15 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       return;
     }
     if (this.busy) {
-      this.updateMic({}, 'Chunk skipped: transcription request already in flight.');
+      // Latest-chunk-wins backpressure: drop any previous pending, queue this one as latest.
+      // Never fatal, never error status; just diagnostic.
+      if (this.pendingChunk) {
+        this.updateChunk({ chunksDropped: (this.connectionStatus.chunk.chunksDropped || 0) + 1 });
+        this.updateMic({}, 'Chunk dropped (backpressure: keeping latest while in flight).');
+      }
+      this.pendingChunk = chunk;
+      this.updateChunk({ chunksQueued: (this.connectionStatus.chunk.chunksQueued || 0) + 1 });
+      this.updateMic({}, 'Chunk queued (latest wins; request already in flight).');
       return;
     }
     if (this.status !== 'listening') {
@@ -644,7 +660,7 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       await this.acceptTranscriptResult(result);
     } catch (error) {
       const message = this.errorMessage(error, 'Local Whisper transcription failed.');
-      this.updateChunk({ lastSidecarError: message, warningMessage: message });
+      this.updateChunk({ lastSidecarError: message, warningMessage: message, chunksFailed: (this.connectionStatus.chunk.chunksFailed || 0) + 1 });
       this.updateMic({ errorMessage: message }, `Sidecar response failed: ${message}`);
       this.setProviderStatus('error', message);
     } finally {
@@ -652,6 +668,15 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       this.updateChunk({ pendingResponses: Math.max(0, this.connectionStatus.chunk.pendingResponses - 1) });
       this.busy = false;
       this.startChunkWatchdog();
+      // Drain latest queued (if any) after this response; latest-wins means intermediates were dropped already.
+      if (this.pendingChunk) {
+        const next = this.pendingChunk;
+        this.pendingChunk = null;
+        // Defer to avoid deep stack after await; will hit non-busy path and send.
+        void Promise.resolve().then(() => this.acceptEncodedAudioChunk(next).catch((e) => {
+          this.updateMic({}, `Queued chunk dispatch error: ${this.errorMessage(e, 'unknown')}`);
+        }));
+      }
     }
   }
 
@@ -838,9 +863,13 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       ...current,
       ...remote,
       chunksRecorded: Math.max(current.chunksRecorded, remote.chunksRecorded),
+      chunksQueued: Math.max(current.chunksQueued, remote.chunksQueued),
       chunksSentToMain: Math.max(current.chunksSentToMain, remote.chunksSentToMain),
+      chunksDropped: Math.max(current.chunksDropped, remote.chunksDropped),
       chunksReceivedBySidecar: Math.max(current.chunksReceivedBySidecar, remote.chunksReceivedBySidecar),
       chunksReturnedFromSidecar: Math.max(current.chunksReturnedFromSidecar, remote.chunksReturnedFromSidecar),
+      chunksEmpty: Math.max(current.chunksEmpty, remote.chunksEmpty),
+      chunksFailed: Math.max(current.chunksFailed, remote.chunksFailed),
       pendingResponses: Math.max(current.pendingResponses, remote.pendingResponses),
       lastChunkBytes: Math.max(current.lastChunkBytes, remote.lastChunkBytes),
       lastChunkFormat: remote.lastChunkFormat || current.lastChunkFormat,
