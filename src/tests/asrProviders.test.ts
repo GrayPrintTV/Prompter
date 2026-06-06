@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { DEFAULT_LOCAL_WHISPER_STATUS, LocalWhisperAsrProvider } from '../asr/LocalWhisperAsrProvider';
 import { OpenAiRealtimeAsrProvider } from '../asr/OpenAiRealtimeAsrProvider';
 import { coerceSelectedProvider, getAsrProviderOptions, isLocalWhisperConfigured } from '../asr/providerRegistry';
+import { getActiveAsrTranscriptHistory } from '../components/ControlPanel';
 import type { LiveAsrConfigStatus, LocalWhisperSettings, TranscriptDelta } from '../domain/types';
 
 const UNCONFIGURED_LIVE: LiveAsrConfigStatus = {
@@ -109,7 +110,7 @@ describe('Local Whisper ASR provider', () => {
       startLocalWhisper: vi.fn(async () => ({
         ...DEFAULT_LOCAL_WHISPER_STATUS,
         sidecarRunning: true,
-        modelPhase: 'model-loaded' as const,
+        modelPhase: 'ready' as const,
         status: 'listening' as const,
         listening: true
       })),
@@ -220,11 +221,11 @@ describe('Local Whisper ASR provider', () => {
     expect(bridge.startLocalWhisper).not.toHaveBeenCalled();
     expect(provider.getConnectionStatus().mic.captureState).toBe('stream-active');
     expect(provider.getConnectionStatus().mic.deviceLabel).toBe('Studio microphone');
-    expect(provider.getConnectionStatus().mic.testActive).toBe(true);
+    expect(provider.getConnectionStatus().mic.monitorActive).toBe(true);
     expect(provider.getConnectionStatus().mic.log.join('\n')).toContain('getUserMedia success');
 
     await provider.stopMicTest();
-    expect(provider.getConnectionStatus().mic.testActive).toBe(false);
+    expect(provider.getConnectionStatus().mic.monitorActive).toBe(false);
   });
 
   it('records chunk send and sidecar response diagnostics', async () => {
@@ -250,7 +251,7 @@ describe('Local Whisper ASR provider', () => {
     await provider.acceptRecordedAudioChunk(blob);
 
     const mic = provider.getConnectionStatus().mic;
-    expect(mic.lastChunkBytes).toBe(3);
+    expect(provider.getConnectionStatus().chunk.lastChunkBytes).toBe(3);
     expect(mic.log.join('\n')).not.toContain('Chunk skipped');
     expect(bridge.transcribeLocalWhisperChunk).toHaveBeenCalled();
     expect(mic.captureState).toBe('chunk-returned');
@@ -265,5 +266,79 @@ describe('Local Whisper ASR provider', () => {
     expect(deltas.at(-1)?.source).toBe('local-whisper');
 
     await provider.stop();
+  });
+
+  it('records empty Whisper transcripts without emitting an aligner delta', async () => {
+    const provider = new LocalWhisperAsrProvider(LOCAL_WHISPER_SETTINGS, { now: () => 999 });
+    const deltas: TranscriptDelta[] = [];
+    provider.onDelta((delta) => deltas.push(delta));
+
+    await provider.acceptTranscriptResult({ text: '   ' });
+
+    const status = provider.getConnectionStatus();
+    expect(deltas).toEqual([]);
+    expect(status.modelPhase).toBe('returned-empty-transcript');
+    expect(status.lastTranscriptDelta).toBe('[empty transcript]');
+    expect(status.chunk.lastTranscriptText).toBe('[empty transcript]');
+    expect(status.transcriptHistory.at(-1)?.displayText).toBe('[empty transcript]');
+    expect(status.transcriptHistory.at(-1)?.isEmpty).toBe(true);
+  });
+
+  it('warns when a sidecar response does not return before the timeout', async () => {
+    vi.useFakeTimers();
+    let resolveTranscript!: (result: { text: string }) => void;
+    const bridge = localWhisperBridge({
+      transcribeLocalWhisperChunk: vi.fn(
+        (): Promise<{ text: string }> => new Promise((resolve) => {
+          resolveTranscript = resolve;
+        })
+      )
+    });
+    const recorder = new FakeMediaRecorder();
+    const provider = new LocalWhisperAsrProvider(LOCAL_WHISPER_SETTINGS, {
+      bridge,
+      getUserMedia: vi.fn(async () => fakeMediaStream('Studio microphone')),
+      createMediaRecorder: () => recorder as unknown as MediaRecorder,
+      chunkResponseTimeoutMs: 50
+    });
+
+    await provider.start();
+    const pending = provider.acceptRecordedAudioChunk({
+      size: 3,
+      type: 'audio/webm',
+      arrayBuffer: vi.fn(async () => new Uint8Array([1, 2, 3]).buffer)
+    } as unknown as Blob);
+
+    await vi.advanceTimersByTimeAsync(55);
+    expect(provider.getConnectionStatus().chunk.warningMessage).toContain('no sidecar response');
+
+    resolveTranscript({ text: 'The room did not answer.' });
+    await pending;
+    await provider.stop();
+    vi.useRealTimers();
+  });
+});
+
+describe('ASR transcript display helpers', () => {
+  it('prefers Local Whisper transcript history so empty returns are visible', () => {
+    const localStatus = {
+      ...DEFAULT_LOCAL_WHISPER_STATUS,
+      transcriptHistory: [
+        {
+          text: '',
+          displayText: '[empty transcript]',
+          isEmpty: true,
+          isFinal: true,
+          timestampMs: 100,
+          source: 'local-whisper' as const
+        }
+      ]
+    };
+
+    const history = getActiveAsrTranscriptHistory('local-whisper', [], localStatus);
+
+    expect(history).toHaveLength(1);
+    expect(history[0].displayText).toBe('[empty transcript]');
+    expect(history[0].isEmpty).toBe(true);
   });
 });

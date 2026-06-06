@@ -12,6 +12,7 @@ import type {
   LiveAsrConfigStatus,
   LiveAsrConnectionStatus,
   LocalWhisperSettings,
+  LocalWhisperSidecarPhase,
   LocalWhisperStatus,
   ManuscriptModel,
   MicCaptureState,
@@ -42,8 +43,8 @@ type Props = {
   currentSentenceIndex: number;
   currentParagraphIndex: number;
   onStartStop(): void;
-  onTestMic(): void;
-  onStopMicTest(): void;
+  onStartMicMonitor(): void;
+  onStopMicMonitor(): void;
   onToggleFollow(): void;
   onTogglePause(): void;
   onStepSentence(direction: -1 | 1): void;
@@ -78,6 +79,42 @@ function formatMicCaptureState(state: MicCaptureState) {
     .join(' ');
 }
 
+function formatSidecarPhase(phase: LocalWhisperSidecarPhase) {
+  if (phase === 'model-loading') return 'Model loading';
+  if (phase === 'returned-empty-transcript') return 'Returned empty transcript';
+  return phase
+    .split('-')
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
+function sourceForProvider(providerId: AsrProviderId) {
+  if (providerId === 'openai-realtime') return 'openai-realtime';
+  if (providerId === 'local-whisper') return 'local-whisper';
+  if (providerId === 'mock') return 'mock';
+  return 'manual';
+}
+
+export function getActiveAsrTranscriptHistory(
+  providerId: AsrProviderId,
+  deltas: TranscriptDelta[],
+  localWhisperStatus: LocalWhisperStatus
+) {
+  if (providerId === 'local-whisper' && localWhisperStatus.transcriptHistory.length > 0) {
+    return localWhisperStatus.transcriptHistory.slice(-5);
+  }
+
+  const source = sourceForProvider(providerId);
+  return deltas
+    .filter((delta) => delta.source === source)
+    .slice(-5)
+    .map((delta) => ({
+      ...delta,
+      displayText: delta.text || '[empty transcript]',
+      isEmpty: delta.text.trim().length === 0
+    }));
+}
+
 export function ControlPanel(props: Props) {
   const {
     projectTitle,
@@ -103,8 +140,8 @@ export function ControlPanel(props: Props) {
     currentSentenceIndex,
     currentParagraphIndex,
     onStartStop,
-    onTestMic,
-    onStopMicTest,
+    onStartMicMonitor,
+    onStopMicMonitor,
     onToggleFollow,
     onTogglePause,
     onStepSentence,
@@ -135,6 +172,17 @@ export function ControlPanel(props: Props) {
   const selectedProviderLabel =
     providerOptions.find((option) => option.id === selectedAsrProviderId)?.label ?? 'Manual';
   const localMic = selectedAsrProviderId === 'local-whisper' ? localWhisperStatus.mic : null;
+  const transcriptHistory = getActiveAsrTranscriptHistory(selectedAsrProviderId, deltas, localWhisperStatus);
+  const latestHeard = transcriptHistory.at(-1)?.displayText ||
+    (selectedAsrProviderId === 'openai-realtime'
+      ? liveStatus.lastTranscriptDelta
+      : selectedAsrProviderId === 'local-whisper'
+        ? localWhisperStatus.lastTranscriptDelta
+        : '') ||
+    'Nothing heard yet';
+  const startStopLabel = selectedAsrProviderId === 'local-whisper'
+    ? isListening ? 'Stop Following' : 'Start Following'
+    : isListening ? 'Stop' : 'Start';
 
   return (
     <aside className="control-panel">
@@ -196,14 +244,14 @@ export function ControlPanel(props: Props) {
           </dd>
           {selectedAsrProviderId === 'local-whisper' ? (
             <>
-              <dt>Model</dt>
-              <dd>{localWhisperStatus.modelPhase}</dd>
+              <dt>Sidecar</dt>
+              <dd>{formatSidecarPhase(localWhisperStatus.modelPhase)}</dd>
             </>
           ) : null}
           <dt>Listening</dt>
           <dd>{isListening || isMockPlaying ? 'Listening' : 'Not listening'}</dd>
           <dt>Last delta</dt>
-          <dd>{deltas.at(-1)?.text || liveStatus.lastTranscriptDelta || localWhisperStatus.lastTranscriptDelta || 'None'}</dd>
+          <dd>{latestHeard}</dd>
           <dt>Error</dt>
           <dd>
             {selectedAsrProviderId === 'openai-realtime'
@@ -220,26 +268,43 @@ export function ControlPanel(props: Props) {
               <dd>{localMic.deviceLabel || 'Unavailable until permission is granted'}</dd>
               <dt>Mic error</dt>
               <dd>{localMic.errorMessage ?? 'None'}</dd>
-              <dt>Chunk bytes</dt>
-              <dd>{localMic.lastChunkBytes ? localMic.lastChunkBytes.toLocaleString() : 'None'}</dd>
+              <dt>Warning</dt>
+              <dd>{localWhisperStatus.chunk.warningMessage ?? 'None'}</dd>
             </>
           ) : null}
         </dl>
         {localMic ? (
           <div className="mic-diagnostics">
             <div className="mic-diagnostics-header">
-              <span>Live Input</span>
+              <span>Mic Monitor</span>
               <button
                 type="button"
-                onClick={localMic.testActive ? onStopMicTest : onTestMic}
-                disabled={localWhisperStatus.listening}
+                onClick={localMic.monitorActive ? onStopMicMonitor : onStartMicMonitor}
               >
-                {localMic.testActive ? 'Stop Test' : 'Test Mic'}
+                {localMic.monitorActive ? 'Stop Monitor' : 'Start Monitor'}
               </button>
             </div>
             <div className="level-meter live-level-meter" aria-label="Live microphone input level">
               <div style={{ width: `${Math.round(inputLevel * 100)}%` }} />
             </div>
+            <dl className="chunk-counter-grid">
+              <dt>Recorded</dt>
+              <dd>{localWhisperStatus.chunk.chunksRecorded}</dd>
+              <dt>Sent</dt>
+              <dd>{localWhisperStatus.chunk.chunksSentToMain}</dd>
+              <dt>Sidecar</dt>
+              <dd>{localWhisperStatus.chunk.chunksReceivedBySidecar}</dd>
+              <dt>Returned</dt>
+              <dd>{localWhisperStatus.chunk.chunksReturnedFromSidecar}</dd>
+              <dt>Bytes</dt>
+              <dd>{localWhisperStatus.chunk.lastChunkBytes || 'None'}</dd>
+              <dt>Pending</dt>
+              <dd>{localWhisperStatus.chunk.pendingResponses}</dd>
+              <dt>Last text</dt>
+              <dd>{localWhisperStatus.chunk.lastTranscriptText || 'None'}</dd>
+              <dt>Sidecar error</dt>
+              <dd>{localWhisperStatus.chunk.lastSidecarError ?? 'None'}</dd>
+            </dl>
             <ol className="mic-log">
               {(localMic.log.length ? localMic.log.slice(-6) : ['No microphone activity yet.']).map((entry, index) => (
                 <li key={`${entry}-${index}`}>{entry}</li>
@@ -247,6 +312,27 @@ export function ControlPanel(props: Props) {
             </ol>
           </div>
         ) : null}
+        <div className="asr-transcript-panel">
+          <div className="asr-transcript-header">
+            <span>Heard</span>
+            <span>{transcriptHistory.length} recent</span>
+          </div>
+          <div className="asr-latest-transcript">{latestHeard}</div>
+          <ol className="asr-transcript-history">
+            {(transcriptHistory.length ? transcriptHistory : [{
+              displayText: 'No ASR transcript yet.',
+              timestampMs: 0,
+              isEmpty: true
+            }]).map((item, index) => (
+              <li
+                key={`${item.timestampMs}-${index}-${item.displayText}`}
+                className={item.isEmpty ? 'empty-transcript' : undefined}
+              >
+                {item.displayText}
+              </li>
+            ))}
+          </ol>
+        </div>
         {selectedAsrProviderId === 'local-whisper' ? (
           <div className="local-whisper-settings">
             <label>
@@ -317,7 +403,7 @@ export function ControlPanel(props: Props) {
       </section>
 
       <section className="panel-section button-grid">
-        <button type="button" onClick={onStartStop}>{isListening ? 'Stop' : 'Start'}</button>
+        <button type="button" onClick={onStartStop}>{startStopLabel}</button>
         <button type="button" onClick={onToggleFollow}>{followState === 'manual' ? 'Follow' : 'Manual'}</button>
         <button type="button" onClick={onTogglePause}>{followState === 'paused' ? 'Resume' : 'Pause'}</button>
         <button type="button" onClick={onResync}>Resync</button>

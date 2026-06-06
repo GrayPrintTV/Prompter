@@ -350,17 +350,17 @@ export default function App() {
     setIsMockPlaying(false);
   }, []);
 
-  const testMic = useCallback(async () => {
+  const startMicMonitor = useCallback(async () => {
     if (selectedAsrProviderRef.current !== 'local-whisper') return;
     try {
-      await localWhisperProviderRef.current.testMicrophone();
+      await localWhisperProviderRef.current.startMicMonitoring();
     } catch {
       // Provider diagnostics already carry the user-facing microphone error.
     }
   }, []);
 
-  const stopMicTest = useCallback(async () => {
-    await localWhisperProviderRef.current.stopMicTest();
+  const stopMicMonitor = useCallback(async () => {
+    await localWhisperProviderRef.current.stopMicMonitoring();
   }, []);
 
   const toggleListening = useCallback(async () => {
@@ -588,8 +588,8 @@ export default function App() {
         currentSentenceIndex={currentSentenceIndex}
         currentParagraphIndex={currentParagraphIndex}
         onStartStop={toggleListening}
-        onTestMic={testMic}
-        onStopMicTest={stopMicTest}
+        onStartMicMonitor={startMicMonitor}
+        onStopMicMonitor={stopMicMonitor}
         onToggleFollow={toggleFollow}
         onTogglePause={togglePause}
         onStepSentence={stepSentence}

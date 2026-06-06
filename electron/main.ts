@@ -34,7 +34,7 @@ type LocalWhisperStatus = {
   providerId: 'local-whisper';
   configured: boolean;
   sidecarRunning: boolean;
-  modelPhase: 'stopped' | 'starting' | 'model-loading' | 'model-loaded' | 'error';
+  modelPhase: 'stopped' | 'starting' | 'model-loading' | 'ready' | 'transcribing' | 'returned-empty-transcript' | 'error';
   listening: boolean;
   status: 'idle' | 'starting' | 'listening' | 'error' | 'stopped';
   lastTranscriptDelta: string;
@@ -52,11 +52,29 @@ type LocalWhisperStatus = {
       | 'chunk-returned';
     inputLevel: number;
     deviceLabel: string;
-    testActive: boolean;
-    lastChunkBytes: number;
+    monitorActive: boolean;
     errorMessage: string | null;
     log: string[];
   };
+  chunk: {
+    chunksRecorded: number;
+    chunksSentToMain: number;
+    chunksReceivedBySidecar: number;
+    chunksReturnedFromSidecar: number;
+    lastChunkBytes: number;
+    lastTranscriptText: string;
+    lastSidecarError: string | null;
+    warningMessage: string | null;
+    pendingResponses: number;
+  };
+  transcriptHistory: Array<{
+    text: string;
+    displayText: string;
+    isEmpty: boolean;
+    isFinal: boolean;
+    timestampMs: number;
+    source: 'local-whisper';
+  }>;
 };
 
 type PendingWhisperRequest = {
@@ -91,11 +109,22 @@ let localWhisperStatus: LocalWhisperStatus = {
     captureState: 'not-requested',
     inputLevel: 0,
     deviceLabel: '',
-    testActive: false,
-    lastChunkBytes: 0,
+    monitorActive: false,
     errorMessage: null,
     log: []
-  }
+  },
+  chunk: {
+    chunksRecorded: 0,
+    chunksSentToMain: 0,
+    chunksReceivedBySidecar: 0,
+    chunksReturnedFromSidecar: 0,
+    lastChunkBytes: 0,
+    lastTranscriptText: '',
+    lastSidecarError: null,
+    warningMessage: null,
+    pendingResponses: 0
+  },
+  transcriptHistory: []
 };
 
 function parseEnvFile(filePath: string) {
@@ -177,9 +206,26 @@ function patchLocalWhisperStatus(patch: Partial<LocalWhisperStatus>) {
       ...localWhisperStatus.mic,
       ...patch.mic,
       log: patch.mic?.log ?? localWhisperStatus.mic.log
-    }
+    },
+    chunk: {
+      ...localWhisperStatus.chunk,
+      ...patch.chunk
+    },
+    transcriptHistory: patch.transcriptHistory ?? localWhisperStatus.transcriptHistory
   };
   mainWindow?.webContents.send('local-whisper:status', localWhisperStatus);
+}
+
+function localWhisperTranscriptHistoryItem(text: string) {
+  const trimmed = text.trim();
+  return {
+    text: trimmed,
+    displayText: trimmed || '[empty transcript]',
+    isEmpty: trimmed.length === 0,
+    isFinal: true,
+    timestampMs: Date.now(),
+    source: 'local-whisper' as const
+  };
 }
 
 function sidecarPath() {
@@ -246,7 +292,7 @@ function handleLocalWhisperMessage(message: Record<string, unknown>) {
     return;
   }
   if (messageType === 'model-loaded') {
-    patchLocalWhisperStatus({ modelPhase: 'model-loaded', status: 'listening', sidecarRunning: true });
+    patchLocalWhisperStatus({ modelPhase: 'ready', status: 'listening', sidecarRunning: true });
     return;
   }
   if (messageType === 'transcript') {
@@ -255,7 +301,18 @@ function handleLocalWhisperMessage(message: Record<string, unknown>) {
     if (!pending) return;
     pendingWhisperRequests.delete(requestId);
     const text = String(message.text ?? '');
-    patchLocalWhisperStatus({ lastTranscriptDelta: text });
+    const historyItem = localWhisperTranscriptHistoryItem(text);
+    patchLocalWhisperStatus({
+      modelPhase: historyItem.isEmpty ? 'returned-empty-transcript' : 'ready',
+      lastTranscriptDelta: historyItem.displayText,
+      chunk: {
+        ...localWhisperStatus.chunk,
+        chunksReturnedFromSidecar: localWhisperStatus.chunk.chunksReturnedFromSidecar + 1,
+        lastTranscriptText: historyItem.displayText,
+        pendingResponses: Math.max(0, localWhisperStatus.chunk.pendingResponses - 1)
+      },
+      transcriptHistory: [...localWhisperStatus.transcriptHistory, historyItem].slice(-12)
+    });
     pending.resolve({
       text,
       durationSeconds: typeof message.durationSeconds === 'number' ? message.durationSeconds : undefined
@@ -265,7 +322,17 @@ function handleLocalWhisperMessage(message: Record<string, unknown>) {
   }
   if (messageType === 'error') {
     const error = new Error(String(message.message ?? 'Local Whisper sidecar error.'));
-    patchLocalWhisperStatus({ modelPhase: 'error', status: 'error', errorMessage: error.message });
+    patchLocalWhisperStatus({
+      modelPhase: 'error',
+      status: 'error',
+      errorMessage: error.message,
+      chunk: {
+        ...localWhisperStatus.chunk,
+        lastSidecarError: error.message,
+        warningMessage: error.message,
+        pendingResponses: 0
+      }
+    });
     rejectSidecarReadyWaiters(error);
     rejectPendingWhisperRequests(error);
   }
@@ -281,7 +348,16 @@ function handleLocalWhisperStdout(chunk: Buffer) {
       try {
         handleLocalWhisperMessage(JSON.parse(line) as Record<string, unknown>);
       } catch {
-        patchLocalWhisperStatus({ modelPhase: 'error', status: 'error', errorMessage: 'Invalid Local Whisper sidecar response.' });
+        patchLocalWhisperStatus({
+          modelPhase: 'error',
+          status: 'error',
+          errorMessage: 'Invalid Local Whisper sidecar response.',
+          chunk: {
+            ...localWhisperStatus.chunk,
+            lastSidecarError: 'Invalid Local Whisper sidecar response.',
+            warningMessage: 'Invalid Local Whisper sidecar response.'
+          }
+        });
       }
     }
     newlineIndex = localWhisperBuffer.indexOf('\n');
@@ -314,7 +390,14 @@ async function startLocalWhisperSidecar(settings: LocalWhisperSettings) {
     localWhisperProcess.stderr.on('data', (chunk) => {
       const message = String(chunk).trim();
       if (message) {
-        patchLocalWhisperStatus({ errorMessage: message.slice(0, 500) });
+        const errorMessage = message.slice(0, 500);
+        patchLocalWhisperStatus({
+          errorMessage,
+          chunk: {
+            ...localWhisperStatus.chunk,
+            lastSidecarError: errorMessage
+          }
+        });
       }
     });
     localWhisperProcess.on('error', (error) => {
@@ -336,7 +419,11 @@ async function startLocalWhisperSidecar(settings: LocalWhisperSettings) {
         sidecarRunning: false,
         modelPhase: 'stopped',
         listening: false,
-        status: 'stopped'
+        status: 'stopped',
+        chunk: {
+          ...localWhisperStatus.chunk,
+          pendingResponses: 0
+        }
       });
       const stoppedError = new Error('Local Whisper sidecar stopped.');
       rejectSidecarReadyWaiters(stoppedError);
@@ -523,7 +610,11 @@ ipcMain.handle('local-whisper:stop', () => {
     modelPhase: 'stopped',
     listening: false,
     status: 'stopped',
-    errorMessage: null
+    errorMessage: null,
+    chunk: {
+      ...localWhisperStatus.chunk,
+      pendingResponses: 0
+    }
   });
   return localWhisperStatus;
 });
@@ -552,6 +643,16 @@ ipcMain.handle(
         modelName: payload.settings.modelName,
         device: payload.settings.device,
         computeType: payload.settings.computeType
+      });
+      patchLocalWhisperStatus({
+        modelPhase: 'transcribing',
+        chunk: {
+          ...localWhisperStatus.chunk,
+          chunksReceivedBySidecar: localWhisperStatus.chunk.chunksReceivedBySidecar + 1,
+          lastChunkBytes: payload.audioData.byteLength,
+          pendingResponses: localWhisperStatus.chunk.pendingResponses + 1,
+          warningMessage: null
+        }
       });
     });
     return result;

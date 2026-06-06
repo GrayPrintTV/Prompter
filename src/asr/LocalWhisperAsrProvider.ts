@@ -1,5 +1,7 @@
 import type { AsrProvider, AsrStatus, TranscriptDelta } from './AsrProvider';
 import type {
+  AsrTranscriptHistoryItem,
+  LocalWhisperChunkDiagnostics,
   LocalWhisperSettings,
   LocalWhisperStatus,
   LocalWhisperTranscriptResult,
@@ -28,20 +30,36 @@ type LocalWhisperDeps = {
   createAudioContext?: () => AudioContext | null;
   requestAnimationFrame?: (callback: FrameRequestCallback) => number;
   cancelAnimationFrame?: (handle: number) => void;
+  chunkResponseTimeoutMs?: number;
   now?: () => number;
 };
 
 const MAX_MIC_LOG_LINES = 18;
+const MAX_TRANSCRIPT_HISTORY = 12;
+const DEFAULT_CHUNK_RESPONSE_TIMEOUT_MS = 15000;
 
 function createDefaultMicDiagnostics(): MicCaptureDiagnostics {
   return {
     captureState: 'not-requested',
     inputLevel: 0,
     deviceLabel: '',
-    testActive: false,
-    lastChunkBytes: 0,
+    monitorActive: false,
     errorMessage: null,
     log: []
+  };
+}
+
+function createDefaultChunkDiagnostics(): LocalWhisperChunkDiagnostics {
+  return {
+    chunksRecorded: 0,
+    chunksSentToMain: 0,
+    chunksReceivedBySidecar: 0,
+    chunksReturnedFromSidecar: 0,
+    lastChunkBytes: 0,
+    lastTranscriptText: '',
+    lastSidecarError: null,
+    warningMessage: null,
+    pendingResponses: 0
   };
 }
 
@@ -54,7 +72,9 @@ export const DEFAULT_LOCAL_WHISPER_STATUS: LocalWhisperStatus = {
   status: 'idle',
   lastTranscriptDelta: '',
   errorMessage: null,
-  mic: createDefaultMicDiagnostics()
+  mic: createDefaultMicDiagnostics(),
+  chunk: createDefaultChunkDiagnostics(),
+  transcriptHistory: []
 };
 
 export class LocalWhisperAsrProvider implements AsrProvider {
@@ -64,19 +84,21 @@ export class LocalWhisperAsrProvider implements AsrProvider {
   private listeners = new Set<Listener>();
   private statusListeners = new Set<StatusListener>();
   private mediaStream: MediaStream | null = null;
-  private micTestStream: MediaStream | null = null;
   private recorder: MediaRecorder | null = null;
   private statusOff: (() => void) | null = null;
   private busy = false;
   private connectionStatus: LocalWhisperStatus = {
     ...DEFAULT_LOCAL_WHISPER_STATUS,
-    mic: createDefaultMicDiagnostics()
+    mic: createDefaultMicDiagnostics(),
+    chunk: createDefaultChunkDiagnostics(),
+    transcriptHistory: []
   };
   private audioContext: AudioContext | null = null;
   private micAnalyser: AnalyserNode | null = null;
   private micSourceNode: MediaStreamAudioSourceNode | null = null;
   private micAnimationFrame: number | null = null;
   private lastLevelUpdateMs = 0;
+  private recorderWatchdogTimeout: number | null = null;
 
   constructor(private settings: LocalWhisperSettings, private deps: LocalWhisperDeps = {}) {}
 
@@ -94,7 +116,11 @@ export class LocalWhisperAsrProvider implements AsrProvider {
         ...createDefaultMicDiagnostics(),
         ...status.mic,
         ...this.connectionStatus.mic
-      }
+      },
+      chunk: this.mergeChunkDiagnostics(status.chunk),
+      transcriptHistory: status.transcriptHistory?.length
+        ? status.transcriptHistory
+        : this.connectionStatus.transcriptHistory
     });
     return this.connectionStatus;
   }
@@ -108,16 +134,20 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       throw new Error(message);
     }
 
-    await this.stopMicTest();
     this.setProviderStatus('starting', null);
     this.updateMic(
       {
-        captureState: 'not-requested',
-        inputLevel: 0,
         errorMessage: null,
         log: []
       },
-      'Local Whisper start requested.'
+      'Start Following requested.'
+    );
+    this.updateChunk(
+      {
+        warningMessage: null,
+        lastSidecarError: null,
+        pendingResponses: 0
+      }
     );
 
     try {
@@ -126,7 +156,11 @@ export class LocalWhisperAsrProvider implements AsrProvider {
         this.setConnectionStatus({
           ...status,
           configured: this.isConfigured(),
-          mic: this.connectionStatus.mic
+          mic: this.connectionStatus.mic,
+          chunk: this.mergeChunkDiagnostics(status.chunk),
+          transcriptHistory: status.transcriptHistory?.length
+            ? status.transcriptHistory
+            : this.connectionStatus.transcriptHistory
         });
       });
 
@@ -145,15 +179,24 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       this.setConnectionStatus({
         ...sidecarStatus,
         configured: this.isConfigured(),
-        mic: this.connectionStatus.mic
+        mic: this.connectionStatus.mic,
+        chunk: this.mergeChunkDiagnostics(sidecarStatus.chunk),
+        transcriptHistory: sidecarStatus.transcriptHistory?.length
+          ? sidecarStatus.transcriptHistory
+          : this.connectionStatus.transcriptHistory
       });
-      this.mediaStream = await this.requestMicrophoneStream();
+      this.mediaStream = await this.ensureMicrophoneStream();
       this.recorder = this.createMediaRecorder(this.mediaStream);
       this.recorder.addEventListener('start', () => {
         this.updateMic({ captureState: 'media-recorder-recording' }, 'MediaRecorder start.');
+        this.startRecorderWatchdog();
       });
       this.recorder.addEventListener('stop', () => {
-        this.updateMic({ captureState: 'stream-muted-ended', inputLevel: 0 }, 'MediaRecorder stopped.');
+        this.stopRecorderWatchdog();
+        this.updateMic(
+          { captureState: this.streamIsActive() ? 'stream-active' : 'stream-muted-ended' },
+          'MediaRecorder stopped.'
+        );
       });
       this.recorder.addEventListener('error', () => {
         this.updateMic(
@@ -166,6 +209,7 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       });
       this.recorder.start(Math.max(1, this.settings.chunkDurationSeconds) * 1000);
       this.updateMic({ captureState: 'media-recorder-recording' }, 'MediaRecorder start requested.');
+      this.setConnectionStatus({ modelPhase: 'ready' });
       this.setProviderStatus('listening', null);
     } catch (error) {
       await this.stop();
@@ -179,12 +223,15 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       this.recorder?.stop();
     }
     this.recorder = null;
+    this.stopRecorderWatchdog();
 
-    if (this.mediaStream) {
+    if (this.mediaStream && !this.connectionStatus.mic.monitorActive) {
       this.stopStream(this.mediaStream);
       this.mediaStream = null;
-      this.stopMicMonitor();
+      this.stopLevelMeter();
       this.updateMic({ captureState: 'stream-muted-ended', inputLevel: 0 }, 'Microphone stream stopped.');
+    } else if (this.mediaStream) {
+      this.updateMic({ captureState: 'stream-active' }, 'Following stopped; Mic Monitor remains active.');
     }
 
     this.statusOff?.();
@@ -194,48 +241,58 @@ export class LocalWhisperAsrProvider implements AsrProvider {
     this.setConnectionStatus({ sidecarRunning: false, modelPhase: 'stopped' });
   }
 
-  async testMicrophone() {
+  async startMicMonitoring() {
     if (this.status === 'starting' || this.status === 'listening') {
-      this.updateMic({}, 'Mic test skipped because Local Whisper is already listening.');
+      this.updateMic({ monitorActive: true }, 'Mic Monitor attached while following is active.');
       return;
     }
 
-    await this.stopMicTest();
     this.updateMic(
       {
-        captureState: 'not-requested',
-        inputLevel: 0,
-        testActive: true,
+        monitorActive: true,
         errorMessage: null,
         log: []
       },
-      'Mic test requested.'
+      'Mic Monitor requested.'
     );
 
     try {
-      this.micTestStream = await this.requestMicrophoneStream();
+      this.mediaStream = await this.ensureMicrophoneStream();
     } catch (error) {
-      this.micTestStream = null;
-      this.updateMic({ testActive: false }, 'Mic test failed.');
+      this.mediaStream = null;
+      this.updateMic({ monitorActive: false }, 'Mic Monitor failed.');
       throw error;
     }
   }
 
-  async stopMicTest() {
-    if (!this.micTestStream && !this.connectionStatus.mic.testActive) return;
-    if (this.micTestStream) {
-      this.stopStream(this.micTestStream);
-      this.micTestStream = null;
-      this.stopMicMonitor();
+  async stopMicMonitoring() {
+    if (!this.mediaStream && !this.connectionStatus.mic.monitorActive) return;
+    if (this.status === 'listening' || this.status === 'starting') {
+      this.updateMic({ monitorActive: false }, 'Mic Monitor will release after following stops.');
+      return;
+    }
+
+    if (this.mediaStream) {
+      this.stopStream(this.mediaStream);
+      this.mediaStream = null;
+      this.stopLevelMeter();
     }
     this.updateMic(
       {
         captureState: 'stream-muted-ended',
         inputLevel: 0,
-        testActive: false
+        monitorActive: false
       },
-      'Mic test stopped.'
+      'Mic Monitor stopped.'
     );
+  }
+
+  async testMicrophone() {
+    return this.startMicMonitoring();
+  }
+
+  async stopMicTest() {
+    return this.stopMicMonitoring();
   }
 
   onDelta(callback: Listener) {
@@ -259,22 +316,44 @@ export class LocalWhisperAsrProvider implements AsrProvider {
 
   async acceptTranscriptResult(result: LocalWhisperTranscriptResult) {
     const text = result.text.trim();
-    if (!text) return;
-    const delta: TranscriptDelta = {
+    const displayText = text || '[empty transcript]';
+    const historyItem: AsrTranscriptHistoryItem = {
       text,
+      displayText,
+      isEmpty: text.length === 0,
       isFinal: true,
       timestampMs: this.now(),
       source: 'local-whisper'
     };
-    this.setConnectionStatus({ lastTranscriptDelta: text });
+    this.setConnectionStatus({
+      lastTranscriptDelta: displayText,
+      modelPhase: text ? 'ready' : 'returned-empty-transcript',
+      transcriptHistory: [...this.connectionStatus.transcriptHistory, historyItem].slice(-MAX_TRANSCRIPT_HISTORY)
+    });
+    this.updateChunk({ lastTranscriptText: displayText });
+    if (!text) {
+      this.updateMic({}, 'Sidecar returned empty transcript.');
+      return;
+    }
+    const delta: TranscriptDelta = {
+      text,
+      isFinal: true,
+      timestampMs: historyItem.timestampMs,
+      source: 'local-whisper'
+    };
     for (const listener of this.listeners) {
       listener(delta);
     }
   }
 
   async acceptRecordedAudioChunk(blob: Blob) {
+    this.updateChunk({
+      chunksRecorded: this.connectionStatus.chunk.chunksRecorded + 1,
+      lastChunkBytes: blob.size,
+      warningMessage: null
+    });
     if (blob.size > 0) {
-      this.updateMic({ lastChunkBytes: blob.size }, `MediaRecorder chunk emitted: ${blob.size} bytes.`);
+      this.updateMic({}, `MediaRecorder chunk emitted: ${blob.size} bytes.`);
     }
     if (blob.size === 0) {
       this.updateMic({}, 'Chunk skipped: MediaRecorder emitted an empty blob.');
@@ -289,36 +368,62 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       return;
     }
     this.busy = true;
+    const receivedBefore = this.connectionStatus.chunk.chunksReceivedBySidecar;
+    const returnedBefore = this.connectionStatus.chunk.chunksReturnedFromSidecar;
+    const timeoutHandle = this.setResponseTimeout();
     try {
       const audioData = await blob.arrayBuffer();
+      this.updateChunk({
+        chunksSentToMain: this.connectionStatus.chunk.chunksSentToMain + 1,
+        pendingResponses: this.connectionStatus.chunk.pendingResponses + 1,
+        warningMessage: null
+      });
+      this.setConnectionStatus({ modelPhase: 'transcribing' });
       this.updateMic({ captureState: 'chunk-sent' }, `IPC send to main: ${blob.size} bytes.`);
       const result = await this.getBridge().transcribeLocalWhisperChunk({
         audioData,
         mimeType: blob.type || 'audio/webm',
         settings: this.settings
       });
+      if (this.connectionStatus.chunk.chunksReceivedBySidecar <= receivedBefore) {
+        this.updateChunk({ chunksReceivedBySidecar: receivedBefore + 1 });
+      }
+      if (this.connectionStatus.chunk.chunksReturnedFromSidecar <= returnedBefore) {
+        this.updateChunk({ chunksReturnedFromSidecar: returnedBefore + 1 });
+      }
+      this.updateChunk({ warningMessage: null });
       this.updateMic({ captureState: 'chunk-returned' }, 'Sidecar response received.');
       await this.acceptTranscriptResult(result);
     } catch (error) {
       const message = this.errorMessage(error, 'Local Whisper transcription failed.');
+      this.updateChunk({ lastSidecarError: message, warningMessage: message });
       this.updateMic({ errorMessage: message }, `Sidecar response failed: ${message}`);
       this.setProviderStatus('error', message);
     } finally {
+      this.clearResponseTimeout(timeoutHandle);
+      this.updateChunk({ pendingResponses: Math.max(0, this.connectionStatus.chunk.pendingResponses - 1) });
       this.busy = false;
+      this.startRecorderWatchdog();
     }
   }
 
-  private async requestMicrophoneStream() {
+  private async ensureMicrophoneStream() {
+    if (this.streamIsActive()) {
+      this.updateMic({ captureState: 'stream-active' }, 'Reusing active microphone stream.');
+      return this.mediaStream as MediaStream;
+    }
+
     this.updateMic({ captureState: 'requesting-permission', errorMessage: null }, 'getUserMedia start.');
     try {
       const stream = await this.getUserMedia({ audio: true });
       const deviceLabel = this.inputDeviceLabel(stream);
+      this.mediaStream = stream;
       this.updateMic(
         { captureState: 'permission-granted', deviceLabel, errorMessage: null },
         `getUserMedia success: ${deviceLabel}.`
       );
       this.bindStreamDiagnostics(stream);
-      this.startMicMonitor(stream);
+      this.startLevelMeter(stream);
       this.updateMic({ captureState: 'stream-active' }, 'Microphone stream active.');
       return stream;
     } catch (error) {
@@ -343,8 +448,8 @@ export class LocalWhisperAsrProvider implements AsrProvider {
     }
   }
 
-  private startMicMonitor(stream: MediaStream) {
-    this.stopMicMonitor();
+  private startLevelMeter(stream: MediaStream) {
+    this.stopLevelMeter();
     const audioContext = this.createAudioContext();
     if (!audioContext) {
       this.updateMic({}, 'Web Audio analyser unavailable; input level cannot be displayed.');
@@ -387,7 +492,7 @@ export class LocalWhisperAsrProvider implements AsrProvider {
     }
   }
 
-  private stopMicMonitor() {
+  private stopLevelMeter() {
     if (this.micAnimationFrame !== null) {
       this.cancelAnimationFrame(this.micAnimationFrame);
       this.micAnimationFrame = null;
@@ -412,6 +517,48 @@ export class LocalWhisperAsrProvider implements AsrProvider {
     return track?.label || 'Default microphone';
   }
 
+  private streamIsActive() {
+    return Boolean(
+      this.mediaStream &&
+      this.mediaStream.getAudioTracks().some((track) => track.readyState !== 'ended')
+    );
+  }
+
+  private startRecorderWatchdog() {
+    this.stopRecorderWatchdog();
+    if (this.status !== 'listening' && this.status !== 'starting') return;
+    const recordedAtStart = this.connectionStatus.chunk.chunksRecorded;
+    const timeoutMs = Math.max(1800, this.settings.chunkDurationSeconds * 1500 + 1000);
+    this.recorderWatchdogTimeout = this.requestTimeout(() => {
+      const noChunks = this.connectionStatus.chunk.chunksRecorded === recordedAtStart;
+      const meterMoving = this.connectionStatus.mic.inputLevel > 0.03;
+      if (noChunks && meterMoving && this.recorder?.state === 'recording') {
+        const message = 'Input level is moving, but MediaRecorder has not emitted chunks.';
+        this.updateChunk({ warningMessage: message });
+        this.updateMic({}, message);
+      }
+    }, timeoutMs);
+  }
+
+  private stopRecorderWatchdog() {
+    if (this.recorderWatchdogTimeout !== null) {
+      this.cancelTimeout(this.recorderWatchdogTimeout);
+      this.recorderWatchdogTimeout = null;
+    }
+  }
+
+  private setResponseTimeout() {
+    return this.requestTimeout(() => {
+      const message = `Chunk sent but no sidecar response within ${Math.round(this.responseTimeoutMs / 1000)} seconds.`;
+      this.updateChunk({ warningMessage: message });
+      this.updateMic({}, message);
+    }, this.responseTimeoutMs);
+  }
+
+  private clearResponseTimeout(handle: number) {
+    this.cancelTimeout(handle);
+  }
+
   private updateMic(patch: Partial<MicCaptureDiagnostics>, logMessage?: string) {
     const previous = this.connectionStatus.mic;
     const baseLog = patch.log ?? previous.log;
@@ -425,6 +572,30 @@ export class LocalWhisperAsrProvider implements AsrProvider {
         log: nextLog
       }
     });
+  }
+
+  private updateChunk(patch: Partial<LocalWhisperChunkDiagnostics>) {
+    this.setConnectionStatus({
+      chunk: {
+        ...this.connectionStatus.chunk,
+        ...patch
+      }
+    });
+  }
+
+  private mergeChunkDiagnostics(remote?: LocalWhisperChunkDiagnostics) {
+    const current = this.connectionStatus.chunk;
+    if (!remote) return current;
+    return {
+      ...current,
+      ...remote,
+      chunksRecorded: Math.max(current.chunksRecorded, remote.chunksRecorded),
+      chunksSentToMain: Math.max(current.chunksSentToMain, remote.chunksSentToMain),
+      chunksReceivedBySidecar: Math.max(current.chunksReceivedBySidecar, remote.chunksReceivedBySidecar),
+      chunksReturnedFromSidecar: Math.max(current.chunksReturnedFromSidecar, remote.chunksReturnedFromSidecar),
+      pendingResponses: Math.max(current.pendingResponses, remote.pendingResponses),
+      lastChunkBytes: Math.max(current.lastChunkBytes, remote.lastChunkBytes)
+    };
   }
 
   private setProviderStatus(status: AsrStatus, errorMessage: string | null) {
@@ -444,12 +615,20 @@ export class LocalWhisperAsrProvider implements AsrProvider {
           log: patch.mic.log ?? this.connectionStatus.mic.log
         }
       : this.connectionStatus.mic;
+    const chunk = patch.chunk
+      ? {
+          ...this.connectionStatus.chunk,
+          ...patch.chunk
+        }
+      : this.connectionStatus.chunk;
     this.connectionStatus = {
       ...this.connectionStatus,
       ...patch,
       providerId: 'local-whisper',
       configured: this.isConfigured(),
-      mic
+      mic,
+      chunk,
+      transcriptHistory: patch.transcriptHistory ?? this.connectionStatus.transcriptHistory
     };
     for (const listener of this.statusListeners) {
       listener(this.connectionStatus);
@@ -510,6 +689,14 @@ export class LocalWhisperAsrProvider implements AsrProvider {
     }
   }
 
+  private requestTimeout(callback: () => void, delayMs: number) {
+    return window.setTimeout(callback, delayMs);
+  }
+
+  private cancelTimeout(handle: number) {
+    window.clearTimeout(handle);
+  }
+
   private isPermissionDenied(error: unknown) {
     if (!(error instanceof Error)) return false;
     return /notallowed|permissiondenied|security/i.test(error.name) || /denied|permission/i.test(error.message);
@@ -521,5 +708,9 @@ export class LocalWhisperAsrProvider implements AsrProvider {
 
   private now() {
     return this.deps.now ? this.deps.now() : Date.now();
+  }
+
+  private get responseTimeoutMs() {
+    return this.deps.chunkResponseTimeoutMs ?? DEFAULT_CHUNK_RESPONSE_TIMEOUT_MS;
   }
 }

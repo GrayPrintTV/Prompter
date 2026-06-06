@@ -9,6 +9,11 @@ export type TranscriptDelta = {
   source: TranscriptSource;
 };
 
+export type AsrTranscriptHistoryItem = TranscriptDelta & {
+  displayText: string;
+  isEmpty: boolean;
+};
+
 export type AsrStatus = 'idle' | 'starting' | 'listening' | 'error' | 'stopped';
 
 export interface AsrProvider {
@@ -144,13 +149,31 @@ export type MicCaptureDiagnostics = {
   captureState: MicCaptureState;
   inputLevel: number;
   deviceLabel: string;
-  testActive: boolean;
-  lastChunkBytes: number;
+  monitorActive: boolean;
   errorMessage: string | null;
   log: string[];
 };
 
-export type LocalWhisperSidecarPhase = 'stopped' | 'starting' | 'model-loading' | 'model-loaded' | 'error';
+export type LocalWhisperSidecarPhase =
+  | 'stopped'
+  | 'starting'
+  | 'model-loading'
+  | 'ready'
+  | 'transcribing'
+  | 'returned-empty-transcript'
+  | 'error';
+
+export type LocalWhisperChunkDiagnostics = {
+  chunksRecorded: number;
+  chunksSentToMain: number;
+  chunksReceivedBySidecar: number;
+  chunksReturnedFromSidecar: number;
+  lastChunkBytes: number;
+  lastTranscriptText: string;
+  lastSidecarError: string | null;
+  warningMessage: string | null;
+  pendingResponses: number;
+};
 
 export type LocalWhisperStatus = {
   providerId: 'local-whisper';
@@ -162,6 +185,8 @@ export type LocalWhisperStatus = {
   lastTranscriptDelta: string;
   errorMessage: string | null;
   mic: MicCaptureDiagnostics;
+  chunk: LocalWhisperChunkDiagnostics;
+  transcriptHistory: AsrTranscriptHistoryItem[];
 };
 
 export type LocalWhisperTranscriptResult = {

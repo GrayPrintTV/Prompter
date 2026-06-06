@@ -89,9 +89,11 @@ python -m pip install -r python/requirements.txt
 
 Then select `Local Whisper` in the ASR Provider dropdown. The settings panel lets you adjust the Python path, model, device, compute type, and chunk duration. A little chunk latency is expected; the aligner only needs enough recognized words every sentence or two.
 
-Before pressing `Start`, use `Test Mic` in the Local Whisper panel. It only requests microphone access and starts the live input meter; it does not start Whisper transcription or move the prompter. The panel shows the mic capture state, selected/default input label when Chromium exposes it, any permission/setup error, the latest chunk size, and recent diagnostics such as `getUserMedia start`, `MediaRecorder start`, `IPC send to main`, and `Sidecar response received`.
+Use `Start Monitor` first. Mic Monitor only requests microphone access and holds the input stream for the live level meter; it does not start Whisper transcription or move the prompter. When the meter is moving, press `Start Following` to start MediaRecorder chunking, send chunks through Electron main to the Python sidecar, receive transcript text, and feed normal transcript deltas into the existing aligner. `Stop Following` stops transcription and following, but leaves Mic Monitor visible/running when it was started separately.
 
-If `Start` fails before the app asks for microphone permission, check the Local Whisper error and mic diagnostics first. A Python path, missing `faster-whisper` install, or sidecar startup failure is reported as setup failure before `getUserMedia`.
+The Local Whisper panel shows mic state, selected/default input label when Chromium exposes it, sidecar phase, chunk counters, last chunk size, last transcript text, recent ASR transcript history under `Heard`, and warnings for missing MediaRecorder chunks or sidecar response timeouts. Empty Whisper returns are shown as `[empty transcript]` so silence is visible instead of looking like nothing happened.
+
+If `Start Following` fails before the app asks for microphone permission, check the Local Whisper error and mic diagnostics first. A Python path, missing `faster-whisper` install, or sidecar startup failure is reported as setup failure before `getUserMedia`.
 
 ## Legacy Codex environment workaround
 
