@@ -261,6 +261,28 @@ textarea {
   gap: 8px;
 }
 
+.provider-select {
+  width: 100%;
+}
+
+.asr-status-grid {
+  display: grid;
+  grid-template-columns: 104px minmax(0, 1fr);
+  gap: 7px 10px;
+  margin: 12px 0 0;
+  font-size: 12px;
+}
+
+.asr-status-grid dt {
+  color: var(--muted);
+}
+
+.asr-status-grid dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
 .torture-case-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

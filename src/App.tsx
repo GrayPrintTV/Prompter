@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ManualAsrProvider } from './asr/ManualAsrProvider';
 import { MockAsrProvider } from './asr/MockAsrProvider';
+import { OpenAiRealtimeAsrProvider } from './asr/OpenAiRealtimeAsrProvider';
+import { coerceSelectedProvider } from './asr/providerRegistry';
 import { ControlPanel } from './components/ControlPanel';
 import { PrompterView } from './components/PrompterView';
 import { alignTranscript } from './domain/alignment';
@@ -14,7 +16,16 @@ import {
 } from './domain/manuscript';
 import { stateFromAlignment } from './domain/scrollModel';
 import { transcriptToTokens } from './domain/normalize';
-import type { AlignmentResult, DisplaySettings, FollowState, ManuscriptModel, TranscriptDelta } from './domain/types';
+import type {
+  AlignmentResult,
+  AsrProviderId,
+  DisplaySettings,
+  FollowState,
+  LiveAsrConfigStatus,
+  LiveAsrConnectionStatus,
+  ManuscriptModel,
+  TranscriptDelta
+} from './domain/types';
 import { DEFAULT_DISPLAY_SETTINGS, DEFAULT_MOCK_SCRIPT, SAMPLE_MANUSCRIPT } from './state/appStore';
 import { loadSession, saveSession } from './state/projectStore';
 import { isEditableTarget } from './shortcuts/shortcuts';
@@ -36,6 +47,24 @@ function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
 
+const DEFAULT_LIVE_CONFIG: LiveAsrConfigStatus = {
+  configured: false,
+  providerId: 'openai-realtime',
+  model: 'gpt-4o-transcribe',
+  language: 'en',
+  promptConfigured: false
+};
+
+const DEFAULT_LIVE_STATUS: LiveAsrConnectionStatus = {
+  providerId: 'openai-realtime',
+  configured: false,
+  connected: false,
+  listening: false,
+  status: 'idle',
+  lastTranscriptDelta: '',
+  errorMessage: null
+};
+
 export default function App() {
   const stored = useMemo(() => loadSession(), []);
   const [projectTitle, setProjectTitle] = useState(stored?.projectTitle ?? 'Narration Session');
@@ -50,6 +79,11 @@ export default function App() {
   const [followState, setFollowState] = useState<FollowState>(stored?.followState ?? 'manual');
   const [manualTranscript, setManualTranscript] = useState('');
   const [mockScript, setMockScript] = useState(stored?.mockScript ?? DEFAULT_MOCK_SCRIPT);
+  const [liveConfig, setLiveConfig] = useState<LiveAsrConfigStatus>(DEFAULT_LIVE_CONFIG);
+  const [liveStatus, setLiveStatus] = useState<LiveAsrConnectionStatus>(DEFAULT_LIVE_STATUS);
+  const [selectedAsrProviderId, setSelectedAsrProviderId] = useState<AsrProviderId>(
+    (stored?.selectedAsrProviderId as AsrProviderId | undefined) ?? 'manual'
+  );
   const [isListening, setIsListening] = useState(false);
   const [isMockPlaying, setIsMockPlaying] = useState(false);
   const [debugVisible, setDebugVisible] = useState(stored?.debugVisible ?? true);
@@ -61,6 +95,7 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const manualProviderRef = useRef(new ManualAsrProvider());
   const mockProviderRef = useRef(new MockAsrProvider());
+  const liveProviderRef = useRef(new OpenAiRealtimeAsrProvider());
   const resyncArmedRef = useRef(false);
   const lowConfidenceCountRef = useRef(0);
   const manuscript = useMemo(() => buildManuscript(manuscriptText), [manuscriptText]);
@@ -68,6 +103,7 @@ export default function App() {
   const currentTokenRef = useRef(currentTokenIndex);
   const followStateRef = useRef(followState);
   const [alignment, setAlignment] = useState<AlignmentResult>(() => emptyAlignment(manuscript, currentTokenIndex));
+  const selectedAsrProviderRef = useRef(selectedAsrProviderId);
 
   useEffect(() => {
     manuscriptRef.current = manuscript;
@@ -87,6 +123,10 @@ export default function App() {
   useEffect(() => {
     followStateRef.current = followState;
   }, [followState]);
+
+  useEffect(() => {
+    selectedAsrProviderRef.current = selectedAsrProviderId;
+  }, [selectedAsrProviderId]);
 
   const moveToToken = useCallback((tokenIndex: number, nextState: FollowState = 'manual') => {
     const model = manuscriptRef.current;
@@ -140,13 +180,41 @@ export default function App() {
   useEffect(() => {
     const manualOff = manualProviderRef.current.onDelta(processDelta);
     const mockOff = mockProviderRef.current.onDelta(processDelta);
+    const liveOff = liveProviderRef.current.onDelta(processDelta);
+    const liveStatusOff = liveProviderRef.current.onConnectionStatus(setLiveStatus);
     const doneOff = mockProviderRef.current.onDone(() => setIsMockPlaying(false));
     return () => {
       manualOff();
       mockOff();
+      liveOff();
+      liveStatusOff();
       doneOff();
     };
   }, [processDelta]);
+
+  useEffect(() => {
+    let cancelled = false;
+    liveProviderRef.current
+      .refreshConfiguration()
+      .then((config) => {
+        if (cancelled) return;
+        setLiveConfig(config);
+        setLiveStatus((status) => ({ ...status, configured: config.configured }));
+        setSelectedAsrProviderId((providerId) => coerceSelectedProvider(providerId, config));
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setLiveStatus((status) => ({
+          ...status,
+          status: 'error',
+          errorMessage: error instanceof Error ? error.message : 'Unable to read live ASR configuration.'
+        }));
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -165,6 +233,7 @@ export default function App() {
         currentParagraphIndex,
         displaySettings,
         followState,
+        selectedAsrProviderId,
         mockScript,
         debugVisible
       });
@@ -179,22 +248,9 @@ export default function App() {
     followState,
     manuscriptText,
     mockScript,
-    projectTitle
+    projectTitle,
+    selectedAsrProviderId
   ]);
-
-  const toggleListening = useCallback(async () => {
-    if (isListening) {
-      await manualProviderRef.current.stop();
-      setIsListening(false);
-      if (followStateRef.current !== 'manual') setFollowState('paused');
-    } else {
-      await manualProviderRef.current.start();
-      setIsListening(true);
-      if (followStateRef.current === 'paused' || followStateRef.current === 'manual') {
-        setFollowState('following');
-      }
-    }
-  }, [isListening]);
 
   const toggleFollow = useCallback(() => {
     setFollowState((previous) => (previous === 'manual' ? 'following' : 'manual'));
@@ -243,6 +299,46 @@ export default function App() {
     await mockProviderRef.current.stop();
     setIsMockPlaying(false);
   }, []);
+
+  const toggleListening = useCallback(async () => {
+    if (selectedAsrProviderRef.current === 'mock') {
+      if (isMockPlaying) {
+        await stopMock();
+      } else {
+        await playMock();
+      }
+      return;
+    }
+
+    if (selectedAsrProviderRef.current === 'openai-realtime') {
+      if (liveStatus.listening) {
+        await liveProviderRef.current.stop();
+        if (followStateRef.current !== 'manual') setFollowState('paused');
+      } else {
+        try {
+          await liveProviderRef.current.start();
+          if (followStateRef.current === 'paused' || followStateRef.current === 'manual') {
+            setFollowState('following');
+          }
+        } catch {
+          // Provider status already carries the sanitized error; manual and mock remain usable.
+        }
+      }
+      return;
+    }
+
+    if (isListening) {
+      await manualProviderRef.current.stop();
+      setIsListening(false);
+      if (followStateRef.current !== 'manual') setFollowState('paused');
+    } else {
+      await manualProviderRef.current.start();
+      setIsListening(true);
+      if (followStateRef.current === 'paused' || followStateRef.current === 'manual') {
+        setFollowState('following');
+      }
+    }
+  }, [isListening, isMockPlaying, liveStatus.listening, playMock, stopMock]);
 
   const importTxt = useCallback(async () => {
     if (window.prompterApi?.openTextFile) {
@@ -293,6 +389,10 @@ export default function App() {
   const toggleAlwaysOnTop = useCallback(() => {
     void window.prompterApi?.toggleAlwaysOnTop();
   }, []);
+
+  const selectAsrProvider = useCallback((providerId: AsrProviderId) => {
+    setSelectedAsrProviderId(coerceSelectedProvider(providerId, liveConfig));
+  }, [liveConfig]);
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
@@ -369,6 +469,13 @@ export default function App() {
     togglePause
   ]);
 
+  const selectedProviderListening =
+    selectedAsrProviderId === 'openai-realtime'
+      ? liveStatus.listening
+      : selectedAsrProviderId === 'mock'
+        ? isMockPlaying
+        : isListening;
+
   return (
     <div className="app-shell">
       <ControlPanel
@@ -380,7 +487,11 @@ export default function App() {
         onLocalFileSelected={localFileSelected}
         fileInputRef={fileInputRef}
         model={manuscript}
-        isListening={isListening}
+        selectedAsrProviderId={selectedAsrProviderId}
+        onSelectedAsrProviderChange={selectAsrProvider}
+        liveConfig={liveConfig}
+        liveStatus={liveStatus}
+        isListening={selectedProviderListening}
         isMockPlaying={isMockPlaying}
         inputLevel={inputLevel}
         followState={followState}

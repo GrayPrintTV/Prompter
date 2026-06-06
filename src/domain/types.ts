@@ -1,4 +1,5 @@
 export type TranscriptSource = 'mock' | 'openai-realtime' | 'local' | 'manual';
+export type AsrProviderId = 'manual' | 'mock' | 'openai-realtime';
 
 export type TranscriptDelta = {
   text: string;
@@ -93,4 +94,29 @@ export type DisplaySettings = {
   paragraphSpacingEm: number;
   readingZonePercent: number;
   theme: 'dark' | 'light';
+};
+
+export type LiveAsrConfigStatus = {
+  configured: boolean;
+  providerId: 'openai-realtime';
+  model: string;
+  language: string;
+  promptConfigured: boolean;
+};
+
+export type OpenAiRealtimeClientSession = {
+  clientSecret: string;
+  expiresAt?: number;
+  webRtcUrl: string;
+  model: string;
+};
+
+export type LiveAsrConnectionStatus = {
+  providerId: 'openai-realtime';
+  configured: boolean;
+  connected: boolean;
+  listening: boolean;
+  status: AsrStatus;
+  lastTranscriptDelta: string;
+  errorMessage: string | null;
 };

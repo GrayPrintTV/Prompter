@@ -3,7 +3,17 @@ import { DebugPanel } from './DebugPanel';
 import { ShortcutHelp } from './ShortcutHelp';
 import { StatusIndicator } from './StatusIndicator';
 import { TortureTestPanel } from './TortureTestPanel';
-import type { AlignmentResult, DisplaySettings, FollowState, ManuscriptModel, TranscriptDelta } from '../domain/types';
+import { getAsrProviderOptions } from '../asr/providerRegistry';
+import type {
+  AlignmentResult,
+  AsrProviderId,
+  DisplaySettings,
+  FollowState,
+  LiveAsrConfigStatus,
+  LiveAsrConnectionStatus,
+  ManuscriptModel,
+  TranscriptDelta
+} from '../domain/types';
 
 type Props = {
   projectTitle: string;
@@ -14,6 +24,10 @@ type Props = {
   onLocalFileSelected(event: ChangeEvent<HTMLInputElement>): void;
   fileInputRef: React.RefObject<HTMLInputElement>;
   model: ManuscriptModel;
+  selectedAsrProviderId: AsrProviderId;
+  onSelectedAsrProviderChange(providerId: AsrProviderId): void;
+  liveConfig: LiveAsrConfigStatus;
+  liveStatus: LiveAsrConnectionStatus;
   isListening: boolean;
   isMockPlaying: boolean;
   inputLevel: number;
@@ -59,6 +73,10 @@ export function ControlPanel(props: Props) {
     onLocalFileSelected,
     fileInputRef,
     model,
+    selectedAsrProviderId,
+    onSelectedAsrProviderChange,
+    liveConfig,
+    liveStatus,
     isListening,
     isMockPlaying,
     inputLevel,
@@ -93,6 +111,9 @@ export function ControlPanel(props: Props) {
     alignment,
     currentTokenIndex
   } = props;
+  const providerOptions = getAsrProviderOptions(liveConfig);
+  const selectedProviderLabel =
+    providerOptions.find((option) => option.id === selectedAsrProviderId)?.label ?? 'Manual';
 
   return (
     <aside className="control-panel">
@@ -117,6 +138,36 @@ export function ControlPanel(props: Props) {
         <div className="level-meter" aria-label="Input level">
           <div style={{ width: `${Math.round(inputLevel * 100)}%` }} />
         </div>
+      </section>
+
+      <section className="panel-section">
+        <h2>ASR Provider</h2>
+        <select
+          className="provider-select"
+          value={selectedAsrProviderId}
+          onChange={(event) => onSelectedAsrProviderChange(event.target.value as AsrProviderId)}
+          aria-label="ASR provider"
+        >
+          {providerOptions.map((option) => (
+            <option key={option.id} value={option.id} disabled={!option.enabled}>
+              {option.label}{option.enabled ? '' : ' (not configured)'}
+            </option>
+          ))}
+        </select>
+        <dl className="asr-status-grid">
+          <dt>Provider</dt>
+          <dd>{selectedProviderLabel}</dd>
+          <dt>Configured</dt>
+          <dd>{selectedAsrProviderId === 'openai-realtime' ? (liveConfig.configured ? 'Yes' : 'No') : 'Local'}</dd>
+          <dt>Connection</dt>
+          <dd>{selectedAsrProviderId === 'openai-realtime' && liveStatus.connected ? 'Connected' : 'Disconnected'}</dd>
+          <dt>Listening</dt>
+          <dd>{isListening || isMockPlaying ? 'Listening' : 'Not listening'}</dd>
+          <dt>Last delta</dt>
+          <dd>{deltas.at(-1)?.text || liveStatus.lastTranscriptDelta || 'None'}</dd>
+          <dt>Error</dt>
+          <dd>{selectedAsrProviderId === 'openai-realtime' ? liveStatus.errorMessage ?? 'None' : 'None'}</dd>
+        </dl>
       </section>
 
       <section className="panel-section button-grid">

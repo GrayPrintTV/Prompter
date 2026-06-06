@@ -1,4 +1,4 @@
-import type { DisplaySettings, FollowState } from '../domain/types';
+import type { AsrProviderId, DisplaySettings, FollowState } from '../domain/types';
 
 export type StoredSession = {
   projectTitle: string;
@@ -8,6 +8,7 @@ export type StoredSession = {
   currentParagraphIndex: number;
   displaySettings: DisplaySettings;
   followState: FollowState;
+  selectedAsrProviderId: AsrProviderId;
   mockScript: string;
   debugVisible: boolean;
 };

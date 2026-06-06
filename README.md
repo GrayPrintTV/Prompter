@@ -1,6 +1,6 @@
 # Narration Prompter
 
-Windows-first Electron + React desktop teleprompter for audiobook and voiceover narration. Phase 0 proves manuscript alignment without live microphone transcription.
+Windows-first Electron + React desktop teleprompter for audiobook and voiceover narration. Phase 1 adds optional live OpenAI Realtime transcription behind the same alignment engine used by manual and mock transcript input.
 
 ## What works in Phase 0
 
@@ -8,6 +8,7 @@ Windows-first Electron + React desktop teleprompter for audiobook and voiceover 
 - Large prompter view with current sentence highlighting.
 - Manual transcript injection for alignment testing.
 - Mock ASR playback from scripted transcript chunks.
+- Optional live OpenAI Realtime transcription provider, disabled until configured.
 - Conservative fuzzy alignment against a local manuscript window.
 - Confidence states: following, holding, uncertain, lost, paused, manual, resyncing, retake.
 - Smooth scrolling only on high-confidence alignment.
@@ -43,6 +44,29 @@ npm test
 npm run build
 npm start
 ```
+
+## Live OpenAI Realtime transcription
+
+Live ASR is optional. Manual transcript injection and Mock Playback continue to work without an API key.
+
+1. Copy `.env.example` to `.env.local`.
+2. Set `OPENAI_API_KEY` in `.env.local` or in the Windows environment.
+3. Restart the Electron app.
+4. Select `Live OpenAI Realtime` in the ASR Provider dropdown.
+5. Press `Start` and allow microphone access.
+
+The renderer never receives the real OpenAI API key. Electron main reads environment/local config and requests a short-lived Realtime client secret over IPC. The renderer uses that ephemeral client secret for the WebRTC microphone session and emits normal `TranscriptDelta` objects into the existing aligner.
+
+Supported local config values:
+
+```powershell
+OPENAI_API_KEY=replace-with-your-openai-api-key
+OPENAI_REALTIME_TRANSCRIPTION_MODEL=gpt-4o-transcribe
+OPENAI_REALTIME_LANGUAGE=en
+OPENAI_REALTIME_TRANSCRIPTION_PROMPT=
+```
+
+Do not commit `.env.local`; it is ignored by git.
 
 ## Legacy Codex environment workaround
 
@@ -92,10 +116,10 @@ Phase 0.5 alignment hardening covers the repeated-sentence-after-flub fixture, d
 ## Architecture
 
 - `electron/`: desktop shell, preload bridge, file dialog, window controls.
-- `src/asr/`: swappable ASR provider interface plus mock/manual providers.
+- `src/asr/`: swappable ASR provider interface plus manual, mock, and live OpenAI Realtime providers.
 - `src/domain/`: normalization, segmentation, tokenization, alignment, and scroll policy.
 - `src/components/`: control panel, prompter view, status, shortcuts, and debug UI.
 - `src/state/`: defaults and local session persistence.
 - `src/tests/`: Vitest coverage and fixtures.
 
-Live ASR is intentionally not implemented in Phase 0. The OpenAI Realtime provider can be added later behind the existing ASR provider boundary without changing the alignment engine API.
+Live ASR is implemented as a swappable provider behind the existing ASR boundary. The alignment engine receives the same transcript delta shape from manual, mock, and live providers.
