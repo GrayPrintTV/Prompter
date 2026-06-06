@@ -1,5 +1,5 @@
-export type TranscriptSource = 'mock' | 'openai-realtime' | 'local' | 'manual';
-export type AsrProviderId = 'manual' | 'mock' | 'openai-realtime';
+export type TranscriptSource = 'mock' | 'openai-realtime' | 'local' | 'local-whisper' | 'manual';
+export type AsrProviderId = 'manual' | 'mock' | 'openai-realtime' | 'local-whisper';
 
 export type TranscriptDelta = {
   text: string;
@@ -119,4 +119,30 @@ export type LiveAsrConnectionStatus = {
   status: AsrStatus;
   lastTranscriptDelta: string;
   errorMessage: string | null;
+};
+
+export type LocalWhisperSettings = {
+  pythonExecutablePath: string;
+  modelName: string;
+  device: string;
+  computeType: string;
+  chunkDurationSeconds: number;
+};
+
+export type LocalWhisperSidecarPhase = 'stopped' | 'starting' | 'model-loading' | 'model-loaded' | 'error';
+
+export type LocalWhisperStatus = {
+  providerId: 'local-whisper';
+  configured: boolean;
+  sidecarRunning: boolean;
+  modelPhase: LocalWhisperSidecarPhase;
+  listening: boolean;
+  status: AsrStatus;
+  lastTranscriptDelta: string;
+  errorMessage: string | null;
+};
+
+export type LocalWhisperTranscriptResult = {
+  text: string;
+  durationSeconds?: number;
 };

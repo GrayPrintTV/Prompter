@@ -1,4 +1,4 @@
-import type { AsrProviderId, LiveAsrConfigStatus } from '../domain/types';
+import type { AsrProviderId, LiveAsrConfigStatus, LocalWhisperSettings } from '../domain/types';
 
 export type AsrProviderOption = {
   id: AsrProviderId;
@@ -7,10 +7,24 @@ export type AsrProviderOption = {
   reason?: string;
 };
 
-export function getAsrProviderOptions(liveConfig: LiveAsrConfigStatus): AsrProviderOption[] {
+export function isLocalWhisperConfigured(settings: LocalWhisperSettings) {
+  return Boolean(settings.pythonExecutablePath.trim() && settings.modelName.trim());
+}
+
+export function getAsrProviderOptions(
+  liveConfig: LiveAsrConfigStatus,
+  localWhisperSettings?: LocalWhisperSettings
+): AsrProviderOption[] {
+  const localConfigured = localWhisperSettings ? isLocalWhisperConfigured(localWhisperSettings) : true;
   return [
     { id: 'manual', label: 'Manual', enabled: true },
     { id: 'mock', label: 'Mock', enabled: true },
+    {
+      id: 'local-whisper',
+      label: 'Local Whisper',
+      enabled: localConfigured,
+      reason: localConfigured ? undefined : 'Set Python executable and Whisper model'
+    },
     {
       id: 'openai-realtime',
       label: 'Live OpenAI Realtime',
@@ -22,9 +36,10 @@ export function getAsrProviderOptions(liveConfig: LiveAsrConfigStatus): AsrProvi
 
 export function coerceSelectedProvider(
   requestedProviderId: AsrProviderId | undefined,
-  liveConfig: LiveAsrConfigStatus
+  liveConfig: LiveAsrConfigStatus,
+  localWhisperSettings?: LocalWhisperSettings
 ): AsrProviderId {
-  const options = getAsrProviderOptions(liveConfig);
+  const options = getAsrProviderOptions(liveConfig, localWhisperSettings);
   const requested = options.find((option) => option.id === requestedProviderId);
   return requested?.enabled ? requested.id : 'manual';
 }

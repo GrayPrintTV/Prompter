@@ -283,6 +283,25 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.local-whisper-settings {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.local-whisper-settings label {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.local-whisper-settings input,
+.local-whisper-settings select {
+  width: 100%;
+}
+
 .torture-case-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

@@ -1,4 +1,4 @@
-import type { AsrProviderId, DisplaySettings, FollowState } from '../domain/types';
+import type { AsrProviderId, DisplaySettings, FollowState, LocalWhisperSettings } from '../domain/types';
 
 export type StoredSession = {
   projectTitle: string;
@@ -9,6 +9,7 @@ export type StoredSession = {
   displaySettings: DisplaySettings;
   followState: FollowState;
   selectedAsrProviderId: AsrProviderId;
+  localWhisperSettings: LocalWhisperSettings;
   mockScript: string;
   debugVisible: boolean;
 };

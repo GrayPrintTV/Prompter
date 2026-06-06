@@ -11,6 +11,8 @@ import type {
   FollowState,
   LiveAsrConfigStatus,
   LiveAsrConnectionStatus,
+  LocalWhisperSettings,
+  LocalWhisperStatus,
   ManuscriptModel,
   TranscriptDelta
 } from '../domain/types';
@@ -28,6 +30,9 @@ type Props = {
   onSelectedAsrProviderChange(providerId: AsrProviderId): void;
   liveConfig: LiveAsrConfigStatus;
   liveStatus: LiveAsrConnectionStatus;
+  localWhisperSettings: LocalWhisperSettings;
+  onLocalWhisperSettingsChange(settings: LocalWhisperSettings): void;
+  localWhisperStatus: LocalWhisperStatus;
   isListening: boolean;
   isMockPlaying: boolean;
   inputLevel: number;
@@ -77,6 +82,9 @@ export function ControlPanel(props: Props) {
     onSelectedAsrProviderChange,
     liveConfig,
     liveStatus,
+    localWhisperSettings,
+    onLocalWhisperSettingsChange,
+    localWhisperStatus,
     isListening,
     isMockPlaying,
     inputLevel,
@@ -111,7 +119,7 @@ export function ControlPanel(props: Props) {
     alignment,
     currentTokenIndex
   } = props;
-  const providerOptions = getAsrProviderOptions(liveConfig);
+  const providerOptions = getAsrProviderOptions(liveConfig, localWhisperSettings);
   const selectedProviderLabel =
     providerOptions.find((option) => option.id === selectedAsrProviderId)?.label ?? 'Manual';
 
@@ -158,16 +166,107 @@ export function ControlPanel(props: Props) {
           <dt>Provider</dt>
           <dd>{selectedProviderLabel}</dd>
           <dt>Configured</dt>
-          <dd>{selectedAsrProviderId === 'openai-realtime' ? (liveConfig.configured ? 'Yes' : 'No') : 'Local'}</dd>
+          <dd>
+            {selectedAsrProviderId === 'openai-realtime'
+              ? liveConfig.configured ? 'Yes' : 'No'
+              : selectedAsrProviderId === 'local-whisper'
+                ? localWhisperStatus.configured ? 'Yes' : 'No'
+                : 'Local'}
+          </dd>
           <dt>Connection</dt>
-          <dd>{selectedAsrProviderId === 'openai-realtime' && liveStatus.connected ? 'Connected' : 'Disconnected'}</dd>
+          <dd>
+            {selectedAsrProviderId === 'openai-realtime'
+              ? liveStatus.connected ? 'Connected' : 'Disconnected'
+              : selectedAsrProviderId === 'local-whisper'
+                ? localWhisperStatus.sidecarRunning ? 'Sidecar running' : 'Sidecar stopped'
+                : 'Local'}
+          </dd>
+          {selectedAsrProviderId === 'local-whisper' ? (
+            <>
+              <dt>Model</dt>
+              <dd>{localWhisperStatus.modelPhase}</dd>
+            </>
+          ) : null}
           <dt>Listening</dt>
           <dd>{isListening || isMockPlaying ? 'Listening' : 'Not listening'}</dd>
           <dt>Last delta</dt>
-          <dd>{deltas.at(-1)?.text || liveStatus.lastTranscriptDelta || 'None'}</dd>
+          <dd>{deltas.at(-1)?.text || liveStatus.lastTranscriptDelta || localWhisperStatus.lastTranscriptDelta || 'None'}</dd>
           <dt>Error</dt>
-          <dd>{selectedAsrProviderId === 'openai-realtime' ? liveStatus.errorMessage ?? 'None' : 'None'}</dd>
+          <dd>
+            {selectedAsrProviderId === 'openai-realtime'
+              ? liveStatus.errorMessage ?? 'None'
+              : selectedAsrProviderId === 'local-whisper'
+                ? localWhisperStatus.errorMessage ?? 'None'
+                : 'None'}
+          </dd>
         </dl>
+        {selectedAsrProviderId === 'local-whisper' ? (
+          <div className="local-whisper-settings">
+            <label>
+              Python
+              <input
+                value={localWhisperSettings.pythonExecutablePath}
+                onChange={(event) =>
+                  onLocalWhisperSettingsChange({
+                    ...localWhisperSettings,
+                    pythonExecutablePath: event.target.value
+                  })
+                }
+              />
+            </label>
+            <label>
+              Model
+              <input
+                value={localWhisperSettings.modelName}
+                onChange={(event) =>
+                  onLocalWhisperSettingsChange({ ...localWhisperSettings, modelName: event.target.value })
+                }
+              />
+            </label>
+            <label>
+              Device
+              <select
+                value={localWhisperSettings.device}
+                onChange={(event) =>
+                  onLocalWhisperSettingsChange({ ...localWhisperSettings, device: event.target.value })
+                }
+              >
+                <option value="cpu">cpu</option>
+                <option value="cuda">cuda</option>
+                <option value="auto">auto</option>
+              </select>
+            </label>
+            <label>
+              Compute
+              <select
+                value={localWhisperSettings.computeType}
+                onChange={(event) =>
+                  onLocalWhisperSettingsChange({ ...localWhisperSettings, computeType: event.target.value })
+                }
+              >
+                <option value="int8">int8</option>
+                <option value="float16">float16</option>
+                <option value="float32">float32</option>
+              </select>
+            </label>
+            <label>
+              Chunk s
+              <input
+                type="number"
+                min={1}
+                max={20}
+                step={0.5}
+                value={localWhisperSettings.chunkDurationSeconds}
+                onChange={(event) =>
+                  onLocalWhisperSettingsChange({
+                    ...localWhisperSettings,
+                    chunkDurationSeconds: Number(event.target.value)
+                  })
+                }
+              />
+            </label>
+          </div>
+        ) : null}
       </section>
 
       <section className="panel-section button-grid">

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ManualAsrProvider } from './asr/ManualAsrProvider';
 import { MockAsrProvider } from './asr/MockAsrProvider';
+import { DEFAULT_LOCAL_WHISPER_STATUS, LocalWhisperAsrProvider } from './asr/LocalWhisperAsrProvider';
 import { OpenAiRealtimeAsrProvider } from './asr/OpenAiRealtimeAsrProvider';
 import { coerceSelectedProvider } from './asr/providerRegistry';
 import { ControlPanel } from './components/ControlPanel';
@@ -23,10 +24,17 @@ import type {
   FollowState,
   LiveAsrConfigStatus,
   LiveAsrConnectionStatus,
+  LocalWhisperSettings,
+  LocalWhisperStatus,
   ManuscriptModel,
   TranscriptDelta
 } from './domain/types';
-import { DEFAULT_DISPLAY_SETTINGS, DEFAULT_MOCK_SCRIPT, SAMPLE_MANUSCRIPT } from './state/appStore';
+import {
+  DEFAULT_DISPLAY_SETTINGS,
+  DEFAULT_LOCAL_WHISPER_SETTINGS,
+  DEFAULT_MOCK_SCRIPT,
+  SAMPLE_MANUSCRIPT
+} from './state/appStore';
 import { loadSession, saveSession } from './state/projectStore';
 import { isEditableTarget } from './shortcuts/shortcuts';
 
@@ -81,6 +89,11 @@ export default function App() {
   const [mockScript, setMockScript] = useState(stored?.mockScript ?? DEFAULT_MOCK_SCRIPT);
   const [liveConfig, setLiveConfig] = useState<LiveAsrConfigStatus>(DEFAULT_LIVE_CONFIG);
   const [liveStatus, setLiveStatus] = useState<LiveAsrConnectionStatus>(DEFAULT_LIVE_STATUS);
+  const [localWhisperSettings, setLocalWhisperSettings] = useState<LocalWhisperSettings>({
+    ...DEFAULT_LOCAL_WHISPER_SETTINGS,
+    ...stored?.localWhisperSettings
+  });
+  const [localWhisperStatus, setLocalWhisperStatus] = useState<LocalWhisperStatus>(DEFAULT_LOCAL_WHISPER_STATUS);
   const [selectedAsrProviderId, setSelectedAsrProviderId] = useState<AsrProviderId>(
     (stored?.selectedAsrProviderId as AsrProviderId | undefined) ?? 'manual'
   );
@@ -96,6 +109,12 @@ export default function App() {
   const manualProviderRef = useRef(new ManualAsrProvider());
   const mockProviderRef = useRef(new MockAsrProvider());
   const liveProviderRef = useRef(new OpenAiRealtimeAsrProvider());
+  const localWhisperProviderRef = useRef(
+    new LocalWhisperAsrProvider({
+      ...DEFAULT_LOCAL_WHISPER_SETTINGS,
+      ...stored?.localWhisperSettings
+    })
+  );
   const resyncArmedRef = useRef(false);
   const lowConfidenceCountRef = useRef(0);
   const manuscript = useMemo(() => buildManuscript(manuscriptText), [manuscriptText]);
@@ -182,15 +201,23 @@ export default function App() {
     const mockOff = mockProviderRef.current.onDelta(processDelta);
     const liveOff = liveProviderRef.current.onDelta(processDelta);
     const liveStatusOff = liveProviderRef.current.onConnectionStatus(setLiveStatus);
+    const localWhisperOff = localWhisperProviderRef.current.onDelta(processDelta);
+    const localWhisperStatusOff = localWhisperProviderRef.current.onConnectionStatus(setLocalWhisperStatus);
     const doneOff = mockProviderRef.current.onDone(() => setIsMockPlaying(false));
     return () => {
       manualOff();
       mockOff();
       liveOff();
       liveStatusOff();
+      localWhisperOff();
+      localWhisperStatusOff();
       doneOff();
     };
   }, [processDelta]);
+
+  useEffect(() => {
+    localWhisperProviderRef.current.setSettings(localWhisperSettings);
+  }, [localWhisperSettings]);
 
   useEffect(() => {
     let cancelled = false;
@@ -200,7 +227,7 @@ export default function App() {
         if (cancelled) return;
         setLiveConfig(config);
         setLiveStatus((status) => ({ ...status, configured: config.configured }));
-        setSelectedAsrProviderId((providerId) => coerceSelectedProvider(providerId, config));
+        setSelectedAsrProviderId((providerId) => coerceSelectedProvider(providerId, config, localWhisperSettings));
       })
       .catch((error) => {
         if (cancelled) return;
@@ -211,6 +238,27 @@ export default function App() {
         }));
       });
 
+    return () => {
+      cancelled = true;
+    };
+  }, [localWhisperSettings]);
+
+  useEffect(() => {
+    let cancelled = false;
+    localWhisperProviderRef.current
+      .refreshStatus()
+      .then((status) => {
+        if (!cancelled) setLocalWhisperStatus(status);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setLocalWhisperStatus((status) => ({
+          ...status,
+          status: 'error',
+          modelPhase: 'error',
+          errorMessage: error instanceof Error ? error.message : 'Unable to read Local Whisper status.'
+        }));
+      });
     return () => {
       cancelled = true;
     };
@@ -234,6 +282,7 @@ export default function App() {
         displaySettings,
         followState,
         selectedAsrProviderId,
+        localWhisperSettings,
         mockScript,
         debugVisible
       });
@@ -249,7 +298,8 @@ export default function App() {
     manuscriptText,
     mockScript,
     projectTitle,
-    selectedAsrProviderId
+    selectedAsrProviderId,
+    localWhisperSettings
   ]);
 
   const toggleFollow = useCallback(() => {
@@ -327,6 +377,23 @@ export default function App() {
       return;
     }
 
+    if (selectedAsrProviderRef.current === 'local-whisper') {
+      if (localWhisperStatus.listening) {
+        await localWhisperProviderRef.current.stop();
+        if (followStateRef.current !== 'manual') setFollowState('paused');
+      } else {
+        try {
+          await localWhisperProviderRef.current.start();
+          if (followStateRef.current === 'paused' || followStateRef.current === 'manual') {
+            setFollowState('following');
+          }
+        } catch {
+          // Provider status already carries the error; manual, mock, and OpenAI remain usable.
+        }
+      }
+      return;
+    }
+
     if (isListening) {
       await manualProviderRef.current.stop();
       setIsListening(false);
@@ -338,7 +405,7 @@ export default function App() {
         setFollowState('following');
       }
     }
-  }, [isListening, isMockPlaying, liveStatus.listening, playMock, stopMock]);
+  }, [isListening, isMockPlaying, liveStatus.listening, localWhisperStatus.listening, playMock, stopMock]);
 
   const importTxt = useCallback(async () => {
     if (window.prompterApi?.openTextFile) {
@@ -391,8 +458,8 @@ export default function App() {
   }, []);
 
   const selectAsrProvider = useCallback((providerId: AsrProviderId) => {
-    setSelectedAsrProviderId(coerceSelectedProvider(providerId, liveConfig));
-  }, [liveConfig]);
+    setSelectedAsrProviderId(coerceSelectedProvider(providerId, liveConfig, localWhisperSettings));
+  }, [liveConfig, localWhisperSettings]);
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
@@ -474,7 +541,9 @@ export default function App() {
       ? liveStatus.listening
       : selectedAsrProviderId === 'mock'
         ? isMockPlaying
-        : isListening;
+        : selectedAsrProviderId === 'local-whisper'
+          ? localWhisperStatus.listening
+          : isListening;
 
   return (
     <div className="app-shell">
@@ -491,6 +560,9 @@ export default function App() {
         onSelectedAsrProviderChange={selectAsrProvider}
         liveConfig={liveConfig}
         liveStatus={liveStatus}
+        localWhisperSettings={localWhisperSettings}
+        onLocalWhisperSettingsChange={setLocalWhisperSettings}
+        localWhisperStatus={localWhisperStatus}
         isListening={selectedProviderListening}
         isMockPlaying={isMockPlaying}
         inputLevel={inputLevel}

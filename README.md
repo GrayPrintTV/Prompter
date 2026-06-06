@@ -9,6 +9,7 @@ Windows-first Electron + React desktop teleprompter for audiobook and voiceover 
 - Manual transcript injection for alignment testing.
 - Mock ASR playback from scripted transcript chunks.
 - Optional live OpenAI Realtime transcription provider, disabled until configured.
+- Optional Local Whisper transcription provider using a Python faster-whisper sidecar.
 - Conservative fuzzy alignment against a local manuscript window.
 - Confidence states: following, holding, uncertain, lost, paused, manual, resyncing, retake.
 - Smooth scrolling only on high-confidence alignment.
@@ -68,6 +69,26 @@ OPENAI_REALTIME_TRANSCRIPTION_PROMPT=
 
 Do not commit `.env.local`; it is ignored by git.
 
+## Local Whisper transcription
+
+Local Whisper is optional and runs through this repo's Python sidecar, not the separate audiobook proofing tool. It records short microphone chunks in the renderer, sends them to Electron main, and Electron main sends temporary audio files to `python/local_whisper_sidecar.py`. The sidecar uses faster-whisper and returns transcript chunks in the same `TranscriptDelta` shape used by Manual, Mock, and OpenAI Realtime.
+
+The defaults match the existing proofing tool's local setup closely:
+
+- Python executable: `python`
+- Whisper model: `turbo`
+- Device: `cpu`
+- Compute type: `int8`
+- Chunk duration: `4` seconds
+
+Install sidecar dependencies in a Python environment:
+
+```powershell
+python -m pip install -r python/requirements.txt
+```
+
+Then select `Local Whisper` in the ASR Provider dropdown. The settings panel lets you adjust the Python path, model, device, compute type, and chunk duration. A little chunk latency is expected; the aligner only needs enough recognized words every sentence or two.
+
 ## Legacy Codex environment workaround
 
 Prefer normal Node.js/npm installed on Windows. Older Codex desktop shells may not expose `npm` on `PATH`; in that case only, use the local bundled runtime path for this machine:
@@ -116,7 +137,7 @@ Phase 0.5 alignment hardening covers the repeated-sentence-after-flub fixture, d
 ## Architecture
 
 - `electron/`: desktop shell, preload bridge, file dialog, window controls.
-- `src/asr/`: swappable ASR provider interface plus manual, mock, and live OpenAI Realtime providers.
+- `src/asr/`: swappable ASR provider interface plus manual, mock, live OpenAI Realtime, and Local Whisper providers.
 - `src/domain/`: normalization, segmentation, tokenization, alignment, and scroll policy.
 - `src/components/`: control panel, prompter view, status, shortcuts, and debug UI.
 - `src/state/`: defaults and local session persistence.

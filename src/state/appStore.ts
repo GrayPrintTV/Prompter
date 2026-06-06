@@ -1,4 +1,4 @@
-import type { DisplaySettings } from '../domain/types';
+import type { DisplaySettings, LocalWhisperSettings } from '../domain/types';
 
 export const DEFAULT_DISPLAY_SETTINGS: DisplaySettings = {
   fontFamily: 'Georgia, Cambria, "Times New Roman", serif',
@@ -8,6 +8,14 @@ export const DEFAULT_DISPLAY_SETTINGS: DisplaySettings = {
   paragraphSpacingEm: 1.35,
   readingZonePercent: 62,
   theme: 'dark'
+};
+
+export const DEFAULT_LOCAL_WHISPER_SETTINGS: LocalWhisperSettings = {
+  pythonExecutablePath: 'python',
+  modelName: 'turbo',
+  device: 'cpu',
+  computeType: 'int8',
+  chunkDurationSeconds: 4
 };
 
 export const SAMPLE_MANUSCRIPT = `The studio light blinked once, and Mara took that as permission to begin.
