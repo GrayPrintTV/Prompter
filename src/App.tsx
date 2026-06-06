@@ -163,6 +163,10 @@ export default function App() {
     setTraceLog((prev) => [...prev.slice(-7), entry]);
   }, []);
 
+  const onTraceScroll = useCallback((info: { sentenceIndex: number; didScroll: boolean; reason: string }) => {
+    appendTrace(`scroll s${info.sentenceIndex} ${info.didScroll ? 'SCROLLED' : 'NO-SCROLL'} (${info.reason})`);
+  }, [appendTrace]);
+
   const processDelta = useCallback((delta: TranscriptDelta) => {
     appendTrace(`recv ${delta.source}: "${delta.text.slice(0, 32)}${delta.text.length > 32 ? '...' : ''}"`);
     setDeltas((previous) => [...previous.slice(-24), delta]);
@@ -661,7 +665,7 @@ export default function App() {
         followState={followState}
         confidence={alignment.confidence}
         settings={displaySettings}
-        onTraceScroll={(info) => appendTrace(`scroll s${info.sentenceIndex} ${info.didScroll ? 'SCROLLED' : 'NO-SCROLL'} (${info.reason})`)}
+        onTraceScroll={onTraceScroll}
       />
     </div>
   );
