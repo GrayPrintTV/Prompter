@@ -81,6 +81,7 @@ function formatMicCaptureState(state: MicCaptureState) {
 
 function formatSidecarPhase(phase: LocalWhisperSidecarPhase) {
   if (phase === 'model-loading') return 'Model loading';
+  if (phase === 'process-started') return 'Process started';
   if (phase === 'returned-empty-transcript') return 'Returned empty transcript';
   return phase
     .split('-')
@@ -350,6 +351,20 @@ export function ControlPanel(props: Props) {
               <dd>{localWhisperStatus.chunk.chunksReturnedFromSidecar}</dd>
               <dt>Bytes</dt>
               <dd>{localWhisperStatus.chunk.lastChunkBytes || 'None'}</dd>
+              <dt>Format</dt>
+              <dd>{localWhisperStatus.chunk.lastChunkFormat || 'None'}</dd>
+              <dt>MIME</dt>
+              <dd>{localWhisperStatus.chunk.lastMimeType || 'None'}</dd>
+              <dt>Ext</dt>
+              <dd>{localWhisperStatus.chunk.lastFileExtension || 'None'}</dd>
+              <dt>Header</dt>
+              <dd>{localWhisperStatus.chunk.lastHeaderSignature || 'None'}</dd>
+              <dt>Rate</dt>
+              <dd>{localWhisperStatus.chunk.lastSampleRate || 'None'}</dd>
+              <dt>Duration</dt>
+              <dd>{localWhisperStatus.chunk.lastChunkDurationSeconds
+                ? `${localWhisperStatus.chunk.lastChunkDurationSeconds.toFixed(2)}s`
+                : 'None'}</dd>
               <dt>Pending</dt>
               <dd>{localWhisperStatus.chunk.pendingResponses}</dd>
               <dt>Last text</dt>

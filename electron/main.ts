@@ -21,6 +21,16 @@ type OpenAiRealtimeConfig = {
 const DEFAULT_TRANSCRIPTION_MODEL = 'gpt-4o-transcribe';
 const DEFAULT_WEBRTC_URL = 'https://api.openai.com/v1/realtime/calls';
 const LOCAL_WHISPER_SIDECAR = path.join(__dirname, '..', 'python', 'local_whisper_sidecar.py');
+const DEFAULT_PROCESS_READY_TIMEOUT_MS = 30000;
+const DEFAULT_MODEL_READY_TIMEOUT_MS = 180000;
+const PROVIDER_STATUS_TEXT = new Set([
+  'sidecar is running',
+  'local whisper sidecar is running',
+  'model loading',
+  'model loaded',
+  'process started',
+  'ready'
+]);
 
 type LocalWhisperSettings = {
   pythonExecutablePath: string;
@@ -34,7 +44,7 @@ type LocalWhisperStatus = {
   providerId: 'local-whisper';
   configured: boolean;
   sidecarRunning: boolean;
-  modelPhase: 'stopped' | 'starting' | 'model-loading' | 'ready' | 'transcribing' | 'returned-empty-transcript' | 'error';
+  modelPhase: 'stopped' | 'starting' | 'process-started' | 'model-loading' | 'ready' | 'transcribing' | 'returned-empty-transcript' | 'error';
   listening: boolean;
   status: 'idle' | 'starting' | 'listening' | 'error' | 'stopped';
   lastTranscriptDelta: string;
@@ -62,6 +72,12 @@ type LocalWhisperStatus = {
     chunksReceivedBySidecar: number;
     chunksReturnedFromSidecar: number;
     lastChunkBytes: number;
+    lastChunkFormat: string;
+    lastMimeType: string;
+    lastFileExtension: string;
+    lastHeaderSignature: string;
+    lastSampleRate: number;
+    lastChunkDurationSeconds: number;
     lastTranscriptText: string;
     lastSidecarError: string | null;
     warningMessage: string | null;
@@ -143,9 +159,12 @@ type SidecarReadyWaiter = {
 let localWhisperProcess: ChildProcessWithoutNullStreams | null = null;
 let localWhisperBuffer = '';
 let localWhisperSettings: LocalWhisperSettings | null = null;
-let localWhisperSidecarReady = false;
+let localWhisperProcessReady = false;
+let localWhisperModelReady = false;
+let localWhisperModelConfigKey = '';
 const pendingWhisperRequests = new Map<string, PendingWhisperRequest>();
-const sidecarReadyWaiters = new Set<SidecarReadyWaiter>();
+const processReadyWaiters = new Set<SidecarReadyWaiter>();
+const modelReadyWaiters = new Set<SidecarReadyWaiter>();
 let nextWhisperRequestId = 1;
 let latestPreloadDiagnostics: PreloadExposeDiagnostics | null = null;
 let latestPreloadError: MainPreloadError | null = null;
@@ -172,6 +191,12 @@ let localWhisperStatus: LocalWhisperStatus = {
     chunksReceivedBySidecar: 0,
     chunksReturnedFromSidecar: 0,
     lastChunkBytes: 0,
+    lastChunkFormat: '',
+    lastMimeType: '',
+    lastFileExtension: '',
+    lastHeaderSignature: '',
+    lastSampleRate: 0,
+    lastChunkDurationSeconds: 0,
     lastTranscriptText: '',
     lastSidecarError: null,
     warningMessage: null,
@@ -208,6 +233,31 @@ function safeString(value: () => string) {
   } catch (error) {
     return error instanceof Error ? `Unavailable: ${error.message}` : 'Unavailable';
   }
+}
+
+function configuredTimeoutMs(name: string, fallback: number) {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function isProviderStatusText(text: string) {
+  return PROVIDER_STATUS_TEXT.has(text.trim().replace(/\.$/, '').toLowerCase());
+}
+
+function audioHeaderSignature(buffer: Buffer) {
+  if (buffer.length >= 12) {
+    const riff = buffer.subarray(0, 4).toString('ascii');
+    const wave = buffer.subarray(8, 12).toString('ascii');
+    if (riff === 'RIFF' && wave === 'WAVE') return 'RIFF/WAVE';
+  }
+  if (buffer.length >= 4 && buffer[0] === 0x1a && buffer[1] === 0x45 && buffer[2] === 0xdf && buffer[3] === 0xa3) {
+    return 'WebM';
+  }
+  return Array.from(buffer.subarray(0, 8))
+    .map((byte) => byte.toString(16).padStart(2, '0').toUpperCase())
+    .join(' ');
 }
 
 function runtimeDiagnostics(preloadPath: string): MainRuntimeDiagnostics {
@@ -338,6 +388,10 @@ function localWhisperConfigured(settings: LocalWhisperSettings) {
   return Boolean(settings.pythonExecutablePath.trim() && settings.modelName.trim());
 }
 
+function localWhisperSettingsKey(settings: LocalWhisperSettings) {
+  return `${settings.modelName}\n${settings.device}\n${settings.computeType}`;
+}
+
 function patchLocalWhisperStatus(patch: Partial<LocalWhisperStatus>) {
   localWhisperStatus = {
     ...localWhisperStatus,
@@ -382,36 +436,69 @@ function sendLocalWhisperCommand(command: Record<string, unknown>) {
   localWhisperProcess.stdin.write(`${JSON.stringify(command)}\n`);
 }
 
-function resolveSidecarReadyWaiters() {
-  localWhisperSidecarReady = true;
-  for (const waiter of sidecarReadyWaiters) {
+function resolveProcessReadyWaiters() {
+  localWhisperProcessReady = true;
+  for (const waiter of processReadyWaiters) {
     clearTimeout(waiter.timeout);
     waiter.resolve();
   }
-  sidecarReadyWaiters.clear();
+  processReadyWaiters.clear();
 }
 
-function rejectSidecarReadyWaiters(error: Error) {
-  localWhisperSidecarReady = false;
-  for (const waiter of sidecarReadyWaiters) {
+function resolveModelReadyWaiters() {
+  localWhisperModelReady = true;
+  for (const waiter of modelReadyWaiters) {
+    clearTimeout(waiter.timeout);
+    waiter.resolve();
+  }
+  modelReadyWaiters.clear();
+}
+
+function rejectProcessReadyWaiters(error: Error) {
+  localWhisperProcessReady = false;
+  for (const waiter of processReadyWaiters) {
     clearTimeout(waiter.timeout);
     waiter.reject(error);
   }
-  sidecarReadyWaiters.clear();
+  processReadyWaiters.clear();
 }
 
-function waitForSidecarReady(timeoutMs = 10000) {
-  if (localWhisperSidecarReady) return Promise.resolve();
+function rejectModelReadyWaiters(error: Error) {
+  localWhisperModelReady = false;
+  for (const waiter of modelReadyWaiters) {
+    clearTimeout(waiter.timeout);
+    waiter.reject(error);
+  }
+  modelReadyWaiters.clear();
+}
+
+function waitForProcessReady(timeoutMs = DEFAULT_PROCESS_READY_TIMEOUT_MS) {
+  if (localWhisperProcessReady) return Promise.resolve();
   return new Promise<void>((resolve, reject) => {
     const waiter: SidecarReadyWaiter = {
       resolve,
       reject,
       timeout: setTimeout(() => {
-        sidecarReadyWaiters.delete(waiter);
-        reject(new Error('Local Whisper sidecar did not become ready. Check Python and faster-whisper setup.'));
+        processReadyWaiters.delete(waiter);
+        reject(new Error('Local Whisper sidecar process did not become ready. Check Python setup.'));
       }, timeoutMs)
     };
-    sidecarReadyWaiters.add(waiter);
+    processReadyWaiters.add(waiter);
+  });
+}
+
+function waitForModelReady(timeoutMs = configuredTimeoutMs('LOCAL_WHISPER_MODEL_READY_TIMEOUT_MS', DEFAULT_MODEL_READY_TIMEOUT_MS)) {
+  if (localWhisperModelReady) return Promise.resolve();
+  return new Promise<void>((resolve, reject) => {
+    const waiter: SidecarReadyWaiter = {
+      resolve,
+      reject,
+      timeout: setTimeout(() => {
+        modelReadyWaiters.delete(waiter);
+        reject(new Error('Local Whisper model did not finish loading. Check model name, device, compute type, and faster-whisper setup.'));
+      }, timeoutMs)
+    };
+    modelReadyWaiters.add(waiter);
   });
 }
 
@@ -426,15 +513,42 @@ function rejectPendingWhisperRequests(error: Error) {
 function handleLocalWhisperMessage(message: Record<string, unknown>) {
   const messageType = message.type;
   if (messageType === 'ready') {
-    resolveSidecarReadyWaiters();
+    patchLocalWhisperStatus({
+      sidecarRunning: true,
+      modelPhase: 'process-started',
+      status: 'starting',
+      errorMessage: null
+    });
+    resolveProcessReadyWaiters();
     return;
   }
   if (messageType === 'model-loading') {
-    patchLocalWhisperStatus({ modelPhase: 'model-loading', status: 'starting', errorMessage: null });
+    localWhisperModelReady = false;
+    patchLocalWhisperStatus({ sidecarRunning: true, modelPhase: 'model-loading', status: 'starting', errorMessage: null });
     return;
   }
   if (messageType === 'model-loaded') {
+    localWhisperModelConfigKey = [
+      String(message.modelName ?? localWhisperSettings?.modelName ?? ''),
+      String(message.device ?? localWhisperSettings?.device ?? ''),
+      String(message.computeType ?? localWhisperSettings?.computeType ?? '')
+    ].join('\n');
+    resolveModelReadyWaiters();
     patchLocalWhisperStatus({ modelPhase: 'ready', status: 'listening', sidecarRunning: true });
+    return;
+  }
+  if (messageType === 'transcribe-start') {
+    patchLocalWhisperStatus({
+      modelPhase: 'transcribing',
+      chunk: {
+        ...localWhisperStatus.chunk,
+        lastChunkBytes: Number(message.fileSizeBytes ?? localWhisperStatus.chunk.lastChunkBytes) || localWhisperStatus.chunk.lastChunkBytes,
+        lastChunkFormat: String(message.audioFormat ?? localWhisperStatus.chunk.lastChunkFormat ?? ''),
+        lastMimeType: String(message.mimeType ?? localWhisperStatus.chunk.lastMimeType ?? ''),
+        lastHeaderSignature: String(message.headerSignature ?? localWhisperStatus.chunk.lastHeaderSignature ?? ''),
+        warningMessage: null
+      }
+    });
     return;
   }
   if (messageType === 'transcript') {
@@ -443,6 +557,19 @@ function handleLocalWhisperMessage(message: Record<string, unknown>) {
     if (!pending) return;
     pendingWhisperRequests.delete(requestId);
     const text = String(message.text ?? '');
+    if (isProviderStatusText(text)) {
+      patchLocalWhisperStatus({
+        modelPhase: 'ready',
+        chunk: {
+          ...localWhisperStatus.chunk,
+          pendingResponses: Math.max(0, localWhisperStatus.chunk.pendingResponses - 1),
+          warningMessage: null
+        }
+      });
+      pending.resolve({ text: '' });
+      void unlink(pending.audioPath).catch(() => undefined);
+      return;
+    }
     const historyItem = localWhisperTranscriptHistoryItem(text);
     patchLocalWhisperStatus({
       modelPhase: historyItem.isEmpty ? 'returned-empty-transcript' : 'ready',
@@ -451,6 +578,8 @@ function handleLocalWhisperMessage(message: Record<string, unknown>) {
         ...localWhisperStatus.chunk,
         chunksReturnedFromSidecar: localWhisperStatus.chunk.chunksReturnedFromSidecar + 1,
         lastTranscriptText: historyItem.displayText,
+        lastSidecarError: null,
+        warningMessage: null,
         pendingResponses: Math.max(0, localWhisperStatus.chunk.pendingResponses - 1)
       },
       transcriptHistory: [...localWhisperStatus.transcriptHistory, historyItem].slice(-12)
@@ -464,6 +593,26 @@ function handleLocalWhisperMessage(message: Record<string, unknown>) {
   }
   if (messageType === 'error') {
     const error = new Error(String(message.message ?? 'Local Whisper sidecar error.'));
+    const requestId = String(message.requestId ?? '');
+    const pending = requestId ? pendingWhisperRequests.get(requestId) : undefined;
+    if (pending) {
+      pendingWhisperRequests.delete(requestId);
+      pending.reject(error);
+      void unlink(pending.audioPath).catch(() => undefined);
+      patchLocalWhisperStatus({
+        modelPhase: 'error',
+        status: 'error',
+        errorMessage: error.message,
+        chunk: {
+          ...localWhisperStatus.chunk,
+          chunksReturnedFromSidecar: localWhisperStatus.chunk.chunksReturnedFromSidecar + 1,
+          lastSidecarError: error.message,
+          warningMessage: error.message,
+          pendingResponses: Math.max(0, localWhisperStatus.chunk.pendingResponses - 1)
+        }
+      });
+      return;
+    }
     patchLocalWhisperStatus({
       modelPhase: 'error',
       status: 'error',
@@ -475,7 +624,8 @@ function handleLocalWhisperMessage(message: Record<string, unknown>) {
         pendingResponses: 0
       }
     });
-    rejectSidecarReadyWaiters(error);
+    rejectProcessReadyWaiters(error);
+    rejectModelReadyWaiters(error);
     rejectPendingWhisperRequests(error);
   }
 }
@@ -508,22 +658,37 @@ function handleLocalWhisperStdout(chunk: Buffer) {
 
 async function startLocalWhisperSidecar(settings: LocalWhisperSettings) {
   localWhisperSettings = settings;
+  const requestedModelKey = localWhisperSettingsKey(settings);
+  if (localWhisperModelConfigKey && localWhisperModelConfigKey !== requestedModelKey) {
+    localWhisperModelReady = false;
+  }
   if (!localWhisperConfigured(settings)) {
     throw new Error('Local Whisper is not configured. Set Python executable and model name.');
   }
 
   if (!localWhisperProcess) {
     localWhisperBuffer = '';
-    localWhisperSidecarReady = false;
+    localWhisperProcessReady = false;
+    localWhisperModelReady = false;
+    localWhisperModelConfigKey = '';
     patchLocalWhisperStatus({
       configured: true,
       sidecarRunning: false,
       modelPhase: 'starting',
       listening: true,
       status: 'starting',
-      errorMessage: null
+      errorMessage: null,
+      lastTranscriptDelta: '',
+      transcriptHistory: [],
+      chunk: {
+        ...localWhisperStatus.chunk,
+        lastTranscriptText: '',
+        lastSidecarError: null,
+        warningMessage: null,
+        pendingResponses: 0
+      }
     });
-    const ready = waitForSidecarReady();
+    const processReady = waitForProcessReady();
     localWhisperProcess = spawn(settings.pythonExecutablePath, [sidecarPath()], {
       cwd: process.cwd(),
       windowsHide: true
@@ -551,12 +716,15 @@ async function startLocalWhisperSidecar(settings: LocalWhisperSettings) {
         status: 'error',
         errorMessage: error.message
       });
-      rejectSidecarReadyWaiters(error);
+      rejectProcessReadyWaiters(error);
+      rejectModelReadyWaiters(error);
       rejectPendingWhisperRequests(error);
     });
     localWhisperProcess.on('exit', () => {
       localWhisperProcess = null;
-      localWhisperSidecarReady = false;
+      localWhisperProcessReady = false;
+      localWhisperModelReady = false;
+      localWhisperModelConfigKey = '';
       patchLocalWhisperStatus({
         sidecarRunning: false,
         modelPhase: 'stopped',
@@ -568,21 +736,32 @@ async function startLocalWhisperSidecar(settings: LocalWhisperSettings) {
         }
       });
       const stoppedError = new Error('Local Whisper sidecar stopped.');
-      rejectSidecarReadyWaiters(stoppedError);
+      rejectProcessReadyWaiters(stoppedError);
+      rejectModelReadyWaiters(stoppedError);
       rejectPendingWhisperRequests(stoppedError);
     });
-    await ready;
-  } else if (!localWhisperSidecarReady) {
-    await waitForSidecarReady();
+    await processReady;
+  } else if (!localWhisperProcessReady) {
+    await waitForProcessReady();
   }
 
   patchLocalWhisperStatus({ sidecarRunning: true, listening: true, status: 'starting' });
-  sendLocalWhisperCommand({
-    type: 'configure',
-    modelName: settings.modelName,
-    device: settings.device,
-    computeType: settings.computeType
-  });
+  if (!localWhisperModelReady || localWhisperModelConfigKey !== requestedModelKey) {
+    const modelReady = waitForModelReady();
+    try {
+      sendLocalWhisperCommand({
+        type: 'configure',
+        modelName: settings.modelName,
+        device: settings.device,
+        computeType: settings.computeType
+      });
+    } catch (error) {
+      rejectModelReadyWaiters(error instanceof Error ? error : new Error('Local Whisper configure command failed.'));
+      throw error;
+    }
+    await modelReady;
+  }
+  patchLocalWhisperStatus({ sidecarRunning: true, listening: true, status: 'listening', modelPhase: 'ready' });
   return localWhisperStatusForRenderer();
 }
 
@@ -782,6 +961,9 @@ ipcMain.handle('local-whisper:stop', () => {
   }
   localWhisperProcess?.kill();
   localWhisperProcess = null;
+  localWhisperProcessReady = false;
+  localWhisperModelReady = false;
+  localWhisperModelConfigKey = '';
   patchLocalWhisperStatus({
     sidecarRunning: false,
     modelPhase: 'stopped',
@@ -798,18 +980,33 @@ ipcMain.handle('local-whisper:stop', () => {
 
 ipcMain.handle(
   'local-whisper:transcribeChunk',
-  async (_event, payload: { audioData: ArrayBuffer; mimeType: string; settings: LocalWhisperSettings }) => {
+  async (_event, payload: {
+    audioData: ArrayBuffer;
+    mimeType: string;
+    format?: string;
+    extension?: string;
+    sampleRate?: number;
+    durationSeconds?: number;
+    headerSignature?: string;
+    settings: LocalWhisperSettings;
+  }) => {
     await startLocalWhisperSidecar(payload.settings);
     const tempDir = path.join(app.getPath('temp'), 'narration-prompter-local-whisper');
     await mkdir(tempDir, { recursive: true });
-    const extension = payload.mimeType.includes('wav')
+    const audioBuffer = Buffer.from(payload.audioData);
+    const detectedHeaderSignature = audioHeaderSignature(audioBuffer);
+    const format = payload.format || (payload.mimeType.includes('wav') ? 'wav' : payload.mimeType.includes('ogg') ? 'ogg' : payload.mimeType.includes('webm') ? 'webm' : 'other');
+    const extension = payload.extension || (payload.mimeType.includes('wav')
       ? 'wav'
       : payload.mimeType.includes('ogg')
         ? 'ogg'
-        : 'webm';
+        : payload.mimeType.includes('webm')
+          ? 'webm'
+          : 'bin');
+    const headerSignature = payload.headerSignature || detectedHeaderSignature;
     const requestId = String(nextWhisperRequestId++);
     const audioPath = path.join(tempDir, `chunk-${Date.now()}-${requestId}.${extension}`);
-    await writeFile(audioPath, Buffer.from(payload.audioData));
+    await writeFile(audioPath, audioBuffer);
 
     const result = await new Promise<{ text: string; durationSeconds?: number }>((resolve, reject) => {
       pendingWhisperRequests.set(requestId, { resolve, reject, audioPath });
@@ -817,6 +1014,12 @@ ipcMain.handle(
         type: 'transcribe',
         requestId,
         audioPath,
+        audioFormat: format,
+        mimeType: payload.mimeType,
+        fileSizeBytes: audioBuffer.byteLength,
+        headerSignature,
+        sampleRate: payload.sampleRate,
+        chunkDurationSeconds: payload.durationSeconds,
         modelName: payload.settings.modelName,
         device: payload.settings.device,
         computeType: payload.settings.computeType
@@ -826,7 +1029,13 @@ ipcMain.handle(
         chunk: {
           ...localWhisperStatus.chunk,
           chunksReceivedBySidecar: localWhisperStatus.chunk.chunksReceivedBySidecar + 1,
-          lastChunkBytes: payload.audioData.byteLength,
+          lastChunkBytes: audioBuffer.byteLength,
+          lastChunkFormat: format,
+          lastMimeType: payload.mimeType,
+          lastFileExtension: extension,
+          lastHeaderSignature: headerSignature,
+          lastSampleRate: payload.sampleRate ?? 0,
+          lastChunkDurationSeconds: payload.durationSeconds ?? 0,
           pendingResponses: localWhisperStatus.chunk.pendingResponses + 1,
           warningMessage: null
         }

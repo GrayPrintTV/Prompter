@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
-import { DEFAULT_LOCAL_WHISPER_STATUS, LocalWhisperAsrProvider } from '../asr/LocalWhisperAsrProvider';
+import {
+  audioHeaderSignature,
+  DEFAULT_LOCAL_WHISPER_STATUS,
+  encodePcmWav,
+  LocalWhisperAsrProvider,
+  type LocalWhisperPcmChunk
+} from '../asr/LocalWhisperAsrProvider';
 import { OpenAiRealtimeAsrProvider } from '../asr/OpenAiRealtimeAsrProvider';
 import { coerceSelectedProvider, getAsrProviderOptions, isLocalWhisperConfigured } from '../asr/providerRegistry';
 import { getActiveAsrTranscriptHistory } from '../components/ControlPanel';
@@ -166,18 +172,32 @@ describe('Local Whisper ASR provider', () => {
     } as unknown as MediaStream;
   }
 
-  class FakeMediaRecorder extends EventTarget {
-    state: RecordingState = 'inactive';
+  function wavChunk(sequence = 1): LocalWhisperPcmChunk {
+    const samples = new Float32Array(16000);
+    const audioData = encodePcmWav(samples, 16000);
+    return {
+      audioData,
+      sampleRate: 16000,
+      durationSeconds: 1,
+      sequence
+    };
+  }
 
-    start() {
-      this.state = 'recording';
-      this.dispatchEvent(new Event('start'));
-    }
-
-    stop() {
-      this.state = 'inactive';
-      this.dispatchEvent(new Event('stop'));
-    }
+  function fakePcmRecorder() {
+    let emitChunk!: (chunk: LocalWhisperPcmChunk) => void;
+    const recorder = {
+      start: vi.fn(),
+      stop: vi.fn()
+    };
+    return {
+      recorder,
+      create: vi.fn((_stream: MediaStream, options: { onChunk(chunk: LocalWhisperPcmChunk): void; onLog(message: string): void }) => {
+        emitChunk = options.onChunk;
+        options.onLog('PCM WAV capture armed at 16000 Hz.');
+        return recorder;
+      }),
+      emit: (chunk = wavChunk()) => emitChunk(chunk)
+    };
   }
 
   it('hands sidecar transcript results off as normal TranscriptDelta objects', async () => {
@@ -196,6 +216,24 @@ describe('Local Whisper ASR provider', () => {
       }
     ]);
     expect(provider.getConnectionStatus().lastTranscriptDelta).toBe('The room did not answer.');
+  });
+
+  it('encodes PCM chunks as RIFF/WAVE audio for the sidecar', () => {
+    const audioData = encodePcmWav(new Float32Array([0, 0.5, -0.5]), 16000);
+    expect(audioHeaderSignature(audioData)).toBe('RIFF/WAVE');
+    expect(new DataView(audioData).getUint32(24, true)).toBe(16000);
+  });
+
+  it('does not treat provider status text as ASR transcript text', async () => {
+    const provider = new LocalWhisperAsrProvider(LOCAL_WHISPER_SETTINGS, { now: () => 5678 });
+    const deltas: TranscriptDelta[] = [];
+    provider.onDelta((delta) => deltas.push(delta));
+
+    await provider.acceptTranscriptResult({ text: 'Sidecar is running.' });
+
+    expect(deltas).toEqual([]);
+    expect(provider.getConnectionStatus().lastTranscriptDelta).toBe('');
+    expect(provider.getConnectionStatus().transcriptHistory).toEqual([]);
   });
 
   it('reports setup failure before requesting microphone access', async () => {
@@ -397,11 +435,11 @@ describe('Local Whisper ASR provider', () => {
 
   it('records chunk send and sidecar response diagnostics', async () => {
     const bridge = localWhisperBridge();
-    const recorder = new FakeMediaRecorder();
+    const pcm = fakePcmRecorder();
     const provider = new LocalWhisperAsrProvider(LOCAL_WHISPER_SETTINGS, {
       bridge,
       getUserMedia: vi.fn(async () => fakeMediaStream('Studio microphone')),
-      createMediaRecorder: () => recorder as unknown as MediaRecorder,
+      createPcmChunkRecorder: pcm.create,
       now: () => 123
     });
     const deltas: TranscriptDelta[] = [];
@@ -409,25 +447,30 @@ describe('Local Whisper ASR provider', () => {
 
     await provider.start();
     expect(provider.getStatus()).toBe('listening');
-    const blob = {
-      size: 3,
-      type: 'audio/webm',
-      arrayBuffer: vi.fn(async () => new Uint8Array([1, 2, 3]).buffer)
-    } as unknown as Blob;
-    expect(blob.size).toBe(3);
-    await provider.acceptRecordedAudioChunk(blob);
+    await provider.acceptPcmAudioChunk(wavChunk());
 
     const mic = provider.getConnectionStatus().mic;
-    expect(provider.getConnectionStatus().chunk.lastChunkBytes).toBe(3);
+    expect(provider.getConnectionStatus().chunk.lastChunkBytes).toBeGreaterThan(44);
+    expect(provider.getConnectionStatus().chunk.lastChunkFormat).toBe('wav');
+    expect(provider.getConnectionStatus().chunk.lastMimeType).toBe('audio/wav');
+    expect(provider.getConnectionStatus().chunk.lastFileExtension).toBe('wav');
+    expect(provider.getConnectionStatus().chunk.lastHeaderSignature).toBe('RIFF/WAVE');
+    expect(provider.getConnectionStatus().chunk.lastSampleRate).toBe(16000);
+    expect(provider.getConnectionStatus().chunk.lastChunkDurationSeconds).toBe(1);
     expect(mic.log.join('\n')).not.toContain('Chunk skipped');
     expect(bridge.transcribeLocalWhisperChunk).toHaveBeenCalled();
     expect(mic.captureState).toBe('chunk-returned');
-    expect(mic.log.join('\n')).toContain('MediaRecorder chunk emitted: 3 bytes.');
-    expect(mic.log.join('\n')).toContain('IPC send to main: 3 bytes.');
+    expect(mic.log.join('\n')).toContain('PCM WAV chunk emitted');
+    expect(mic.log.join('\n')).toContain('IPC send to main');
     expect(mic.log.join('\n')).toContain('Sidecar response received.');
     expect(bridge.transcribeLocalWhisperChunk).toHaveBeenCalledWith({
       audioData: expect.any(ArrayBuffer),
-      mimeType: 'audio/webm',
+      mimeType: 'audio/wav',
+      format: 'wav',
+      extension: 'wav',
+      sampleRate: 16000,
+      durationSeconds: 1,
+      headerSignature: 'RIFF/WAVE',
       settings: LOCAL_WHISPER_SETTINGS
     });
     expect(deltas.at(-1)?.source).toBe('local-whisper');
@@ -461,20 +504,16 @@ describe('Local Whisper ASR provider', () => {
         })
       )
     });
-    const recorder = new FakeMediaRecorder();
+    const pcm = fakePcmRecorder();
     const provider = new LocalWhisperAsrProvider(LOCAL_WHISPER_SETTINGS, {
       bridge,
       getUserMedia: vi.fn(async () => fakeMediaStream('Studio microphone')),
-      createMediaRecorder: () => recorder as unknown as MediaRecorder,
+      createPcmChunkRecorder: pcm.create,
       chunkResponseTimeoutMs: 50
     });
 
     await provider.start();
-    const pending = provider.acceptRecordedAudioChunk({
-      size: 3,
-      type: 'audio/webm',
-      arrayBuffer: vi.fn(async () => new Uint8Array([1, 2, 3]).buffer)
-    } as unknown as Blob);
+    const pending = provider.acceptPcmAudioChunk(wavChunk());
 
     await vi.advanceTimersByTimeAsync(55);
     expect(provider.getConnectionStatus().chunk.warningMessage).toContain('no sidecar response');

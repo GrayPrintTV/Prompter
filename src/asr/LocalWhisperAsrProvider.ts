@@ -21,15 +21,39 @@ type LocalWhisperBridge = {
   transcribeLocalWhisperChunk(payload: {
     audioData: ArrayBuffer;
     mimeType: string;
+    format: string;
+    extension: string;
+    sampleRate?: number;
+    durationSeconds?: number;
+    headerSignature?: string;
     settings: LocalWhisperSettings;
   }): Promise<LocalWhisperTranscriptResult>;
   onLocalWhisperStatus(callback: (status: LocalWhisperStatus) => void): () => void;
 };
 
+export type LocalWhisperPcmChunk = {
+  audioData: ArrayBuffer;
+  sampleRate: number;
+  durationSeconds: number;
+  sequence: number;
+};
+
+type PcmChunkRecorder = {
+  start(): void | Promise<void>;
+  stop(): void;
+};
+
+type PcmChunkRecorderOptions = {
+  chunkDurationSeconds: number;
+  onChunk(chunk: LocalWhisperPcmChunk): void;
+  onLog(message: string): void;
+  onError(error: Error): void;
+};
+
 type LocalWhisperDeps = {
   bridge?: LocalWhisperBridge;
   getUserMedia?: (constraints: MediaStreamConstraints) => Promise<MediaStream>;
-  createMediaRecorder?: (stream: MediaStream) => MediaRecorder;
+  createPcmChunkRecorder?: (stream: MediaStream, options: PcmChunkRecorderOptions) => PcmChunkRecorder;
   createAudioContext?: () => AudioContext | null;
   requestAnimationFrame?: (callback: FrameRequestCallback) => number;
   cancelAnimationFrame?: (handle: number) => void;
@@ -40,6 +64,89 @@ type LocalWhisperDeps = {
 const MAX_MIC_LOG_LINES = 18;
 const MAX_TRANSCRIPT_HISTORY = 12;
 const DEFAULT_CHUNK_RESPONSE_TIMEOUT_MS = 15000;
+const PROVIDER_STATUS_TEXT = new Set([
+  'sidecar is running',
+  'local whisper sidecar is running',
+  'model loading',
+  'model loaded',
+  'process started',
+  'ready'
+]);
+
+function isProviderStatusText(text: string) {
+  return PROVIDER_STATUS_TEXT.has(text.trim().replace(/\.$/, '').toLowerCase());
+}
+
+export function audioHeaderSignature(audioData: ArrayBuffer) {
+  const bytes = new Uint8Array(audioData.slice(0, 16));
+  if (bytes.length >= 12) {
+    const riff = String.fromCharCode(...bytes.slice(0, 4));
+    const wave = String.fromCharCode(...bytes.slice(8, 12));
+    if (riff === 'RIFF' && wave === 'WAVE') return 'RIFF/WAVE';
+  }
+  if (bytes.length >= 4 && bytes[0] === 0x1a && bytes[1] === 0x45 && bytes[2] === 0xdf && bytes[3] === 0xa3) {
+    return 'WebM';
+  }
+  return Array.from(bytes.slice(0, 8))
+    .map((byte) => byte.toString(16).padStart(2, '0').toUpperCase())
+    .join(' ');
+}
+
+export function encodePcmWav(samples: Float32Array, sampleRate: number) {
+  const bytesPerSample = 2;
+  const blockAlign = bytesPerSample;
+  const dataSize = samples.length * bytesPerSample;
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+
+  writeAscii(view, 0, 'RIFF');
+  view.setUint32(4, 36 + dataSize, true);
+  writeAscii(view, 8, 'WAVE');
+  writeAscii(view, 12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * blockAlign, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, 16, true);
+  writeAscii(view, 36, 'data');
+  view.setUint32(40, dataSize, true);
+
+  let offset = 44;
+  for (const sample of samples) {
+    const clamped = Math.max(-1, Math.min(1, sample));
+    view.setInt16(offset, clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff, true);
+    offset += bytesPerSample;
+  }
+
+  return buffer;
+}
+
+function writeAscii(view: DataView, offset: number, text: string) {
+  for (let index = 0; index < text.length; index += 1) {
+    view.setUint8(offset + index, text.charCodeAt(index));
+  }
+}
+
+function takeSamples(buffers: Float32Array[], sampleCount: number) {
+  const output = new Float32Array(sampleCount);
+  let written = 0;
+  while (written < sampleCount && buffers.length > 0) {
+    const first = buffers[0];
+    const needed = sampleCount - written;
+    if (first.length <= needed) {
+      output.set(first, written);
+      written += first.length;
+      buffers.shift();
+    } else {
+      output.set(first.slice(0, needed), written);
+      buffers[0] = first.slice(needed);
+      written += needed;
+    }
+  }
+  return output;
+}
 
 function createDefaultMicDiagnostics(): MicCaptureDiagnostics {
   return {
@@ -59,6 +166,12 @@ function createDefaultChunkDiagnostics(): LocalWhisperChunkDiagnostics {
     chunksReceivedBySidecar: 0,
     chunksReturnedFromSidecar: 0,
     lastChunkBytes: 0,
+    lastChunkFormat: '',
+    lastMimeType: '',
+    lastFileExtension: '',
+    lastHeaderSignature: '',
+    lastSampleRate: 0,
+    lastChunkDurationSeconds: 0,
     lastTranscriptText: '',
     lastSidecarError: null,
     warningMessage: null,
@@ -113,7 +226,7 @@ export class LocalWhisperAsrProvider implements AsrProvider {
   private listeners = new Set<Listener>();
   private statusListeners = new Set<StatusListener>();
   private mediaStream: MediaStream | null = null;
-  private recorder: MediaRecorder | null = null;
+  private pcmRecorder: PcmChunkRecorder | null = null;
   private statusOff: (() => void) | null = null;
   private busy = false;
   private connectionStatus: LocalWhisperStatus = {
@@ -128,7 +241,7 @@ export class LocalWhisperAsrProvider implements AsrProvider {
   private micSourceNode: MediaStreamAudioSourceNode | null = null;
   private micAnimationFrame: number | null = null;
   private lastLevelUpdateMs = 0;
-  private recorderWatchdogTimeout: number | null = null;
+  private chunkWatchdogTimeout: number | null = null;
 
   constructor(private settings: LocalWhisperSettings, private deps: LocalWhisperDeps = {}) {
     this.setConnectionStatus({ bridge: this.inspectBridge() });
@@ -175,18 +288,19 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       });
       return this.connectionStatus;
     }
+    const remoteStatus = this.sanitizeRemoteStatus(status);
     this.setConnectionStatus({
-      ...status,
+      ...remoteStatus,
       configured: this.isConfigured(),
       bridge: bridgeDiagnostics,
       mic: {
         ...createDefaultMicDiagnostics(),
-        ...status.mic,
+        ...remoteStatus.mic,
         ...this.connectionStatus.mic
       },
-      chunk: this.mergeChunkDiagnostics(status.chunk),
-      transcriptHistory: status.transcriptHistory?.length
-        ? status.transcriptHistory
+      chunk: this.mergeChunkDiagnostics(remoteStatus.chunk),
+      transcriptHistory: remoteStatus.transcriptHistory?.length
+        ? remoteStatus.transcriptHistory
         : this.connectionStatus.transcriptHistory
     });
     return this.connectionStatus;
@@ -236,13 +350,14 @@ export class LocalWhisperAsrProvider implements AsrProvider {
     try {
       const bridge = this.getBridge();
       this.statusOff = bridge.onLocalWhisperStatus((status) => {
+        const remoteStatus = this.sanitizeRemoteStatus(status);
         this.setConnectionStatus({
-          ...status,
+          ...remoteStatus,
           configured: this.isConfigured(),
           mic: this.connectionStatus.mic,
-          chunk: this.mergeChunkDiagnostics(status.chunk),
-          transcriptHistory: status.transcriptHistory?.length
-            ? status.transcriptHistory
+          chunk: this.mergeChunkDiagnostics(remoteStatus.chunk),
+          transcriptHistory: remoteStatus.transcriptHistory?.length
+            ? remoteStatus.transcriptHistory
             : this.connectionStatus.transcriptHistory
         });
       });
@@ -259,40 +374,32 @@ export class LocalWhisperAsrProvider implements AsrProvider {
         throw error;
       }
 
+      const remoteSidecarStatus = this.sanitizeRemoteStatus(sidecarStatus);
       this.setConnectionStatus({
-        ...sidecarStatus,
+        ...remoteSidecarStatus,
         configured: this.isConfigured(),
         mic: this.connectionStatus.mic,
-        chunk: this.mergeChunkDiagnostics(sidecarStatus.chunk),
-        transcriptHistory: sidecarStatus.transcriptHistory?.length
-          ? sidecarStatus.transcriptHistory
+        chunk: this.mergeChunkDiagnostics(remoteSidecarStatus.chunk),
+        transcriptHistory: remoteSidecarStatus.transcriptHistory?.length
+          ? remoteSidecarStatus.transcriptHistory
           : this.connectionStatus.transcriptHistory
       });
       this.mediaStream = await this.ensureMicrophoneStream();
-      this.recorder = this.createMediaRecorder(this.mediaStream);
-      this.recorder.addEventListener('start', () => {
-        this.updateMic({ captureState: 'media-recorder-recording' }, 'MediaRecorder start.');
-        this.startRecorderWatchdog();
+      this.pcmRecorder = this.createPcmChunkRecorder(this.mediaStream, {
+        chunkDurationSeconds: this.settings.chunkDurationSeconds,
+        onChunk: (chunk) => {
+          void this.acceptPcmAudioChunk(chunk);
+        },
+        onLog: (message) => this.updateMic({}, message),
+        onError: (error) => {
+          const message = this.errorMessage(error, 'PCM capture failed.');
+          this.updateMic({ errorMessage: message }, `PCM capture error: ${message}`);
+          this.setProviderStatus('error', message);
+        }
       });
-      this.recorder.addEventListener('stop', () => {
-        this.stopRecorderWatchdog();
-        this.updateMic(
-          { captureState: this.streamIsActive() ? 'stream-active' : 'stream-muted-ended' },
-          'MediaRecorder stopped.'
-        );
-      });
-      this.recorder.addEventListener('error', () => {
-        this.updateMic(
-          { errorMessage: 'MediaRecorder reported an error.' },
-          'MediaRecorder error.'
-        );
-      });
-      this.recorder.addEventListener('dataavailable', (event) => {
-        void this.acceptRecordedAudioChunk(event.data);
-      });
-      this.recorder.start(Math.max(1, this.settings.chunkDurationSeconds) * 1000);
-      this.updateMic({ captureState: 'media-recorder-recording' }, 'MediaRecorder start requested.');
-      this.setConnectionStatus({ modelPhase: 'ready' });
+      await this.pcmRecorder.start();
+      this.updateMic({ captureState: 'pcm-capturing' }, 'PCM WAV capture started.');
+      this.startChunkWatchdog();
       this.setProviderStatus('listening', null);
     } catch (error) {
       await this.stop();
@@ -302,11 +409,9 @@ export class LocalWhisperAsrProvider implements AsrProvider {
   }
 
   async stop() {
-    if (this.recorder?.state !== 'inactive') {
-      this.recorder?.stop();
-    }
-    this.recorder = null;
-    this.stopRecorderWatchdog();
+    this.pcmRecorder?.stop();
+    this.pcmRecorder = null;
+    this.stopChunkWatchdog();
 
     if (this.mediaStream && !this.connectionStatus.mic.monitorActive) {
       this.stopStream(this.mediaStream);
@@ -401,6 +506,11 @@ export class LocalWhisperAsrProvider implements AsrProvider {
 
   async acceptTranscriptResult(result: LocalWhisperTranscriptResult) {
     const text = result.text.trim();
+    if (isProviderStatusText(text)) {
+      this.updateMic({}, `Ignored provider status text: ${text}`);
+      this.updateChunk({ lastTranscriptText: '', warningMessage: null });
+      return;
+    }
     const displayText = text || '[empty transcript]';
     const historyItem: AsrTranscriptHistoryItem = {
       text,
@@ -431,17 +541,66 @@ export class LocalWhisperAsrProvider implements AsrProvider {
     }
   }
 
+  async acceptPcmAudioChunk(chunk: LocalWhisperPcmChunk) {
+    return this.acceptEncodedAudioChunk({
+      audioData: chunk.audioData,
+      mimeType: 'audio/wav',
+      format: 'wav',
+      extension: 'wav',
+      sampleRate: chunk.sampleRate,
+      durationSeconds: chunk.durationSeconds,
+      headerSignature: audioHeaderSignature(chunk.audioData),
+      logLabel: 'PCM WAV'
+    });
+  }
+
   async acceptRecordedAudioChunk(blob: Blob) {
+    const audioData = await blob.arrayBuffer();
+    const headerSignature = audioHeaderSignature(audioData);
+    const format = headerSignature === 'RIFF/WAVE' ? 'wav' : headerSignature === 'WebM' ? 'webm' : 'other';
+    const extension = format === 'wav' ? 'wav' : format === 'webm' ? 'webm' : 'bin';
+    return this.acceptEncodedAudioChunk({
+      audioData,
+      mimeType: blob.type || (format === 'wav' ? 'audio/wav' : 'application/octet-stream'),
+      format,
+      extension,
+      sampleRate: 0,
+      durationSeconds: 0,
+      headerSignature,
+      logLabel: 'Legacy MediaRecorder'
+    });
+  }
+
+  private async acceptEncodedAudioChunk(chunk: {
+    audioData: ArrayBuffer;
+    mimeType: string;
+    format: string;
+    extension: string;
+    sampleRate: number;
+    durationSeconds: number;
+    headerSignature: string;
+    logLabel: string;
+  }) {
+    const byteLength = chunk.audioData.byteLength;
     this.updateChunk({
       chunksRecorded: this.connectionStatus.chunk.chunksRecorded + 1,
-      lastChunkBytes: blob.size,
+      lastChunkBytes: byteLength,
+      lastChunkFormat: chunk.format,
+      lastMimeType: chunk.mimeType,
+      lastFileExtension: chunk.extension,
+      lastHeaderSignature: chunk.headerSignature,
+      lastSampleRate: chunk.sampleRate,
+      lastChunkDurationSeconds: chunk.durationSeconds,
       warningMessage: null
     });
-    if (blob.size > 0) {
-      this.updateMic({}, `MediaRecorder chunk emitted: ${blob.size} bytes.`);
+    if (byteLength > 0) {
+      this.updateMic(
+        {},
+        `${chunk.logLabel} chunk emitted: ${byteLength} bytes, ${chunk.sampleRate || 'unknown'} Hz, ${chunk.durationSeconds.toFixed(2)}s, ${chunk.headerSignature}.`
+      );
     }
-    if (blob.size === 0) {
-      this.updateMic({}, 'Chunk skipped: MediaRecorder emitted an empty blob.');
+    if (byteLength === 0) {
+      this.updateMic({}, 'Chunk skipped: PCM WAV encoder emitted an empty chunk.');
       return;
     }
     if (this.busy) {
@@ -457,17 +616,21 @@ export class LocalWhisperAsrProvider implements AsrProvider {
     const returnedBefore = this.connectionStatus.chunk.chunksReturnedFromSidecar;
     const timeoutHandle = this.setResponseTimeout();
     try {
-      const audioData = await blob.arrayBuffer();
       this.updateChunk({
         chunksSentToMain: this.connectionStatus.chunk.chunksSentToMain + 1,
         pendingResponses: this.connectionStatus.chunk.pendingResponses + 1,
         warningMessage: null
       });
       this.setConnectionStatus({ modelPhase: 'transcribing' });
-      this.updateMic({ captureState: 'chunk-sent' }, `IPC send to main: ${blob.size} bytes.`);
+      this.updateMic({ captureState: 'chunk-sent' }, `IPC send to main: ${byteLength} byte ${chunk.format} chunk.`);
       const result = await this.getBridge().transcribeLocalWhisperChunk({
-        audioData,
-        mimeType: blob.type || 'audio/webm',
+        audioData: chunk.audioData,
+        mimeType: chunk.mimeType,
+        format: chunk.format,
+        extension: chunk.extension,
+        sampleRate: chunk.sampleRate,
+        durationSeconds: chunk.durationSeconds,
+        headerSignature: chunk.headerSignature,
         settings: this.settings
       });
       if (this.connectionStatus.chunk.chunksReceivedBySidecar <= receivedBefore) {
@@ -476,7 +639,7 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       if (this.connectionStatus.chunk.chunksReturnedFromSidecar <= returnedBefore) {
         this.updateChunk({ chunksReturnedFromSidecar: returnedBefore + 1 });
       }
-      this.updateChunk({ warningMessage: null });
+      this.updateChunk({ warningMessage: null, lastSidecarError: null });
       this.updateMic({ captureState: 'chunk-returned' }, 'Sidecar response received.');
       await this.acceptTranscriptResult(result);
     } catch (error) {
@@ -488,7 +651,7 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       this.clearResponseTimeout(timeoutHandle);
       this.updateChunk({ pendingResponses: Math.max(0, this.connectionStatus.chunk.pendingResponses - 1) });
       this.busy = false;
-      this.startRecorderWatchdog();
+      this.startChunkWatchdog();
     }
   }
 
@@ -609,26 +772,26 @@ export class LocalWhisperAsrProvider implements AsrProvider {
     );
   }
 
-  private startRecorderWatchdog() {
-    this.stopRecorderWatchdog();
+  private startChunkWatchdog() {
+    this.stopChunkWatchdog();
     if (this.status !== 'listening' && this.status !== 'starting') return;
     const recordedAtStart = this.connectionStatus.chunk.chunksRecorded;
     const timeoutMs = Math.max(1800, this.settings.chunkDurationSeconds * 1500 + 1000);
-    this.recorderWatchdogTimeout = this.requestTimeout(() => {
+    this.chunkWatchdogTimeout = this.requestTimeout(() => {
       const noChunks = this.connectionStatus.chunk.chunksRecorded === recordedAtStart;
       const meterMoving = this.connectionStatus.mic.inputLevel > 0.03;
-      if (noChunks && meterMoving && this.recorder?.state === 'recording') {
-        const message = 'Input level is moving, but MediaRecorder has not emitted chunks.';
+      if (noChunks && meterMoving && this.status === 'listening') {
+        const message = 'Input level is moving, but PCM WAV capture has not emitted chunks.';
         this.updateChunk({ warningMessage: message });
         this.updateMic({}, message);
       }
     }, timeoutMs);
   }
 
-  private stopRecorderWatchdog() {
-    if (this.recorderWatchdogTimeout !== null) {
-      this.cancelTimeout(this.recorderWatchdogTimeout);
-      this.recorderWatchdogTimeout = null;
+  private stopChunkWatchdog() {
+    if (this.chunkWatchdogTimeout !== null) {
+      this.cancelTimeout(this.chunkWatchdogTimeout);
+      this.chunkWatchdogTimeout = null;
     }
   }
 
@@ -679,7 +842,14 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       chunksReceivedBySidecar: Math.max(current.chunksReceivedBySidecar, remote.chunksReceivedBySidecar),
       chunksReturnedFromSidecar: Math.max(current.chunksReturnedFromSidecar, remote.chunksReturnedFromSidecar),
       pendingResponses: Math.max(current.pendingResponses, remote.pendingResponses),
-      lastChunkBytes: Math.max(current.lastChunkBytes, remote.lastChunkBytes)
+      lastChunkBytes: Math.max(current.lastChunkBytes, remote.lastChunkBytes),
+      lastChunkFormat: remote.lastChunkFormat || current.lastChunkFormat,
+      lastMimeType: remote.lastMimeType || current.lastMimeType,
+      lastFileExtension: remote.lastFileExtension || current.lastFileExtension,
+      lastHeaderSignature: remote.lastHeaderSignature || current.lastHeaderSignature,
+      lastSampleRate: remote.lastSampleRate || current.lastSampleRate,
+      lastChunkDurationSeconds: remote.lastChunkDurationSeconds || current.lastChunkDurationSeconds,
+      lastTranscriptText: remote.lastTranscriptText || current.lastTranscriptText
     };
   }
 
@@ -829,6 +999,21 @@ export class LocalWhisperAsrProvider implements AsrProvider {
     }
   }
 
+  private sanitizeRemoteStatus(status: LocalWhisperStatus): LocalWhisperStatus {
+    const transcriptHistory = status.transcriptHistory.filter((item) => !isProviderStatusText(item.text));
+    const lastTranscriptDelta = isProviderStatusText(status.lastTranscriptDelta) ? '' : status.lastTranscriptDelta;
+    const lastTranscriptText = isProviderStatusText(status.chunk.lastTranscriptText) ? '' : status.chunk.lastTranscriptText;
+    return {
+      ...status,
+      lastTranscriptDelta,
+      transcriptHistory,
+      chunk: {
+        ...status.chunk,
+        lastTranscriptText
+      }
+    };
+  }
+
   private isConfigured() {
     return Boolean(this.settings.pythonExecutablePath.trim() && this.settings.modelName.trim());
   }
@@ -878,9 +1063,84 @@ export class LocalWhisperAsrProvider implements AsrProvider {
     return getUserMedia(constraints);
   }
 
-  private createMediaRecorder(stream: MediaStream) {
-    if (this.deps.createMediaRecorder) return this.deps.createMediaRecorder(stream);
-    return new MediaRecorder(stream, { mimeType: 'audio/webm' });
+  private createPcmChunkRecorder(stream: MediaStream, options: PcmChunkRecorderOptions): PcmChunkRecorder {
+    if (this.deps.createPcmChunkRecorder) return this.deps.createPcmChunkRecorder(stream, options);
+
+    let audioContext: AudioContext | null = null;
+    let sourceNode: MediaStreamAudioSourceNode | null = null;
+    let processorNode: ScriptProcessorNode | null = null;
+    let muteNode: GainNode | null = null;
+    let stopped = true;
+    let sequence = 0;
+    let bufferedSamples = 0;
+    const buffers: Float32Array[] = [];
+    const thisProvider = this;
+
+    const stop = () => {
+      stopped = true;
+      processorNode?.disconnect();
+      sourceNode?.disconnect();
+      muteNode?.disconnect();
+      processorNode = null;
+      sourceNode = null;
+      muteNode = null;
+      buffers.length = 0;
+      bufferedSamples = 0;
+      if (audioContext) {
+        void audioContext.close().catch(() => undefined);
+        audioContext = null;
+      }
+      options.onLog('PCM WAV capture stopped.');
+    };
+
+    return {
+      async start() {
+        audioContext = thisProvider.createAudioContext();
+        if (!audioContext) {
+          throw new Error('Web Audio PCM capture is unavailable in this renderer.');
+        }
+
+        stopped = false;
+        const sampleRate = audioContext.sampleRate;
+        const targetSamples = Math.max(1, Math.round(sampleRate * Math.max(1, options.chunkDurationSeconds)));
+        sourceNode = audioContext.createMediaStreamSource(stream);
+        processorNode = audioContext.createScriptProcessor(4096, 1, 1);
+        muteNode = audioContext.createGain();
+        muteNode.gain.value = 0;
+
+        processorNode.onaudioprocess = (event) => {
+          if (stopped) return;
+          try {
+            const input = event.inputBuffer.getChannelData(0);
+            const copy = new Float32Array(input);
+            buffers.push(copy);
+            bufferedSamples += copy.length;
+
+            while (bufferedSamples >= targetSamples) {
+              const samples = takeSamples(buffers, targetSamples);
+              bufferedSamples -= targetSamples;
+              sequence += 1;
+              const audioData = encodePcmWav(samples, sampleRate);
+              options.onChunk({
+                audioData,
+                sampleRate,
+                durationSeconds: samples.length / sampleRate,
+                sequence
+              });
+            }
+          } catch (error) {
+            options.onError(error instanceof Error ? error : new Error('PCM capture failed.'));
+          }
+        };
+
+        sourceNode.connect(processorNode);
+        processorNode.connect(muteNode);
+        muteNode.connect(audioContext.destination);
+        await audioContext.resume();
+        options.onLog(`PCM WAV capture armed at ${sampleRate} Hz.`);
+      },
+      stop
+    };
   }
 
   private createAudioContext() {

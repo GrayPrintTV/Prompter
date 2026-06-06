@@ -34,17 +34,20 @@ All ASR providers emit transcript chunks as `TranscriptDelta`:
 ## Local Whisper Sidecar Flow
 
 1. Renderer Local Whisper provider requests/holds microphone access for Mic Monitor.
-2. Start Following creates a MediaRecorder for short audio chunks.
-3. Renderer sends audio chunk payloads over `window.prompterApi.transcribeLocalWhisperChunk`.
-4. Electron main writes each chunk to a temporary file under the OS temp directory.
-5. Electron main starts or reuses `python/local_whisper_sidecar.py`.
-6. Main sends JSONL commands to sidecar stdin.
-7. Sidecar uses faster-whisper and returns JSONL transcript responses on stdout.
-8. Main returns transcript text to renderer.
-9. Renderer emits a normal `TranscriptDelta` with source `local-whisper`.
-10. The same alignment engine processes the result.
+2. Start Following captures microphone samples with Web Audio.
+3. Renderer accumulates a few seconds of mono PCM and encodes each chunk as WAV.
+4. Renderer sends WAV payloads over `window.prompterApi.transcribeLocalWhisperChunk`.
+5. Electron main writes each chunk to a temporary `.wav` file under the OS temp directory.
+6. Electron main starts or reuses `python/local_whisper_sidecar.py`.
+7. Main sends JSONL commands to sidecar stdin with format, MIME, byte-size, sample-rate, duration, and header diagnostics.
+8. Sidecar uses faster-whisper and returns JSONL transcript responses on stdout.
+9. Main returns transcript text to renderer.
+10. Renderer emits a normal `TranscriptDelta` with source `local-whisper`.
+11. The same alignment engine processes the result.
 
 The sidecar is chunk-based and may be delayed. Word-level realtime behavior is not required yet.
+
+Sidecar readiness has two separate stages. `ready` from the Python process means the process is alive and accepting JSONL. `model-loaded` means faster-whisper has loaded the requested model and transcription can begin.
 
 ## OpenAI Realtime Flow
 

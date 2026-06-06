@@ -41,6 +41,11 @@ declare global {
       transcribeLocalWhisperChunk(payload: {
         audioData: ArrayBuffer;
         mimeType: string;
+        format: string;
+        extension: string;
+        sampleRate?: number;
+        durationSeconds?: number;
+        headerSignature?: string;
         settings: LocalWhisperSettings;
       }): Promise<LocalWhisperTranscriptResult>;
       onLocalWhisperStatus(callback: (status: LocalWhisperStatus) => void): () => void;

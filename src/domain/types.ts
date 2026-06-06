@@ -142,6 +142,7 @@ export type MicCaptureState =
   | 'stream-active'
   | 'stream-muted-ended'
   | 'media-recorder-recording'
+  | 'pcm-capturing'
   | 'chunk-sent'
   | 'chunk-returned';
 
@@ -157,6 +158,7 @@ export type MicCaptureDiagnostics = {
 export type LocalWhisperSidecarPhase =
   | 'stopped'
   | 'starting'
+  | 'process-started'
   | 'model-loading'
   | 'ready'
   | 'transcribing'
@@ -169,6 +171,12 @@ export type LocalWhisperChunkDiagnostics = {
   chunksReceivedBySidecar: number;
   chunksReturnedFromSidecar: number;
   lastChunkBytes: number;
+  lastChunkFormat: string;
+  lastMimeType: string;
+  lastFileExtension: string;
+  lastHeaderSignature: string;
+  lastSampleRate: number;
+  lastChunkDurationSeconds: number;
   lastTranscriptText: string;
   lastSidecarError: string | null;
   warningMessage: string | null;
