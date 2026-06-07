@@ -165,6 +165,8 @@ During narration, the left control panel can be hidden with the top-bar `Hide Co
 - key warning text when something needs attention
 - `Controls` to bring back the advanced panel
 
+If the app starts with controls hidden from a saved preference, it should still open into the same prompter-only view. The top bar `Controls` button and `Ctrl+Alt+C` restore the advanced panel, and the app automatically restores controls if hidden mode ever produces an invalid prompter pane size.
+
 ## Alignment torture-test harness
 
 Use the `Torture Test` panel to stress-test the aligner without live ASR:

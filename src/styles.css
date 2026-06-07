@@ -85,17 +85,22 @@ textarea {
 .app-shell {
   display: grid;
   grid-template-columns: minmax(360px, 430px) minmax(0, 1fr);
+  grid-template-areas: "controls prompter";
   width: 100%;
   height: 100%;
   min-width: 0;
+  min-height: 0;
 }
 
 .app-shell.controls-hidden {
-  grid-template-columns: 0 minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "prompter";
 }
 
 .control-panel {
+  grid-area: controls;
   height: 100%;
+  min-height: 0;
   overflow: auto;
   border-right: 1px solid var(--line);
   background: var(--panel);
@@ -106,10 +111,20 @@ textarea {
 }
 
 .prompter-stage {
+  grid-area: prompter;
   position: relative;
   min-width: 0;
+  min-height: 0;
+  width: 100%;
   height: 100%;
   overflow: hidden;
+}
+
+.controls-hidden .prompter-stage {
+  grid-column: 1;
+  grid-row: 1;
+  width: 100%;
+  height: 100%;
 }
 
 .narration-bar {
@@ -720,11 +735,15 @@ kbd {
   .app-shell {
     grid-template-columns: 1fr;
     grid-template-rows: 48% 52%;
+    grid-template-areas:
+      "controls"
+      "prompter";
   }
 
   .app-shell.controls-hidden {
     grid-template-columns: 1fr;
     grid-template-rows: 1fr;
+    grid-template-areas: "prompter";
   }
 
   .control-panel {

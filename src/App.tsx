@@ -21,6 +21,7 @@ import {
   tokenIndexForParagraph,
   tokenIndexForSentence
 } from './domain/manuscript';
+import { shouldRecoverControlsFromHiddenLayout } from './domain/layoutRecovery';
 import { deriveNarrationStatus } from './domain/narrationStatus';
 import { HIGH_CONFIDENCE, stateFromAlignment } from './domain/scrollModel';
 import { transcriptToTokens } from './domain/normalize';
@@ -154,6 +155,7 @@ export default function App() {
   const [inputLevel, setInputLevel] = useState(0);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const prompterStageRef = useRef<HTMLDivElement | null>(null);
   const manualProviderRef = useRef(new ManualAsrProvider());
   const mockProviderRef = useRef(new MockAsrProvider());
   const liveProviderRef = useRef(new OpenAiRealtimeAsrProvider());
@@ -434,6 +436,38 @@ export default function App() {
     } catch {
       // Controls visibility is a convenience preference; persistence failure is harmless.
     }
+  }, [controlsVisible]);
+
+  useEffect(() => {
+    let firstFrame = 0;
+    let secondFrame = 0;
+
+    const forceLayoutCheck = () => {
+      window.dispatchEvent(new Event('resize'));
+      if (controlsVisible) return;
+
+      const rect = prompterStageRef.current?.getBoundingClientRect();
+      if (
+        !rect ||
+        shouldRecoverControlsFromHiddenLayout({
+          controlsVisible,
+          stageWidth: rect.width,
+          stageHeight: rect.height
+        })
+      ) {
+        setControlsVisible(true);
+      }
+    };
+
+    firstFrame = window.requestAnimationFrame(() => {
+      forceLayoutCheck();
+      secondFrame = window.requestAnimationFrame(forceLayoutCheck);
+    });
+
+    return () => {
+      window.cancelAnimationFrame(firstFrame);
+      window.cancelAnimationFrame(secondFrame);
+    };
   }, [controlsVisible]);
 
   useEffect(() => {
@@ -757,6 +791,7 @@ export default function App() {
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       const editable = isEditableTarget(event.target);
+      const key = event.key.toLowerCase();
 
       if (event.key === 'F11') {
         event.preventDefault();
@@ -770,27 +805,32 @@ export default function App() {
         return;
       }
 
-      if (event.ctrlKey && event.key.toLowerCase() === 'f') {
+      if (event.ctrlKey && event.altKey && key === 'c') {
+        event.preventDefault();
+        setControlsVisible((visible) => !visible);
+        return;
+      }
+
+      if (event.ctrlKey && !event.altKey && key === 'f') {
         event.preventDefault();
         document.getElementById('manuscript-search')?.focus();
         return;
       }
 
-      if (editable) return;
+      if (editable) {
+        return;
+      }
 
-      if (event.ctrlKey && event.altKey && event.key.toLowerCase() === 'l') {
+      if (event.ctrlKey && event.altKey && key === 'l') {
         event.preventDefault();
         void toggleListening();
-      } else if (event.ctrlKey && event.altKey && event.key.toLowerCase() === 'c') {
-        event.preventDefault();
-        setControlsVisible((visible) => !visible);
-      } else if (event.ctrlKey && event.altKey && event.key.toLowerCase() === 'f') {
+      } else if (event.ctrlKey && event.altKey && key === 'f') {
         event.preventDefault();
         toggleFollow();
-      } else if (event.ctrlKey && event.altKey && event.key.toLowerCase() === 'p') {
+      } else if (event.ctrlKey && event.altKey && key === 'p') {
         event.preventDefault();
         togglePause();
-      } else if (event.ctrlKey && event.altKey && event.key.toLowerCase() === 'r') {
+      } else if (event.ctrlKey && event.altKey && key === 'r') {
         event.preventDefault();
         resync();
       } else if (event.altKey && event.key === 'ArrowLeft') {
@@ -970,7 +1010,7 @@ export default function App() {
         alignmentBufferDebug={alignmentBufferDebug}
         traceLog={traceLog}
       />
-      <div className="prompter-stage">
+      <div className="prompter-stage" ref={prompterStageRef}>
         <NarrationBar
           status={narrationStatus}
           providerLabel={selectedProviderLabel}
@@ -987,6 +1027,7 @@ export default function App() {
           followState={followState}
           confidence={alignment.confidence}
           settings={displaySettings}
+          layoutMode={controlsVisible ? 'with-controls' : 'prompter-only'}
           onTraceScroll={onTraceScroll}
         />
       </div>

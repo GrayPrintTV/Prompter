@@ -18,6 +18,7 @@ type Props = {
   followState: FollowState;
   confidence: number;
   settings: DisplaySettings;
+  layoutMode?: 'with-controls' | 'prompter-only';
   onTraceScroll?: (info: { sentenceIndex: number; didScroll: boolean; reason: string }) => void;
 };
 
@@ -27,6 +28,7 @@ export function PrompterView({
   followState,
   confidence,
   settings,
+  layoutMode = 'with-controls',
   onTraceScroll
 }: Props) {
   const paneRef = useRef<HTMLElement | null>(null);
@@ -231,17 +233,27 @@ export function PrompterView({
       pane.style.setProperty('--prompter-spacer-bottom', `${geometry.bottomSpacerPx}px`);
     };
 
+    let firstFrame: number | null = null;
+    let secondFrame: number | null = null;
+
     applyGeometry();
+    firstFrame = window.requestAnimationFrame(() => {
+      applyGeometry();
+      secondFrame = window.requestAnimationFrame(applyGeometry);
+    });
 
     const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(applyGeometry) : null;
     observer?.observe(container);
     window.addEventListener('resize', applyGeometry);
 
     return () => {
+      if (firstFrame !== null) window.cancelAnimationFrame(firstFrame);
+      if (secondFrame !== null) window.cancelAnimationFrame(secondFrame);
       observer?.disconnect();
       window.removeEventListener('resize', applyGeometry);
     };
   }, [
+    layoutMode,
     settings.fontSizePx,
     settings.lineHeight,
     settings.readingZonePercent
@@ -329,6 +341,7 @@ export function PrompterView({
     confidence,
     currentSentenceIndex,
     followState,
+    layoutMode,
     settings.continuousAssistScroll,
     settings.fontSizePx,
     settings.lineHeight,

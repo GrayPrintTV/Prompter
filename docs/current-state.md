@@ -20,6 +20,7 @@ Phase 1 is in progress. The app has Phase 0/0.5 manuscript alignment, torture-te
 - Bridge diagnostics for Electron preload, Local Whisper IPC, ping, preload path, preload existence, preload status, and preload errors.
 - Prompter reading zone uses a fixed above-center band, dynamic top/bottom manuscript spacers, and a custom `requestAnimationFrame` scroll controller instead of native smooth scrolling.
 - Prompter-first narration mode can hide the left control panel and keeps a minimal Start/Stop/status/mic-level overlay visible.
+- Persisted hidden-controls mode is recoverable: the prompter-only view keeps the NarrationBar visible, and controls are restored automatically if the prompter pane reports an invalid size.
 - Local Whisper settings use draft/apply semantics; changes made while following are labeled as applying after Restart Whisper.
 - Optional continuous assist scroll is implemented and off by default.
 
