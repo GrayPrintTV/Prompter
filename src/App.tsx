@@ -98,17 +98,21 @@ const EMPTY_ALIGNMENT_BUFFER_DEBUG: AlignmentBufferDebug = {
   retentionReason: 'No transcript processed yet.'
 };
 
-const DISPLAY_SETTINGS_MIGRATION_KEY = 'narration-prompter.display-settings-v2-migrated';
+const DISPLAY_SETTINGS_MIGRATION_KEY = 'narration-prompter.display-settings-v3-reading-band-migrated';
 
-function consumeDisplaySettingsMigrationFlag() {
+function hasDisplaySettingsMigrationRun() {
   try {
-    if (localStorage.getItem(DISPLAY_SETTINGS_MIGRATION_KEY) === 'true') {
-      return false;
-    }
-    localStorage.setItem(DISPLAY_SETTINGS_MIGRATION_KEY, 'true');
-    return true;
+    return localStorage.getItem(DISPLAY_SETTINGS_MIGRATION_KEY) === 'true';
   } catch {
-    return false;
+    return true;
+  }
+}
+
+function markDisplaySettingsMigrationRun() {
+  try {
+    localStorage.setItem(DISPLAY_SETTINGS_MIGRATION_KEY, 'true');
+  } catch {
+    // Migration is only for local display preferences; storage failure is harmless.
   }
 }
 
@@ -124,6 +128,7 @@ function localWhisperSettingsEqual(a: LocalWhisperSettings, b: LocalWhisperSetti
 
 export default function App() {
   const stored = useMemo(() => loadSession(), []);
+  const shouldRunDisplaySettingsMigration = useMemo(() => !hasDisplaySettingsMigrationRun(), []);
   const initialLocalWhisperSettings = useMemo(() => ({
     ...DEFAULT_LOCAL_WHISPER_SETTINGS,
     ...stored?.localWhisperSettings
@@ -132,7 +137,7 @@ export default function App() {
   const [manuscriptText, setManuscriptText] = useState(stored?.manuscriptText ?? SAMPLE_MANUSCRIPT);
   const [displaySettings, setDisplaySettings] = useState<DisplaySettings>(() =>
     resolveInitialDisplaySettings(stored?.displaySettings, {
-      migrateLegacyNarrationDefaults: consumeDisplaySettingsMigrationFlag()
+      migrateLegacyNarrationDefaults: shouldRunDisplaySettingsMigration
     })
   );
   const [currentTokenIndex, setCurrentTokenIndex] = useState(stored?.currentTokenIndex ?? 0);
@@ -186,6 +191,12 @@ export default function App() {
   const followStateRef = useRef(followState);
   const [alignment, setAlignment] = useState<AlignmentResult>(() => emptyAlignment(manuscript, currentTokenIndex));
   const selectedAsrProviderRef = useRef(selectedAsrProviderId);
+
+  useEffect(() => {
+    if (shouldRunDisplaySettingsMigration) {
+      markDisplaySettingsMigrationRun();
+    }
+  }, [shouldRunDisplaySettingsMigration]);
 
   useEffect(() => {
     manuscriptRef.current = manuscript;
