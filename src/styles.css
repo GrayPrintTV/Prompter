@@ -650,6 +650,24 @@ textarea {
   width: 70px;
 }
 
+.range-end-labels {
+  display: flex;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.reading-zone-step-actions {
+  margin-top: 0;
+}
+
+.settings-warning {
+  color: var(--warn);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .toggle-row {
   justify-content: flex-start;
   color: var(--text);

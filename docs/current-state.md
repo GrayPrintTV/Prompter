@@ -19,7 +19,7 @@ Phase 1 is in progress. The app has Phase 0/0.5 manuscript alignment, torture-te
 - Local Whisper PCM/WAV chunking path: renderer encodes microphone samples as WAV and Electron main writes `.wav` temp files for the Python sidecar.
 - Bridge diagnostics for Electron preload, Local Whisper IPC, ping, preload path, preload existence, preload status, and preload errors.
 - Prompter reading zone uses a fixed higher-on-screen band, dynamic top/bottom manuscript spacers, visible Display tuning controls, and a custom `requestAnimationFrame` scroll controller instead of native smooth scrolling.
-- Fresh sessions default `readingZonePercent` to 38 and active sentence highlighting off; saved display settings still override those defaults.
+- Fresh sessions default `readingZonePercent` to 38 and active sentence highlighting off. The Display controls show the value as percent down from top, include Move up / Move down buttons, and migrate older bottom-half saved band positions once to the narration default.
 - Prompter-first narration mode can hide the left control panel and keeps a minimal Start/Stop/status/mic-level overlay visible.
 - Persisted hidden-controls mode is recoverable: the prompter-only view keeps the NarrationBar visible, and controls are restored automatically if the prompter pane reports an invalid size.
 - Local Whisper settings use draft/apply semantics; changes made while following are labeled as applying after Restart Whisper.

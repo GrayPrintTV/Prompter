@@ -12,6 +12,37 @@ export const DEFAULT_DISPLAY_SETTINGS: DisplaySettings = {
   theme: 'dark'
 };
 
+export const LEGACY_LOW_READING_ZONE_PERCENT = 55;
+
+export function resolveInitialDisplaySettings(
+  storedDisplaySettings?: Partial<DisplaySettings>,
+  options: { migrateLegacyNarrationDefaults?: boolean } = {}
+): DisplaySettings {
+  const settings = {
+    ...DEFAULT_DISPLAY_SETTINGS,
+    ...storedDisplaySettings
+  };
+
+  if (!Number.isFinite(settings.readingZonePercent)) {
+    settings.readingZonePercent = DEFAULT_DISPLAY_SETTINGS.readingZonePercent;
+  }
+
+  if (options.migrateLegacyNarrationDefaults && storedDisplaySettings) {
+    if (
+      typeof storedDisplaySettings.readingZonePercent === 'number' &&
+      storedDisplaySettings.readingZonePercent > LEGACY_LOW_READING_ZONE_PERCENT
+    ) {
+      settings.readingZonePercent = DEFAULT_DISPLAY_SETTINGS.readingZonePercent;
+    }
+
+    if (storedDisplaySettings.showActiveHighlight === true) {
+      settings.showActiveHighlight = DEFAULT_DISPLAY_SETTINGS.showActiveHighlight;
+    }
+  }
+
+  return settings;
+}
+
 export const DEFAULT_LOCAL_WHISPER_SETTINGS: LocalWhisperSettings = {
   pythonExecutablePath: 'python',
   modelName: 'base.en',

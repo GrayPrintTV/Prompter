@@ -39,9 +39,9 @@ import type {
   TranscriptDelta
 } from './domain/types';
 import {
-  DEFAULT_DISPLAY_SETTINGS,
   DEFAULT_LOCAL_WHISPER_SETTINGS,
   DEFAULT_MOCK_SCRIPT,
+  resolveInitialDisplaySettings,
   SAMPLE_MANUSCRIPT
 } from './state/appStore';
 import { loadSession, saveSession } from './state/projectStore';
@@ -98,6 +98,20 @@ const EMPTY_ALIGNMENT_BUFFER_DEBUG: AlignmentBufferDebug = {
   retentionReason: 'No transcript processed yet.'
 };
 
+const DISPLAY_SETTINGS_MIGRATION_KEY = 'narration-prompter.display-settings-v2-migrated';
+
+function consumeDisplaySettingsMigrationFlag() {
+  try {
+    if (localStorage.getItem(DISPLAY_SETTINGS_MIGRATION_KEY) === 'true') {
+      return false;
+    }
+    localStorage.setItem(DISPLAY_SETTINGS_MIGRATION_KEY, 'true');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function localWhisperSettingsEqual(a: LocalWhisperSettings, b: LocalWhisperSettings) {
   return (
     a.pythonExecutablePath === b.pythonExecutablePath &&
@@ -116,10 +130,11 @@ export default function App() {
   }), [stored]);
   const [projectTitle, setProjectTitle] = useState(stored?.projectTitle ?? 'Narration Session');
   const [manuscriptText, setManuscriptText] = useState(stored?.manuscriptText ?? SAMPLE_MANUSCRIPT);
-  const [displaySettings, setDisplaySettings] = useState<DisplaySettings>({
-    ...DEFAULT_DISPLAY_SETTINGS,
-    ...stored?.displaySettings
-  });
+  const [displaySettings, setDisplaySettings] = useState<DisplaySettings>(() =>
+    resolveInitialDisplaySettings(stored?.displaySettings, {
+      migrateLegacyNarrationDefaults: consumeDisplaySettingsMigrationFlag()
+    })
+  );
   const [currentTokenIndex, setCurrentTokenIndex] = useState(stored?.currentTokenIndex ?? 0);
   const [currentSentenceIndex, setCurrentSentenceIndex] = useState(stored?.currentSentenceIndex ?? 0);
   const [currentParagraphIndex, setCurrentParagraphIndex] = useState(stored?.currentParagraphIndex ?? 0);

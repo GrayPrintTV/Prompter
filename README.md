@@ -147,11 +147,11 @@ The Manual Transcript box emits a single transcript delta. Press `Ctrl+Enter` in
 
 ## Prompter reading zone
 
-The prompter uses a fixed horizontal reading band inside the visible manuscript pane. Fresh sessions default the band higher on screen (`readingZonePercent: 38`); existing saved sessions keep their stored reading-zone setting. Lower zone percentages place the band higher in the viewport.
+The prompter uses a fixed horizontal reading band inside the visible manuscript pane. Fresh sessions default the band higher on screen (`readingZonePercent: 38`). The Display controls label this as `38% down from top`; lower values move the band higher and higher values move it lower.
 
-When follow mode advances with high confidence, the manuscript scrolls underneath the fixed band so the top edge of the active sentence lands inside the band. First and last manuscript lines have dynamic spacer padding so they can also align to the same band. Display controls show the current reading-band percent, provide a slider and number input, and include a reset button for the default band position.
+When follow mode advances with high confidence, the manuscript scrolls underneath the fixed band so the top edge of the active sentence lands inside the band. First and last manuscript lines have dynamic spacer padding so they can also align to the same band. Display controls show the current reading-band percent, provide a slider, number input, `Move up` / `Move down` buttons, and a reset button for the default band position.
 
-Active sentence highlighting is optional and defaults off for fresh sessions so the fixed band remains the primary narrator cue. If enabled, the highlight is intentionally subtle.
+Active sentence highlighting is optional and defaults off for fresh sessions so the fixed band remains the primary narrator cue. If enabled, the highlight is intentionally subtle. Older saved display settings that placed the band in the lower half are migrated once to the narration default; later manual adjustments persist normally.
 
 Scrolling is controlled by a `requestAnimationFrame` animation loop rather than browser native smooth scrolling. It accelerates gently, caps velocity, brakes into the target, retargets in-flight motion when a new alignment update arrives, and skips movement when the active text is already within the reading-band deadband. Systems with `prefers-reduced-motion` enabled use minimal motion.
 

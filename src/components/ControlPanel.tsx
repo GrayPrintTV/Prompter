@@ -216,7 +216,7 @@ export function ControlPanel(props: Props) {
     onSettingsChange({ ...settings, readingZonePercent: clampReadingZonePercent(readingZonePercent) });
   };
 
-  // Collapsed state for sections per UX task. Defaults: advanced/dev/bridge/mock/manual/torture/search? /display/shortcuts collapsed to declutter.
+  // Collapsed state for developer-oriented sections. Core narration controls stay visible.
   // Persist to localStorage (easy).
   const [sectionsCollapsed, setSectionsCollapsed] = useState(() => {
     const defaults = {
@@ -224,7 +224,6 @@ export function ControlPanel(props: Props) {
       manual: true,
       torture: true,
       search: false, // keep visible as it's useful with manuscript
-      display: true,
       shortcuts: true,
       advanced: true,
       developer: true,
@@ -519,7 +518,7 @@ export function ControlPanel(props: Props) {
         <div className="reading-zone-control">
           <div className="reading-zone-label">
             <span>Reading band</span>
-            <strong>{settings.readingZonePercent}% from top</strong>
+            <strong>{settings.readingZonePercent}% down from top</strong>
           </div>
           <div className="range-with-value">
             <input
@@ -541,13 +540,28 @@ export function ControlPanel(props: Props) {
               aria-label="Reading band percent from top"
             />
           </div>
-          <div className="settings-subtle">Lower value moves the fixed band higher.</div>
+          <div className="range-end-labels" aria-hidden="true">
+            <span>Higher</span>
+            <span>Lower</span>
+          </div>
+          <div className="inline-actions reading-zone-step-actions">
+            <button type="button" onClick={() => setReadingZonePercent(settings.readingZonePercent - 2)}>
+              Move up
+            </button>
+            <button type="button" onClick={() => setReadingZonePercent(settings.readingZonePercent + 2)}>
+              Move down
+            </button>
+          </div>
+          <div className="settings-subtle">Lower value moves the fixed band higher. Narration default is {DEFAULT_DISPLAY_SETTINGS.readingZonePercent}%.</div>
+          {settings.readingZonePercent > 50 && (
+            <div className="settings-warning">This places the band in the lower half. Move up or reset for the narration zone.</div>
+          )}
           <button
             type="button"
             onClick={() => setReadingZonePercent(DEFAULT_DISPLAY_SETTINGS.readingZonePercent)}
             disabled={settings.readingZonePercent === DEFAULT_DISPLAY_SETTINGS.readingZonePercent}
           >
-            Reset reading band
+            Reset to {DEFAULT_DISPLAY_SETTINGS.readingZonePercent}% default
           </button>
         </div>
         <label className="toggle-row">
