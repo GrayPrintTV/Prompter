@@ -114,6 +114,11 @@ function clampReadingZonePercent(value: number) {
   return Math.max(25, Math.min(70, Math.round(value)));
 }
 
+function clampDisplayPercent(value: number, fallback: number) {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(1, Math.min(100, Math.round(value)));
+}
+
 export function getActiveAsrTranscriptHistory(
   providerId: AsrProviderId,
   deltas: TranscriptDelta[],
@@ -214,6 +219,21 @@ export function ControlPanel(props: Props) {
   const localWhisperRunning = selectedAsrProviderId === 'local-whisper' && localWhisperStatus.listening;
   const setReadingZonePercent = (readingZonePercent: number) => {
     onSettingsChange({ ...settings, readingZonePercent: clampReadingZonePercent(readingZonePercent) });
+  };
+  const setAssistScrollSpeed = (assistScrollSpeed: number) => {
+    onSettingsChange({
+      ...settings,
+      assistScrollSpeed: clampDisplayPercent(assistScrollSpeed, DEFAULT_DISPLAY_SETTINGS.assistScrollSpeed)
+    });
+  };
+  const setAssistCorrectionFeel = (assistCorrectionFeel: number) => {
+    onSettingsChange({
+      ...settings,
+      assistCorrectionFeel: clampDisplayPercent(
+        assistCorrectionFeel,
+        DEFAULT_DISPLAY_SETTINGS.assistCorrectionFeel
+      )
+    });
   };
 
   // Collapsed state for developer-oriented sections. Core narration controls stay visible.
@@ -572,6 +592,64 @@ export function ControlPanel(props: Props) {
           />
           <span>Active sentence highlight</span>
         </label>
+        <div className="assist-scroll-control">
+          <div className="reading-zone-label">
+            <span>Assist speed</span>
+            <strong>{settings.assistScrollSpeed}%</strong>
+          </div>
+          <div className="range-with-value">
+            <input
+              type="range"
+              min={1}
+              max={100}
+              step={1}
+              value={settings.assistScrollSpeed}
+              onChange={(event) => setAssistScrollSpeed(Number(event.target.value))}
+              aria-label="Assist scroll speed"
+            />
+            <input
+              type="number"
+              min={1}
+              max={100}
+              value={settings.assistScrollSpeed}
+              onChange={(event) => setAssistScrollSpeed(Number(event.target.value))}
+              aria-label="Assist scroll speed percent"
+            />
+          </div>
+          <div className="range-end-labels" aria-hidden="true">
+            <span>Slower</span>
+            <span>Faster</span>
+          </div>
+        </div>
+        <div className="assist-scroll-control">
+          <div className="reading-zone-label">
+            <span>Correction feel</span>
+            <strong>{settings.assistCorrectionFeel}%</strong>
+          </div>
+          <div className="range-with-value">
+            <input
+              type="range"
+              min={1}
+              max={100}
+              step={1}
+              value={settings.assistCorrectionFeel}
+              onChange={(event) => setAssistCorrectionFeel(Number(event.target.value))}
+              aria-label="Correction scroll feel"
+            />
+            <input
+              type="number"
+              min={1}
+              max={100}
+              value={settings.assistCorrectionFeel}
+              onChange={(event) => setAssistCorrectionFeel(Number(event.target.value))}
+              aria-label="Correction feel percent"
+            />
+          </div>
+          <div className="range-end-labels" aria-hidden="true">
+            <span>Gentle</span>
+            <span>Firm</span>
+          </div>
+        </div>
         <div className="inline-actions">
           <button type="button" onClick={() => onSettingsChange({ ...settings, theme: settings.theme === 'dark' ? 'light' : 'dark' })}>{settings.theme === 'dark' ? 'Light' : 'Dark'}</button>
           <button type="button" onClick={() => onSettingsChange({ ...settings, continuousAssistScroll: !settings.continuousAssistScroll })}>

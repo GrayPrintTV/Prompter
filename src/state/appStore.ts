@@ -9,6 +9,8 @@ export const DEFAULT_DISPLAY_SETTINGS: DisplaySettings = {
   readingZonePercent: 38,
   showActiveHighlight: false,
   continuousAssistScroll: false,
+  assistScrollSpeed: 50,
+  assistCorrectionFeel: 45,
   theme: 'dark'
 };
 
@@ -25,6 +27,18 @@ export function resolveInitialDisplaySettings(
 
   if (!Number.isFinite(settings.readingZonePercent)) {
     settings.readingZonePercent = DEFAULT_DISPLAY_SETTINGS.readingZonePercent;
+  }
+
+  if (!Number.isFinite(settings.assistScrollSpeed)) {
+    settings.assistScrollSpeed = DEFAULT_DISPLAY_SETTINGS.assistScrollSpeed;
+  } else {
+    settings.assistScrollSpeed = Math.max(1, Math.min(100, Math.round(settings.assistScrollSpeed)));
+  }
+
+  if (!Number.isFinite(settings.assistCorrectionFeel)) {
+    settings.assistCorrectionFeel = DEFAULT_DISPLAY_SETTINGS.assistCorrectionFeel;
+  } else {
+    settings.assistCorrectionFeel = Math.max(1, Math.min(100, Math.round(settings.assistCorrectionFeel)));
   }
 
   if (options.migrateLegacyNarrationDefaults && storedDisplaySettings) {

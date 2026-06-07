@@ -1,10 +1,15 @@
 import { useEffect, useRef } from 'react';
 import {
-  DEFAULT_ASSIST_CRUISE_MS,
+  DEFAULT_ASSIST_STALE_SLOW_MS,
+  DEFAULT_ASSIST_STALE_STOP_MS,
   DEFAULT_SCROLL_DEADBAND_PX,
+  assistSpeedToVelocityPxPerMs,
   computeAssistCruiseStep,
+  computeAssistTargetVelocity,
   computePrompterScrollTarget,
   computeReadingZoneGeometry,
+  correctionFeelToMotion,
+  estimateAssistVelocityFromAnchors,
   isAnchorInReadingBand,
   stepPrompterScroll,
   type ReadingZoneGeometry
@@ -19,6 +24,7 @@ type Props = {
   confidence: number;
   settings: DisplaySettings;
   layoutMode?: 'with-controls' | 'prompter-only';
+  assistScrollLagging?: boolean;
   onTraceScroll?: (info: { sentenceIndex: number; didScroll: boolean; reason: string }) => void;
 };
 
@@ -29,6 +35,7 @@ export function PrompterView({
   confidence,
   settings,
   layoutMode = 'with-controls',
+  assistScrollLagging = false,
   onTraceScroll
 }: Props) {
   const paneRef = useRef<HTMLElement | null>(null);
@@ -51,13 +58,34 @@ export function PrompterView({
   const cruiseRef = useRef<{
     frameId: number | null;
     lastTimestamp: number | null;
-    expiresAt: number;
     sentenceIndex: number;
+    velocityPxPerMs: number;
+    slowed: boolean;
   }>({
     frameId: null,
     lastTimestamp: null,
-    expiresAt: 0,
-    sentenceIndex: -1
+    sentenceIndex: -1,
+    velocityPxPerMs: 0,
+    slowed: false
+  });
+  const assistAnchorRef = useRef<{
+    lastConfirmedAt: number;
+    lastTargetScrollTop: number;
+    lastSentenceIndex: number;
+    estimatedVelocityPxPerMs: number;
+  }>({
+    lastConfirmedAt: 0,
+    lastTargetScrollTop: 0,
+    lastSentenceIndex: -1,
+    estimatedVelocityPxPerMs: 0
+  });
+  const latestMotionRef = useRef({
+    followState,
+    confidence,
+    continuousAssistScroll: settings.continuousAssistScroll,
+    assistScrollSpeed: settings.assistScrollSpeed,
+    assistCorrectionFeel: settings.assistCorrectionFeel,
+    assistScrollLagging
   });
 
   // Store latest callback in ref so we can call it without including the (possibly unstable) callback
@@ -67,6 +95,24 @@ export function PrompterView({
   useEffect(() => {
     onTraceScrollRef.current = onTraceScroll;
   }, [onTraceScroll]);
+
+  useEffect(() => {
+    latestMotionRef.current = {
+      followState,
+      confidence,
+      continuousAssistScroll: settings.continuousAssistScroll,
+      assistScrollSpeed: settings.assistScrollSpeed,
+      assistCorrectionFeel: settings.assistCorrectionFeel,
+      assistScrollLagging
+    };
+  }, [
+    assistScrollLagging,
+    confidence,
+    followState,
+    settings.assistCorrectionFeel,
+    settings.assistScrollSpeed,
+    settings.continuousAssistScroll
+  ]);
 
   // Remember last emitted scroll trace key so we only emit when the scroll *decision* actually changes
   // (sentence + followState + confidence bucket + didScroll), not on every effect run or re-render.
@@ -92,21 +138,87 @@ export function PrompterView({
     animation.velocityPxPerMs = 0;
   };
 
-  const cancelCruise = () => {
+  const cancelCruise = (reason?: string) => {
     const cruise = cruiseRef.current;
+    const sentenceIndex = cruise.sentenceIndex;
     if (cruise.frameId !== null) {
       window.cancelAnimationFrame(cruise.frameId);
       cruise.frameId = null;
     }
     cruise.lastTimestamp = null;
+    cruise.velocityPxPerMs = 0;
+    cruise.slowed = false;
+    if (reason) {
+      emitTrace(sentenceIndex >= 0 ? sentenceIndex : currentSentenceIndex, false, reason);
+    }
   };
 
-  const cruiseAllowed = () => (
-    settings.continuousAssistScroll &&
-    !reduceMotionRef.current &&
-    confidence >= HIGH_CONFIDENCE &&
-    shouldScrollForState(followState, confidence)
-  );
+  const cruiseStopReason = (timestamp: number) => {
+    const latest = latestMotionRef.current;
+    if (!latest.continuousAssistScroll) return 'assist cruise disabled';
+    if (reduceMotionRef.current) return 'assist cruise reduced motion';
+    if (latest.followState !== 'following') {
+      return `assist cruise stopped: ${latest.followState}`;
+    }
+    if (latest.confidence < HIGH_CONFIDENCE) {
+      return 'assist cruise stopped: low confidence';
+    }
+    if (
+      assistAnchorRef.current.lastConfirmedAt <= 0 ||
+      timestamp - assistAnchorRef.current.lastConfirmedAt >= DEFAULT_ASSIST_STALE_STOP_MS
+    ) {
+      return 'assist cruise stopped: stale confidence';
+    }
+    return null;
+  };
+
+  const traceableCruiseStopReason = (reason: string | null) => {
+    if (!reason) return undefined;
+    if (reason === 'assist cruise disabled' || reason === 'assist cruise reduced motion') return undefined;
+    return reason;
+  };
+
+  const recordAssistAnchor = (
+    sentenceIndex: number,
+    targetScrollTop: number,
+    geometry: ReadingZoneGeometry
+  ) => {
+    const latest = latestMotionRef.current;
+    if (
+      !latest.continuousAssistScroll ||
+      latest.followState !== 'following' ||
+      latest.confidence < HIGH_CONFIDENCE
+    ) {
+      return;
+    }
+
+    const now = window.performance?.now?.() ?? Date.now();
+    const anchor = assistAnchorRef.current;
+    const fallbackVelocityPxPerMs = assistSpeedToVelocityPxPerMs(
+      geometry.lineHeightPx,
+      latest.assistScrollSpeed
+    );
+
+    if (
+      anchor.lastConfirmedAt > 0 &&
+      sentenceIndex >= anchor.lastSentenceIndex &&
+      targetScrollTop >= anchor.lastTargetScrollTop - DEFAULT_SCROLL_DEADBAND_PX
+    ) {
+      anchor.estimatedVelocityPxPerMs = estimateAssistVelocityFromAnchors({
+        previousTargetScrollTop: anchor.lastTargetScrollTop,
+        nextTargetScrollTop: targetScrollTop,
+        elapsedMs: now - anchor.lastConfirmedAt,
+        currentEstimatePxPerMs: anchor.estimatedVelocityPxPerMs,
+        fallbackVelocityPxPerMs
+      });
+    } else if (anchor.lastConfirmedAt <= 0 || sentenceIndex < anchor.lastSentenceIndex) {
+      anchor.estimatedVelocityPxPerMs = 0;
+    }
+
+    anchor.lastConfirmedAt = now;
+    anchor.lastTargetScrollTop = targetScrollTop;
+    anchor.lastSentenceIndex = sentenceIndex;
+  };
 
   const runCruise = () => {
     const cruise = cruiseRef.current;
@@ -119,8 +231,32 @@ export function PrompterView({
       const activeContainer = scrollRef.current;
       const activeGeometry = geometryRef.current;
       if (!activeContainer || !activeGeometry || activeCruise.frameId === null) return;
-      if (!cruiseAllowed() || animationRef.current.frameId !== null || timestamp > activeCruise.expiresAt) {
-        cancelCruise();
+      const stopReason = cruiseStopReason(timestamp);
+      if (stopReason || animationRef.current.frameId !== null) {
+        cancelCruise(traceableCruiseStopReason(stopReason));
+        return;
+      }
+
+      const latest = latestMotionRef.current;
+      const staleAgeMs = timestamp - assistAnchorRef.current.lastConfirmedAt;
+      const targetVelocityPxPerMs = computeAssistTargetVelocity({
+        lineHeightPx: activeGeometry.lineHeightPx,
+        speedPercent: latest.assistScrollSpeed,
+        estimatedVelocityPxPerMs: assistAnchorRef.current.estimatedVelocityPxPerMs,
+        staleAgeMs,
+        lagging: latest.assistScrollLagging
+      });
+      const shouldTraceSlowed = staleAgeMs > DEFAULT_ASSIST_STALE_SLOW_MS || latest.assistScrollLagging;
+      if (shouldTraceSlowed && !activeCruise.slowed) {
+        activeCruise.slowed = true;
+        emitTrace(activeCruise.sentenceIndex, true, 'assist cruise slowed');
+      }
+      if (!shouldTraceSlowed) {
+        activeCruise.slowed = false;
+      }
+
+      if (targetVelocityPxPerMs <= 0.0001) {
+        cancelCruise('assist cruise stopped: stale confidence');
         return;
       }
 
@@ -131,9 +267,12 @@ export function PrompterView({
         scrollHeight: activeContainer.scrollHeight,
         viewportHeight: activeContainer.clientHeight,
         lineHeightPx: activeGeometry.lineHeightPx,
-        deltaMs: timestamp - lastTimestamp
+        deltaMs: timestamp - lastTimestamp,
+        currentVelocityPxPerMs: activeCruise.velocityPxPerMs,
+        targetVelocityPxPerMs
       });
       activeContainer.scrollTop = step.nextScrollTop;
+      activeCruise.velocityPxPerMs = step.velocityPxPerMs;
 
       if (step.done) {
         cancelCruise();
@@ -145,20 +284,21 @@ export function PrompterView({
   };
 
   const startCruise = (sentenceIndex: number) => {
-    if (!cruiseAllowed()) {
-      cancelCruise();
+    const now = window.performance?.now?.() ?? Date.now();
+    const stopReason = cruiseStopReason(now);
+    if (stopReason) {
+      cancelCruise(cruiseRef.current.frameId !== null ? traceableCruiseStopReason(stopReason) : undefined);
       return;
     }
 
     const cruise = cruiseRef.current;
-    const now = window.performance?.now?.() ?? Date.now();
-    cruise.expiresAt = now + DEFAULT_ASSIST_CRUISE_MS;
     cruise.sentenceIndex = sentenceIndex;
     if (cruise.frameId !== null) return;
 
     cruise.frameId = 0;
     cruise.lastTimestamp = null;
-    emitTrace(sentenceIndex, true, 'continuous assist scroll');
+    cruise.slowed = false;
+    emitTrace(sentenceIndex, true, 'assist cruise started');
     runCruise();
   };
 
@@ -174,11 +314,16 @@ export function PrompterView({
 
       const lastTimestamp = activeAnimation.lastTimestamp ?? timestamp;
       activeAnimation.lastTimestamp = timestamp;
+      const correctionMotion = correctionFeelToMotion(
+        latestMotionRef.current.assistCorrectionFeel
+      );
       const step = stepPrompterScroll({
         currentScrollTop: activeContainer.scrollTop,
         targetScrollTop: activeAnimation.targetScrollTop,
         velocityPxPerMs: activeAnimation.velocityPxPerMs,
-        deltaMs: timestamp - lastTimestamp
+        deltaMs: timestamp - lastTimestamp,
+        maxVelocityPxPerMs: correctionMotion.maxVelocityPxPerMs,
+        accelerationPxPerMs2: correctionMotion.accelerationPxPerMs2
       });
 
       activeContainer.scrollTop = step.nextScrollTop;
@@ -191,7 +336,7 @@ export function PrompterView({
         activeAnimation.lastTimestamp = null;
         activeAnimation.velocityPxPerMs = 0;
         activeContainer.scrollTop = completedTarget;
-        emitTrace(completedSentence, true, 'completed scroll', completedTarget);
+        emitTrace(completedSentence, true, 'correction completed', completedTarget);
         startCruise(completedSentence);
         return;
       }
@@ -212,6 +357,16 @@ export function PrompterView({
     media.addEventListener('change', updatePreference);
     return () => media.removeEventListener('change', updatePreference);
   }, []);
+
+  useEffect(() => {
+    assistAnchorRef.current = {
+      lastConfirmedAt: 0,
+      lastTargetScrollTop: 0,
+      lastSentenceIndex: -1,
+      estimatedVelocityPxPerMs: 0
+    };
+    cancelCruise();
+  }, [model.rawText]);
 
   useEffect(() => {
     const pane = paneRef.current;
@@ -265,9 +420,18 @@ export function PrompterView({
   }, []);
 
   useEffect(() => {
+    if (followState !== 'following' && cruiseRef.current.frameId !== null) {
+      cancelCruise(`assist cruise stopped: ${followState}`);
+    } else if (
+      followState === 'following' &&
+      confidence < HIGH_CONFIDENCE &&
+      cruiseRef.current.frameId !== null
+    ) {
+      cancelCruise('assist cruise stopped: low confidence');
+    }
+
     if (!shouldScrollForState(followState, confidence)) {
       cancelAnimation();
-      cancelCruise();
       return;
     }
 
@@ -307,6 +471,8 @@ export function PrompterView({
       DEFAULT_SCROLL_DEADBAND_PX
     );
 
+    recordAssistAnchor(currentSentenceIndex, desiredTop, geometry);
+
     if (alreadyInBand || distance <= DEFAULT_SCROLL_DEADBAND_PX) {
       cancelAnimation();
       emitTrace(currentSentenceIndex, false, 'already in reading band', desiredTop);
@@ -322,6 +488,7 @@ export function PrompterView({
       return;
     }
 
+    const inheritedCruiseVelocityPxPerMs = cruiseRef.current.velocityPxPerMs;
     cancelCruise();
     const animation = animationRef.current;
     const wasAnimating = animation.frameId !== null;
@@ -329,19 +496,24 @@ export function PrompterView({
     animation.sentenceIndex = currentSentenceIndex;
 
     if (wasAnimating) {
-      emitTrace(currentSentenceIndex, true, 'retargeted existing scroll', desiredTop);
+      emitTrace(currentSentenceIndex, true, 'correction retargeted', desiredTop);
       return;
     }
 
     animation.frameId = 0;
     animation.lastTimestamp = null;
-    emitTrace(currentSentenceIndex, true, 'animated to reading band', desiredTop);
+    animation.velocityPxPerMs = desiredTop >= currentScrollTop ? Math.max(0, inheritedCruiseVelocityPxPerMs) : 0;
+    emitTrace(currentSentenceIndex, true, 'correction scroll started', desiredTop);
     runScrollAnimation();
   }, [
+    assistScrollLagging,
     confidence,
     currentSentenceIndex,
     followState,
     layoutMode,
+    model.rawText,
+    settings.assistCorrectionFeel,
+    settings.assistScrollSpeed,
     settings.continuousAssistScroll,
     settings.fontSizePx,
     settings.lineHeight,

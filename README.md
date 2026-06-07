@@ -153,9 +153,9 @@ When follow mode advances with high confidence, the manuscript scrolls underneat
 
 Active sentence highlighting is optional and defaults off for fresh sessions so the fixed band remains the primary narrator cue. If enabled, the highlight is intentionally subtle. Older saved display settings that placed the band in the lower half are migrated once to the narration default; later manual adjustments persist normally.
 
-Scrolling is controlled by a `requestAnimationFrame` animation loop rather than browser native smooth scrolling. It accelerates gently, caps velocity, brakes into the target, retargets in-flight motion when a new alignment update arrives, and skips movement when the active text is already within the reading-band deadband. Systems with `prefers-reduced-motion` enabled use minimal motion.
+Scrolling is controlled by a `requestAnimationFrame` animation loop rather than browser native smooth scrolling. Correction scrolls move confirmed ASR/alignment anchors into the reading band with capped velocity, gentle braking, in-flight retargeting, and a deadband to avoid tiny twitching. Systems with `prefers-reduced-motion` enabled use minimal motion.
 
-Optional `Assist Scroll` gently continues moving the manuscript for a few seconds after a recent high-confidence match. It stops when following is no longer confident, when the app is holding/lost/paused/manual, or when no fresh confident match arrives. It is off by default. Active sentence highlighting can also be hidden from the Display controls.
+Optional `Assist Scroll` is a predictive cruise layer and remains off by default. When enabled, recent high-confidence `following` matches become correction anchors; the prompter estimates reading pace from confirmed target movement and keeps the manuscript moving gently between ASR chunks. The Display panel includes Assist speed (`Slower` / `Faster`) and Correction feel (`Gentle` / `Firm`) sliders. Assist cruise slows when Local Whisper is lagging, decays when confidence becomes stale, and stops on holding, lost, paused, manual, retake, or low confidence. Active sentence highlighting can also be hidden from the Display controls.
 
 ## Narration mode
 

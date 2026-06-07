@@ -20,10 +20,11 @@ Phase 1 is in progress. The app has Phase 0/0.5 manuscript alignment, torture-te
 - Bridge diagnostics for Electron preload, Local Whisper IPC, ping, preload path, preload existence, preload status, and preload errors.
 - Prompter reading zone uses a fixed higher-on-screen band, dynamic top/bottom manuscript spacers, visible Display tuning controls, and a custom `requestAnimationFrame` scroll controller instead of native smooth scrolling.
 - Fresh sessions default `readingZonePercent` to 38 and active sentence highlighting off. The Display controls show the value as percent down from top, include Move up / Move down buttons, and migrate older bottom-half saved band positions once to the narration default.
+- Optional Assist Scroll is now predictive: high-confidence following matches become correction anchors, estimated reading pace drives gentle cruise between ASR chunks, and Display controls expose Assist speed plus Correction feel.
 - Prompter-first narration mode can hide the left control panel and keeps a minimal Start/Stop/status/mic-level overlay visible.
 - Persisted hidden-controls mode is recoverable: the prompter-only view keeps the NarrationBar visible, and controls are restored automatically if the prompter pane reports an invalid size.
 - Local Whisper settings use draft/apply semantics; changes made while following are labeled as applying after Restart Whisper.
-- Optional continuous assist scroll is implemented and off by default.
+- Optional predictive Assist Scroll is implemented and off by default.
 
 ## Current Active Bug/Fix Status
 
@@ -85,7 +86,7 @@ Sidecar readiness is now split:
 - Add an input-device selector.
 - Tune Local Whisper model/chunk defaults further from longer real narration sessions if needed.
 - Continue prompter reading-zone tuning after real narration sessions, especially band height and whether sentence top-edge targeting is enough for long wrapped sentences.
-- Evaluate continuous assist scroll in real narration; it is intentionally conservative and may need speed tuning.
+- Evaluate predictive Assist Scroll in real narration; it is intentionally conservative and may need speed/correction tuning.
 
 ## Local Whisper Manual Smoke-Test Steps
 

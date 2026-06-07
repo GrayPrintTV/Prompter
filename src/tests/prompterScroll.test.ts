@@ -1,8 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
+  assistSpeedToLinesPerMinute,
+  computeAssistTargetVelocity,
   computeAssistCruiseStep,
   computePrompterScrollTarget,
   computeReadingZoneGeometry,
+  correctionFeelToMotion,
+  estimateAssistVelocityFromAnchors,
   isAnchorInReadingBand,
   stepPrompterScroll
 } from '../domain/prompterScroll';
@@ -155,5 +159,86 @@ describe('prompter scroll controller helpers', () => {
 
     expect(bottom.nextScrollTop).toBe(1200);
     expect(bottom.done).toBe(true);
+  });
+
+  it('maps assist speed controls to slower and faster cruise rates', () => {
+    expect(assistSpeedToLinesPerMinute(20)).toBeLessThan(assistSpeedToLinesPerMinute(80));
+    expect(assistSpeedToLinesPerMinute(50)).toBeGreaterThan(20);
+  });
+
+  it('estimates assist pace from confirmed target movement over time', () => {
+    const fallbackVelocityPxPerMs = 52 * 22 / 60000;
+    const estimate = estimateAssistVelocityFromAnchors({
+      previousTargetScrollTop: 300,
+      nextTargetScrollTop: 456,
+      elapsedMs: 4000,
+      fallbackVelocityPxPerMs
+    });
+
+    expect(estimate).toBeGreaterThan(fallbackVelocityPxPerMs);
+    expect(estimate).toBeLessThan(fallbackVelocityPxPerMs * 3.2);
+  });
+
+  it('decays assist velocity as confirmed alignment gets stale', () => {
+    const fresh = computeAssistTargetVelocity({
+      lineHeightPx: 52,
+      speedPercent: 50,
+      staleAgeMs: 1200
+    });
+    const stale = computeAssistTargetVelocity({
+      lineHeightPx: 52,
+      speedPercent: 50,
+      staleAgeMs: 6500
+    });
+    const expired = computeAssistTargetVelocity({
+      lineHeightPx: 52,
+      speedPercent: 50,
+      staleAgeMs: 9500
+    });
+
+    expect(stale).toBeLessThan(fresh);
+    expect(expired).toBe(0);
+  });
+
+  it('slows assist velocity when transcription is lagging', () => {
+    const normal = computeAssistTargetVelocity({
+      lineHeightPx: 52,
+      speedPercent: 50,
+      staleAgeMs: 1200
+    });
+    const lagging = computeAssistTargetVelocity({
+      lineHeightPx: 52,
+      speedPercent: 50,
+      staleAgeMs: 1200,
+      lagging: true
+    });
+
+    expect(lagging).toBeLessThan(normal);
+    expect(lagging).toBeGreaterThan(0);
+  });
+
+  it('accelerates assist cruise toward the target velocity without a frame jump', () => {
+    const step = computeAssistCruiseStep({
+      currentScrollTop: 200,
+      scrollHeight: 4000,
+      viewportHeight: 900,
+      lineHeightPx: 52,
+      deltaMs: 50,
+      currentVelocityPxPerMs: 0,
+      targetVelocityPxPerMs: 0.08,
+      maxFrameDeltaPx: 3
+    });
+
+    expect(step.nextScrollTop).toBeGreaterThan(200);
+    expect(step.nextScrollTop - 200).toBeLessThanOrEqual(3);
+    expect(step.velocityPxPerMs).toBeGreaterThan(0);
+  });
+
+  it('maps correction feel to gentler or firmer braking settings', () => {
+    const gentle = correctionFeelToMotion(20);
+    const firm = correctionFeelToMotion(85);
+
+    expect(firm.maxVelocityPxPerMs).toBeGreaterThan(gentle.maxVelocityPxPerMs);
+    expect(firm.accelerationPxPerMs2).toBeGreaterThan(gentle.accelerationPxPerMs2);
   });
 });

@@ -116,6 +116,8 @@ export type DisplaySettings = {
   readingZonePercent: number;
   showActiveHighlight: boolean;
   continuousAssistScroll: boolean;
+  assistScrollSpeed: number;
+  assistCorrectionFeel: number;
   theme: 'dark' | 'light';
 };
 

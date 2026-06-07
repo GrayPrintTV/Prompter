@@ -615,6 +615,11 @@ textarea {
   gap: 7px;
 }
 
+.assist-scroll-control {
+  display: grid;
+  gap: 7px;
+}
+
 .reading-zone-label,
 .toggle-row {
   display: flex;

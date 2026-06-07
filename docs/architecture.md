@@ -70,7 +70,7 @@ The alignment engine lives in `src/domain/alignment.ts` and related domain modul
 
 `src/components/NarrationBar.tsx` is the always-visible narration overlay. It exposes the primary Start/Stop control, provider/status label, mic level meter, key warning text, and controls toggle.
 
-`src/components/PrompterView.tsx` renders the manuscript pane. It owns the fixed reading-band overlay and scroll animation refs. Reading-zone geometry and scroll-step math live in `src/domain/prompterScroll.ts` so the component can keep animation state out of React state while still being testable.
+`src/components/PrompterView.tsx` renders the manuscript pane. It owns the fixed reading-band overlay and scroll animation refs. Reading-zone geometry and scroll-step math live in `src/domain/prompterScroll.ts` so the component can keep animation state out of React state while still being testable. The scroll controller has two motion paths: correction scroll, which moves confirmed ASR/alignment anchors into the band, and optional Assist Scroll cruise, which predicts near-future reading position between recent high-confidence anchors.
 
 Narration status labels are derived in `src/domain/narrationStatus.ts` from provider/follow/mic/lag/error inputs. This keeps UI labels such as Idle, Starting, Following, Holding, Lagging, and Error separate from ASR provider internals.
 

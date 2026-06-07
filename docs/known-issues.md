@@ -36,9 +36,9 @@ Repeated sentence and duplicate phrase handling is improved, including retake bi
 
 The fixed reading band currently targets the top edge of the active sentence into the band. It does not try to center an entire multi-line sentence block or choose a spoken word's exact wrapped line yet. This is intentional for the first narration-feel pass, but long wrapped sentences may still need finer cueing after real sessions.
 
-## Continuous Assist Scroll Needs Real-Session Tuning
+## Predictive Assist Scroll Needs Real-Session Tuning
 
-Optional Assist Scroll is intentionally conservative and off by default. It only cruises briefly after recent high-confidence following and stops on holds, lost/manual/paused states, or stale confidence. Its line-rate may need tuning after real audiobook sessions.
+Optional Assist Scroll is intentionally conservative and off by default. It now estimates reading pace from recent high-confidence correction anchors, cruises between ASR chunks, slows for stale confidence or Local Whisper lag, and stops on holds, lost/manual/paused/retake states, or low confidence. Its default speed, correction feel, stale timing, and lag slowdown may need tuning after longer audiobook sessions.
 
 ## Generated and Local Files
 

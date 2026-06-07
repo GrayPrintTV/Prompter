@@ -1054,6 +1054,7 @@ export default function App() {
           confidence={alignment.confidence}
           settings={displaySettings}
           layoutMode={controlsVisible ? 'with-controls' : 'prompter-only'}
+          assistScrollLagging={localQueueLagging}
           onTraceScroll={onTraceScroll}
         />
       </div>
