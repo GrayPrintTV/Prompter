@@ -8,6 +8,11 @@ import { ControlPanel } from './components/ControlPanel';
 import { PrompterView } from './components/PrompterView';
 import { alignTranscript } from './domain/alignment';
 import {
+  alignmentBufferTokens,
+  createAlignmentBufferState,
+  evaluateProvisionalAlignmentBuffer
+} from './domain/alignmentBuffer';
+import {
   buildManuscript,
   findParagraphIndexForSentence,
   findSentenceIndexForToken,
@@ -15,9 +20,10 @@ import {
   tokenIndexForParagraph,
   tokenIndexForSentence
 } from './domain/manuscript';
-import { stateFromAlignment } from './domain/scrollModel';
+import { HIGH_CONFIDENCE, stateFromAlignment } from './domain/scrollModel';
 import { transcriptToTokens } from './domain/normalize';
 import type {
+  AlignmentBufferDebug,
   AlignmentResult,
   AsrProviderId,
   DisplaySettings,
@@ -73,6 +79,22 @@ const DEFAULT_LIVE_STATUS: LiveAsrConnectionStatus = {
   errorMessage: null
 };
 
+const EMPTY_ALIGNMENT_BUFFER_DEBUG: AlignmentBufferDebug = {
+  source: '',
+  rawTranscript: '',
+  normalizedTokens: [],
+  retainedTokens: [],
+  rollingBufferTokens: [],
+  provisionalBufferTokens: [],
+  evaluationBufferTokens: [],
+  matchedText: '',
+  confidence: 0,
+  moveDecision: 'Waiting for transcript.',
+  moveToTokenCalled: false,
+  retentionDecision: 'none',
+  retentionReason: 'No transcript processed yet.'
+};
+
 export default function App() {
   const stored = useMemo(() => loadSession(), []);
   const [projectTitle, setProjectTitle] = useState(stored?.projectTitle ?? 'Narration Session');
@@ -104,6 +126,9 @@ export default function App() {
   const [transcriptBuffer, setTranscriptBuffer] = useState<string[]>([]);
   const [deltas, setDeltas] = useState<TranscriptDelta[]>([]);
   const [traceLog, setTraceLog] = useState<string[]>([]);
+  const [alignmentBufferDebug, setAlignmentBufferDebug] = useState<AlignmentBufferDebug>(
+    EMPTY_ALIGNMENT_BUFFER_DEBUG
+  );
   const [inputLevel, setInputLevel] = useState(0);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -118,6 +143,7 @@ export default function App() {
   );
   const resyncArmedRef = useRef(false);
   const lowConfidenceCountRef = useRef(0);
+  const localAlignmentBufferRef = useRef(createAlignmentBufferState());
   const manuscript = useMemo(() => buildManuscript(manuscriptText), [manuscriptText]);
   const manuscriptRef = useRef(manuscript);
   const currentTokenRef = useRef(currentTokenIndex);
@@ -134,6 +160,8 @@ export default function App() {
     setCurrentSentenceIndex(sentenceIndex);
     setCurrentParagraphIndex(findParagraphIndexForSentence(manuscript, sentenceIndex));
     setAlignment(emptyAlignment(manuscript, clamped));
+    localAlignmentBufferRef.current = createAlignmentBufferState();
+    setAlignmentBufferDebug(EMPTY_ALIGNMENT_BUFFER_DEBUG);
   }, [manuscript]);
 
   useEffect(() => {
@@ -160,7 +188,13 @@ export default function App() {
   }, []);
 
   const appendTrace = useCallback((entry: string) => {
-    setTraceLog((prev) => [...prev.slice(-7), entry]);
+    setTraceLog((prev) => [...prev.slice(-39), entry]);
+  }, []);
+
+  const resetAlignmentContext = useCallback(() => {
+    localAlignmentBufferRef.current = createAlignmentBufferState();
+    setTranscriptBuffer([]);
+    setAlignmentBufferDebug(EMPTY_ALIGNMENT_BUFFER_DEBUG);
   }, []);
 
   const onTraceScroll = useCallback((info: { sentenceIndex: number; didScroll: boolean; reason: string }) => {
@@ -177,7 +211,96 @@ export default function App() {
 
     if (words.length === 0) {
       appendTrace('empty transcript -> holding');
+      setAlignmentBufferDebug({
+        ...EMPTY_ALIGNMENT_BUFFER_DEBUG,
+        source: delta.source,
+        rawTranscript: raw,
+        moveDecision: 'held empty transcript',
+        retentionDecision: 'discarded',
+        retentionReason: 'empty transcript'
+      });
       setFollowState((previous) => (previous === 'manual' ? 'manual' : 'holding'));
+      return;
+    }
+
+    if (delta.source === 'local-whisper') {
+      const model = manuscriptRef.current;
+      const previousToken = currentTokenRef.current;
+      const wasResyncing = resyncArmedRef.current;
+      const decision = evaluateProvisionalAlignmentBuffer(
+        model,
+        localAlignmentBufferRef.current,
+        words,
+        previousToken,
+        {
+          widenWindow: wasResyncing || followStateRef.current === 'lost'
+        }
+      );
+      localAlignmentBufferRef.current = decision.state;
+      resyncArmedRef.current = false;
+      setAlignment(decision.result);
+      setTranscriptBuffer(alignmentBufferTokens(decision.state));
+
+      let moveToTokenCalled = false;
+      let moveDecision = 'held';
+      appendTrace(
+        `local eval buffer=[${decision.evaluationTokens.join(' ')}] provisional=[${decision.state.provisionalTokens.join(' ')}]`
+      );
+      appendTrace(
+        `align matched="${decision.result.matchedText}" conf=${decision.result.confidence.toFixed(2)} deltaConf=${decision.deltaResult.confidence.toFixed(2)} | ${decision.result.reason}`
+      );
+      appendTrace(
+        `context: ${decision.retainedDelta ? 'retained' : 'discarded'} (${decision.retentionReason}) retained=[${decision.retainedTokens.join(' ')}]`
+      );
+
+      if (followStateRef.current === 'manual' || followStateRef.current === 'paused') {
+        moveDecision = 'manual/paused: no follow update';
+        appendTrace('manual/paused: moveToToken not called');
+      } else if (decision.moveRecommended && decision.result.confidence >= HIGH_CONFIDENCE) {
+        lowConfidenceCountRef.current = 0;
+        const nextState = stateFromAlignment(decision.result, previousToken, wasResyncing, 0);
+        moveToToken(decision.result.tokenIndex, nextState);
+        moveToTokenCalled = true;
+        moveDecision = `moved to token ${decision.result.tokenIndex} state=${nextState}`;
+        appendTrace(`moveToToken called: YES s${decision.result.sentenceIndex} state=${nextState}`);
+      } else {
+        lowConfidenceCountRef.current += 1;
+        const heldHighConfidenceStaleContext =
+          decision.result.confidence >= HIGH_CONFIDENCE && !decision.moveRecommended;
+        const nextState = heldHighConfidenceStaleContext
+          ? 'holding'
+          : stateFromAlignment(
+              decision.result,
+              previousToken,
+              wasResyncing,
+              lowConfidenceCountRef.current
+            );
+        setFollowState(nextState);
+        moveDecision = heldHighConfidenceStaleContext
+          ? 'held: current delta did not contribute a manuscript anchor'
+          : `held state=${nextState} confidence below threshold`;
+        appendTrace(
+          heldHighConfidenceStaleContext
+            ? `moveToToken called: NO state=${nextState} (stale context)`
+            : `moveToToken called: NO state=${nextState} (low-conf)`
+        );
+      }
+
+      setAlignmentBufferDebug({
+        source: delta.source,
+        rawTranscript: raw,
+        normalizedTokens: words,
+        retainedTokens: decision.retainedTokens,
+        rollingBufferTokens: decision.state.committedTokens,
+        provisionalBufferTokens: decision.state.provisionalTokens,
+        evaluationBufferTokens: decision.evaluationTokens,
+        matchedText: decision.result.matchedText,
+        confidence: decision.result.confidence,
+        moveDecision,
+        moveToTokenCalled,
+        retentionDecision: decision.retainedDelta ? 'retained' : 'discarded',
+        retentionReason: decision.retentionReason
+      });
       return;
     }
 
@@ -196,19 +319,64 @@ export default function App() {
 
       if (followStateRef.current === 'manual' || followStateRef.current === 'paused') {
         appendTrace('manual/paused: no follow update');
+        setAlignmentBufferDebug({
+          source: delta.source,
+          rawTranscript: raw,
+          normalizedTokens: words,
+          retainedTokens: words,
+          rollingBufferTokens: next,
+          provisionalBufferTokens: [],
+          evaluationBufferTokens: next,
+          matchedText: result.matchedText,
+          confidence: result.confidence,
+          moveDecision: 'manual/paused: no follow update',
+          moveToTokenCalled: false,
+          retentionDecision: 'retained',
+          retentionReason: 'standard rolling buffer provider'
+        });
         return next;
       }
 
-      if (result.confidence >= 0.76) {
+      if (result.confidence >= HIGH_CONFIDENCE) {
         lowConfidenceCountRef.current = 0;
         const nextState = stateFromAlignment(result, previousToken, wasResyncing, 0);
         moveToToken(result.tokenIndex, nextState);
         appendTrace(`action: MOVED s${result.sentenceIndex} state=${nextState} (high-conf)`);
+        setAlignmentBufferDebug({
+          source: delta.source,
+          rawTranscript: raw,
+          normalizedTokens: words,
+          retainedTokens: words,
+          rollingBufferTokens: next,
+          provisionalBufferTokens: [],
+          evaluationBufferTokens: next,
+          matchedText: result.matchedText,
+          confidence: result.confidence,
+          moveDecision: `moved to token ${result.tokenIndex} state=${nextState}`,
+          moveToTokenCalled: true,
+          retentionDecision: 'retained',
+          retentionReason: 'standard rolling buffer provider'
+        });
       } else {
         lowConfidenceCountRef.current += 1;
         const nextState = stateFromAlignment(result, previousToken, wasResyncing, lowConfidenceCountRef.current);
         setFollowState(nextState);
         appendTrace(`action: HELD state=${nextState} (low-conf)`);
+        setAlignmentBufferDebug({
+          source: delta.source,
+          rawTranscript: raw,
+          normalizedTokens: words,
+          retainedTokens: words,
+          rollingBufferTokens: next,
+          provisionalBufferTokens: [],
+          evaluationBufferTokens: next,
+          matchedText: result.matchedText,
+          confidence: result.confidence,
+          moveDecision: `held state=${nextState} confidence below threshold`,
+          moveToTokenCalled: false,
+          retentionDecision: 'retained',
+          retentionReason: 'standard rolling buffer provider'
+        });
       }
 
       return next;
@@ -343,14 +511,16 @@ export default function App() {
   const stepSentence = useCallback((direction: -1 | 1) => {
     const model = manuscriptRef.current;
     const target = clamp(currentSentenceIndex + direction, 0, Math.max(model.sentences.length - 1, 0));
+    resetAlignmentContext();
     moveToToken(tokenIndexForSentence(model, target), 'manual');
-  }, [currentSentenceIndex, moveToToken]);
+  }, [currentSentenceIndex, moveToToken, resetAlignmentContext]);
 
   const stepParagraph = useCallback((direction: -1 | 1) => {
     const model = manuscriptRef.current;
     const target = clamp(currentParagraphIndex + direction, 0, Math.max(model.paragraphs.length - 1, 0));
+    resetAlignmentContext();
     moveToToken(tokenIndexForParagraph(model, target), 'manual');
-  }, [currentParagraphIndex, moveToToken]);
+  }, [currentParagraphIndex, moveToToken, resetAlignmentContext]);
 
   const resync = useCallback(() => {
     resyncArmedRef.current = true;
@@ -470,13 +640,13 @@ export default function App() {
       if (!result) return;
       setProjectTitle(result.name.replace(/\.[^.]+$/, '') || result.name);
       setManuscriptText(result.text);
-      setTranscriptBuffer([]);
+      resetAlignmentContext();
       moveToToken(0, 'manual');
       return;
     }
 
     fileInputRef.current?.click();
-  }, [moveToToken]);
+  }, [moveToToken, resetAlignmentContext]);
 
   const localFileSelected = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -485,17 +655,18 @@ export default function App() {
     reader.onload = () => {
       setProjectTitle(file.name.replace(/\.[^.]+$/, '') || file.name);
       setManuscriptText(String(reader.result ?? ''));
-      setTranscriptBuffer([]);
+      resetAlignmentContext();
       moveToToken(0, 'manual');
       event.target.value = '';
     };
     reader.readAsText(file);
-  }, [moveToToken]);
+  }, [moveToToken, resetAlignmentContext]);
 
   const searchJump = useCallback(() => {
     const model = manuscriptRef.current;
     const found = searchManuscript(model, searchQuery, currentTokenRef.current + 1);
     if (found !== null) {
+      resetAlignmentContext();
       moveToToken(found, 'manual');
       setAlignment({
         ...emptyAlignment(model, found),
@@ -504,7 +675,7 @@ export default function App() {
         reason: 'Manual search jump.'
       });
     }
-  }, [moveToToken, searchQuery]);
+  }, [moveToToken, resetAlignmentContext, searchQuery]);
 
   const toggleFullScreen = useCallback(() => {
     void window.prompterApi?.toggleFullScreen();
@@ -659,6 +830,7 @@ export default function App() {
         transcriptBuffer={transcriptBuffer}
         alignment={alignment}
         currentTokenIndex={currentTokenIndex}
+        alignmentBufferDebug={alignmentBufferDebug}
         traceLog={traceLog}
       />
       <PrompterView

@@ -1,4 +1,4 @@
-import type { AlignmentResult, FollowState, TranscriptDelta } from '../domain/types';
+import type { AlignmentBufferDebug, AlignmentResult, FollowState, TranscriptDelta } from '../domain/types';
 
 type Props = {
   visible: boolean;
@@ -7,6 +7,7 @@ type Props = {
   alignment: AlignmentResult;
   currentTokenIndex: number;
   followState: FollowState;
+  alignmentBufferDebug?: AlignmentBufferDebug;
   traceLog?: string[];
 };
 
@@ -17,6 +18,7 @@ export function DebugPanel({
   alignment,
   currentTokenIndex,
   followState,
+  alignmentBufferDebug,
   traceLog
 }: Props) {
   if (!visible) return null;
@@ -45,10 +47,32 @@ export function DebugPanel({
         </dd>
         <dt>Reason</dt>
         <dd>{alignment.reason}</dd>
+        <dt>Delta tokens</dt>
+        <dd>{alignmentBufferDebug?.normalizedTokens.join(' ') || 'Empty'}</dd>
+        <dt>Retained tokens</dt>
+        <dd>{alignmentBufferDebug?.retainedTokens.join(' ') || 'Empty'}</dd>
+        <dt>Evidence buffer</dt>
+        <dd>{alignmentBufferDebug?.rollingBufferTokens.join(' ') || 'Empty'}</dd>
+        <dt>Provisional buffer</dt>
+        <dd>{alignmentBufferDebug?.provisionalBufferTokens.join(' ') || 'Empty'}</dd>
+        <dt>Evaluation buffer</dt>
+        <dd>{alignmentBufferDebug?.evaluationBufferTokens.join(' ') || 'Empty'}</dd>
+        <dt>Context decision</dt>
+        <dd>
+          {alignmentBufferDebug
+            ? `${alignmentBufferDebug.retentionDecision}: ${alignmentBufferDebug.retentionReason}`
+            : 'None'}
+        </dd>
+        <dt>Move decision</dt>
+        <dd>
+          {alignmentBufferDebug
+            ? `${alignmentBufferDebug.moveToTokenCalled ? 'moveToToken called' : 'moveToToken not called'}; ${alignmentBufferDebug.moveDecision}`
+            : 'None'}
+        </dd>
         <dt>Alignment Trace (raw/norm/match/conf/action/scroll; collapsed by default in dev tools)</dt>
         <dd>
           {traceLog && traceLog.length ? (
-            traceLog.slice(-6).map((entry, i) => (
+            traceLog.slice(-16).map((entry, i) => (
               <div key={i} style={{ fontFamily: 'monospace', fontSize: '10px', lineHeight: '1.2' }}>{entry}</div>
             ))
           ) : '—'}

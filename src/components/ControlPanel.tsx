@@ -5,6 +5,7 @@ import { StatusIndicator } from './StatusIndicator';
 import { TortureTestPanel } from './TortureTestPanel';
 import { getAsrProviderOptions } from '../asr/providerRegistry';
 import type {
+  AlignmentBufferDebug,
   AlignmentResult,
   AsrProviderId,
   DisplaySettings,
@@ -70,6 +71,7 @@ type Props = {
   transcriptBuffer: string[];
   alignment: AlignmentResult;
   currentTokenIndex: number;
+  alignmentBufferDebug: AlignmentBufferDebug;
   traceLog?: string[];
 };
 
@@ -174,6 +176,7 @@ export function ControlPanel(props: Props) {
     transcriptBuffer,
     alignment,
     currentTokenIndex,
+    alignmentBufferDebug,
     traceLog
   } = props;
   const providerOptions = getAsrProviderOptions(liveConfig, localWhisperSettings);
@@ -648,6 +651,7 @@ export function ControlPanel(props: Props) {
         alignment={alignment}
         currentTokenIndex={currentTokenIndex}
         followState={followState}
+        alignmentBufferDebug={alignmentBufferDebug}
         traceLog={traceLog}
       />
     </aside>

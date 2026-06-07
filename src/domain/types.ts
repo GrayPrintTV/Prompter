@@ -81,6 +81,22 @@ export type AlignmentResult = {
   };
 };
 
+export type AlignmentBufferDebug = {
+  source: TranscriptSource | '';
+  rawTranscript: string;
+  normalizedTokens: string[];
+  retainedTokens: string[];
+  rollingBufferTokens: string[];
+  provisionalBufferTokens: string[];
+  evaluationBufferTokens: string[];
+  matchedText: string;
+  confidence: number;
+  moveDecision: string;
+  moveToTokenCalled: boolean;
+  retentionDecision: string;
+  retentionReason: string;
+};
+
 export type FollowState =
   | 'manual'
   | 'paused'
