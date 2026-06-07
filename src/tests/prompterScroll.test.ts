@@ -6,6 +6,7 @@ import {
   isAnchorInReadingBand,
   stepPrompterScroll
 } from '../domain/prompterScroll';
+import { DEFAULT_DISPLAY_SETTINGS } from '../state/appStore';
 
 describe('prompter reading-zone geometry', () => {
   it('places the default reading band around the vertical center', () => {
@@ -22,16 +23,36 @@ describe('prompter reading-zone geometry', () => {
     expect(geometry.targetY).toBeLessThanOrEqual(geometry.bandBottom);
   });
 
-  it('places the narration default band above center', () => {
+  it('places the narration default band higher for real reading', () => {
     const geometry = computeReadingZoneGeometry({
       viewportHeight: 900,
       fontSizePx: 34,
       lineHeight: 1.55,
-      readingZonePercent: 43
+      readingZonePercent: DEFAULT_DISPLAY_SETTINGS.readingZonePercent
     });
 
-    expect(geometry.bandTop).toBeGreaterThan(320);
-    expect(geometry.bandBottom).toBeLessThan(445);
+    expect(DEFAULT_DISPLAY_SETTINGS.readingZonePercent).toBe(38);
+    expect(DEFAULT_DISPLAY_SETTINGS.showActiveHighlight).toBe(false);
+    expect(geometry.bandTop).toBeGreaterThan(285);
+    expect(geometry.bandBottom).toBeLessThan(400);
+  });
+
+  it('moves the band higher when the reading-zone percent is lower', () => {
+    const higher = computeReadingZoneGeometry({
+      viewportHeight: 900,
+      fontSizePx: 34,
+      lineHeight: 1.55,
+      readingZonePercent: 35
+    });
+    const lower = computeReadingZoneGeometry({
+      viewportHeight: 900,
+      fontSizePx: 34,
+      lineHeight: 1.55,
+      readingZonePercent: 45
+    });
+
+    expect(higher.bandTop).toBeLessThan(lower.bandTop);
+    expect(higher.targetY).toBeLessThan(lower.targetY);
   });
 
   it('adds enough spacer for first and last lines to reach the band', () => {

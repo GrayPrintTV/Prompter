@@ -7,14 +7,14 @@ Future coding agents should start with `AGENTS.md` and `docs/current-state.md` b
 ## What works in Phase 0
 
 - Paste or import TXT/Markdown manuscript text.
-- Large prompter view with current sentence highlighting.
+- Large prompter view with an optional current sentence highlight.
 - Manual transcript injection for alignment testing.
 - Mock ASR playback from scripted transcript chunks.
 - Optional live OpenAI Realtime transcription provider, disabled until configured.
 - Optional Local Whisper transcription provider using a Python faster-whisper sidecar.
 - Conservative fuzzy alignment against a local manuscript window.
 - Confidence states: following, holding, uncertain, lost, paused, manual, resyncing, retake.
-- Fixed center reading band with custom smooth scrolling only on high-confidence alignment.
+- Fixed reading band with custom smooth scrolling only on high-confidence alignment.
 - Manual sentence and paragraph recovery controls.
 - Keyboard shortcuts suitable for Stream Deck hotkey mapping.
 - Debug panel with transcript buffer, match, confidence, token position, search window, and reason.
@@ -147,9 +147,11 @@ The Manual Transcript box emits a single transcript delta. Press `Ctrl+Enter` in
 
 ## Prompter reading zone
 
-The prompter uses a fixed horizontal reading band inside the visible manuscript pane. Fresh sessions default the band somewhat above center (`readingZonePercent: 43`); existing saved sessions keep their stored reading-zone setting. Lower zone percentages place the band higher in the viewport.
+The prompter uses a fixed horizontal reading band inside the visible manuscript pane. Fresh sessions default the band higher on screen (`readingZonePercent: 38`); existing saved sessions keep their stored reading-zone setting. Lower zone percentages place the band higher in the viewport.
 
-When follow mode advances with high confidence, the manuscript scrolls underneath the fixed band so the top edge of the active sentence lands inside the band. First and last manuscript lines have dynamic spacer padding so they can also align to the same band. Active sentence highlighting remains as a secondary cue.
+When follow mode advances with high confidence, the manuscript scrolls underneath the fixed band so the top edge of the active sentence lands inside the band. First and last manuscript lines have dynamic spacer padding so they can also align to the same band. Display controls show the current reading-band percent, provide a slider and number input, and include a reset button for the default band position.
+
+Active sentence highlighting is optional and defaults off for fresh sessions so the fixed band remains the primary narrator cue. If enabled, the highlight is intentionally subtle.
 
 Scrolling is controlled by a `requestAnimationFrame` animation loop rather than browser native smooth scrolling. It accelerates gently, caps velocity, brakes into the target, retargets in-flight motion when a new alignment update arrives, and skips movement when the active text is already within the reading-band deadband. Systems with `prefers-reduced-motion` enabled use minimal motion.
 

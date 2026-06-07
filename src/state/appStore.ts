@@ -6,8 +6,8 @@ export const DEFAULT_DISPLAY_SETTINGS: DisplaySettings = {
   lineHeight: 1.55,
   textWidthCh: 64,
   paragraphSpacingEm: 1.35,
-  readingZonePercent: 43,
-  showActiveHighlight: true,
+  readingZonePercent: 38,
+  showActiveHighlight: false,
   continuousAssistScroll: false,
   theme: 'dark'
 };

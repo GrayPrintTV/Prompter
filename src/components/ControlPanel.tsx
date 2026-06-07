@@ -19,6 +19,7 @@ import type {
   MicCaptureState,
   TranscriptDelta
 } from '../domain/types';
+import { DEFAULT_DISPLAY_SETTINGS } from '../state/appStore';
 
 type Props = {
   projectTitle: string;
@@ -106,6 +107,11 @@ function sourceForProvider(providerId: AsrProviderId) {
   if (providerId === 'local-whisper') return 'local-whisper';
   if (providerId === 'mock') return 'mock';
   return 'manual';
+}
+
+function clampReadingZonePercent(value: number) {
+  if (!Number.isFinite(value)) return DEFAULT_DISPLAY_SETTINGS.readingZonePercent;
+  return Math.max(25, Math.min(70, Math.round(value)));
 }
 
 export function getActiveAsrTranscriptHistory(
@@ -206,6 +212,9 @@ export function ControlPanel(props: Props) {
     : isListening ? 'Stop' : 'Start';
   const startStopDisabled = localBridgeUnavailable && !isListening;
   const localWhisperRunning = selectedAsrProviderId === 'local-whisper' && localWhisperStatus.listening;
+  const setReadingZonePercent = (readingZonePercent: number) => {
+    onSettingsChange({ ...settings, readingZonePercent: clampReadingZonePercent(readingZonePercent) });
+  };
 
   // Collapsed state for sections per UX task. Defaults: advanced/dev/bridge/mock/manual/torture/search? /display/shortcuts collapsed to declutter.
   // Persist to localStorage (easy).
@@ -500,6 +509,65 @@ export function ControlPanel(props: Props) {
         <button type="button" onClick={() => onStepParagraph(1)}>Next Para</button>
       </section>
 
+      <section className="panel-section display-panel">
+        <h2>Display</h2>
+        <div className="settings-grid display-settings-grid">
+          <label>Font <input type="number" min={22} max={78} value={settings.fontSizePx} onChange={(event) => onSettingsChange({ ...settings, fontSizePx: Number(event.target.value) })} /></label>
+          <label>Line <input type="number" min={1.1} max={2.2} step={0.05} value={settings.lineHeight} onChange={(event) => onSettingsChange({ ...settings, lineHeight: Number(event.target.value) })} /></label>
+          <label>Width <input type="number" min={42} max={92} value={settings.textWidthCh} onChange={(event) => onSettingsChange({ ...settings, textWidthCh: Number(event.target.value) })} /></label>
+        </div>
+        <div className="reading-zone-control">
+          <div className="reading-zone-label">
+            <span>Reading band</span>
+            <strong>{settings.readingZonePercent}% from top</strong>
+          </div>
+          <div className="range-with-value">
+            <input
+              id="reading-zone-percent"
+              type="range"
+              min={25}
+              max={70}
+              step={1}
+              value={settings.readingZonePercent}
+              onChange={(event) => setReadingZonePercent(Number(event.target.value))}
+              aria-label="Reading band position"
+            />
+            <input
+              type="number"
+              min={25}
+              max={70}
+              value={settings.readingZonePercent}
+              onChange={(event) => setReadingZonePercent(Number(event.target.value))}
+              aria-label="Reading band percent from top"
+            />
+          </div>
+          <div className="settings-subtle">Lower value moves the fixed band higher.</div>
+          <button
+            type="button"
+            onClick={() => setReadingZonePercent(DEFAULT_DISPLAY_SETTINGS.readingZonePercent)}
+            disabled={settings.readingZonePercent === DEFAULT_DISPLAY_SETTINGS.readingZonePercent}
+          >
+            Reset reading band
+          </button>
+        </div>
+        <label className="toggle-row">
+          <input
+            type="checkbox"
+            checked={settings.showActiveHighlight}
+            onChange={(event) => onSettingsChange({ ...settings, showActiveHighlight: event.target.checked })}
+          />
+          <span>Active sentence highlight</span>
+        </label>
+        <div className="inline-actions">
+          <button type="button" onClick={() => onSettingsChange({ ...settings, theme: settings.theme === 'dark' ? 'light' : 'dark' })}>{settings.theme === 'dark' ? 'Light' : 'Dark'}</button>
+          <button type="button" onClick={() => onSettingsChange({ ...settings, continuousAssistScroll: !settings.continuousAssistScroll })}>
+            Assist Scroll {settings.continuousAssistScroll ? 'On' : 'Off'}
+          </button>
+          <button type="button" onClick={onToggleAlwaysOnTop}>Top</button>
+          <button type="button" onClick={onToggleDebug}>{debugVisible ? 'Hide Debug' : 'Debug'}</button>
+        </div>
+      </section>
+
       {/* Manuscript - import visible, textarea here (core but grouped) */}
       <section className="panel-section">
         <h2>Manuscript</h2>
@@ -639,32 +707,6 @@ export function ControlPanel(props: Props) {
               )}
             </details>
 
-            {/* Display - default collapsed to reduce clutter (per req, not in basic visible list) */}
-            <details open={!sectionsCollapsed.display} onToggle={() => {}} style={{marginBottom:'4px'}}>
-              <summary style={{cursor:'pointer'}} onClick={(e) => { e.preventDefault(); toggleSection('display'); }}>Display {sectionsCollapsed.display ? '▶' : '▼'}</summary>
-              {!sectionsCollapsed.display && (
-                <div>
-                  <div className="settings-grid">
-                    <label>Font <input type="number" min={22} max={78} value={settings.fontSizePx} onChange={(event) => onSettingsChange({ ...settings, fontSizePx: Number(event.target.value) })} /></label>
-                    <label>Line <input type="number" min={1.1} max={2.2} step={0.05} value={settings.lineHeight} onChange={(event) => onSettingsChange({ ...settings, lineHeight: Number(event.target.value) })} /></label>
-                    <label>Width <input type="number" min={42} max={92} value={settings.textWidthCh} onChange={(event) => onSettingsChange({ ...settings, textWidthCh: Number(event.target.value) })} /></label>
-                    <label>Zone % <input type="number" min={30} max={75} value={settings.readingZonePercent} onChange={(event) => onSettingsChange({ ...settings, readingZonePercent: Number(event.target.value) })} /></label>
-                  </div>
-                  <div className="settings-subtle">Lower zone values place the reading band higher in the viewport.</div>
-                  <div className="inline-actions">
-                    <button type="button" onClick={() => onSettingsChange({ ...settings, theme: settings.theme === 'dark' ? 'light' : 'dark' })}>{settings.theme === 'dark' ? 'Light' : 'Dark'}</button>
-                    <button type="button" onClick={() => onSettingsChange({ ...settings, showActiveHighlight: !settings.showActiveHighlight })}>
-                      {settings.showActiveHighlight ? 'Hide Highlight' : 'Show Highlight'}
-                    </button>
-                    <button type="button" onClick={() => onSettingsChange({ ...settings, continuousAssistScroll: !settings.continuousAssistScroll })}>
-                      Assist Scroll {settings.continuousAssistScroll ? 'On' : 'Off'}
-                    </button>
-                    <button type="button" onClick={onToggleAlwaysOnTop}>Top</button>
-                    <button type="button" onClick={onToggleDebug}>{debugVisible ? 'Hide Debug' : 'Debug'}</button>
-                  </div>
-                </div>
-              )}
-            </details>
 
             {/* Shortcuts - default collapsed */}
             <details open={!sectionsCollapsed.shortcuts} onToggle={() => {}}>
