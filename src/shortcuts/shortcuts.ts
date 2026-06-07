@@ -11,6 +11,7 @@ export type ShortcutAction =
   | 'fontUp'
   | 'fontDown'
   | 'fullScreen'
+  | 'controls'
   | 'debug';
 
 export type ShortcutDefinition = {
@@ -32,6 +33,7 @@ export const DEFAULT_SHORTCUTS: ShortcutDefinition[] = [
   { action: 'fontUp', label: 'Increase font', keys: 'Ctrl+=' },
   { action: 'fontDown', label: 'Decrease font', keys: 'Ctrl+-' },
   { action: 'fullScreen', label: 'Full screen', keys: 'F11' },
+  { action: 'controls', label: 'Show/hide controls', keys: 'Ctrl+Alt+C' },
   { action: 'debug', label: 'Debug panel', keys: 'Ctrl+`' }
 ];
 

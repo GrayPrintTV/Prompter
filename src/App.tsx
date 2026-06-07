@@ -3,8 +3,9 @@ import { ManualAsrProvider } from './asr/ManualAsrProvider';
 import { MockAsrProvider } from './asr/MockAsrProvider';
 import { DEFAULT_LOCAL_WHISPER_STATUS, LocalWhisperAsrProvider } from './asr/LocalWhisperAsrProvider';
 import { OpenAiRealtimeAsrProvider } from './asr/OpenAiRealtimeAsrProvider';
-import { coerceSelectedProvider } from './asr/providerRegistry';
+import { coerceSelectedProvider, getAsrProviderOptions } from './asr/providerRegistry';
 import { ControlPanel } from './components/ControlPanel';
+import { NarrationBar } from './components/NarrationBar';
 import { PrompterView } from './components/PrompterView';
 import { alignTranscript } from './domain/alignment';
 import {
@@ -20,6 +21,7 @@ import {
   tokenIndexForParagraph,
   tokenIndexForSentence
 } from './domain/manuscript';
+import { deriveNarrationStatus } from './domain/narrationStatus';
 import { HIGH_CONFIDENCE, stateFromAlignment } from './domain/scrollModel';
 import { transcriptToTokens } from './domain/normalize';
 import type {
@@ -95,8 +97,22 @@ const EMPTY_ALIGNMENT_BUFFER_DEBUG: AlignmentBufferDebug = {
   retentionReason: 'No transcript processed yet.'
 };
 
+function localWhisperSettingsEqual(a: LocalWhisperSettings, b: LocalWhisperSettings) {
+  return (
+    a.pythonExecutablePath === b.pythonExecutablePath &&
+    a.modelName === b.modelName &&
+    a.device === b.device &&
+    a.computeType === b.computeType &&
+    a.chunkDurationSeconds === b.chunkDurationSeconds
+  );
+}
+
 export default function App() {
   const stored = useMemo(() => loadSession(), []);
+  const initialLocalWhisperSettings = useMemo(() => ({
+    ...DEFAULT_LOCAL_WHISPER_SETTINGS,
+    ...stored?.localWhisperSettings
+  }), [stored]);
   const [projectTitle, setProjectTitle] = useState(stored?.projectTitle ?? 'Narration Session');
   const [manuscriptText, setManuscriptText] = useState(stored?.manuscriptText ?? SAMPLE_MANUSCRIPT);
   const [displaySettings, setDisplaySettings] = useState<DisplaySettings>({
@@ -111,10 +127,9 @@ export default function App() {
   const [mockScript, setMockScript] = useState(stored?.mockScript ?? DEFAULT_MOCK_SCRIPT);
   const [liveConfig, setLiveConfig] = useState<LiveAsrConfigStatus>(DEFAULT_LIVE_CONFIG);
   const [liveStatus, setLiveStatus] = useState<LiveAsrConnectionStatus>(DEFAULT_LIVE_STATUS);
-  const [localWhisperSettings, setLocalWhisperSettings] = useState<LocalWhisperSettings>({
-    ...DEFAULT_LOCAL_WHISPER_SETTINGS,
-    ...stored?.localWhisperSettings
-  });
+  const [localWhisperSettings, setLocalWhisperSettings] = useState<LocalWhisperSettings>(initialLocalWhisperSettings);
+  const [localWhisperDraftSettings, setLocalWhisperDraftSettings] =
+    useState<LocalWhisperSettings>(initialLocalWhisperSettings);
   const [localWhisperStatus, setLocalWhisperStatus] = useState<LocalWhisperStatus>(DEFAULT_LOCAL_WHISPER_STATUS);
   const [selectedAsrProviderId, setSelectedAsrProviderId] = useState<AsrProviderId>(
     (stored?.selectedAsrProviderId as AsrProviderId | undefined) ?? 'manual'
@@ -122,6 +137,13 @@ export default function App() {
   const [isListening, setIsListening] = useState(false);
   const [isMockPlaying, setIsMockPlaying] = useState(false);
   const [debugVisible, setDebugVisible] = useState(stored?.debugVisible ?? true);
+  const [controlsVisible, setControlsVisible] = useState(() => {
+    try {
+      return localStorage.getItem('narration-prompter.controls-visible') !== 'false';
+    } catch {
+      return true;
+    }
+  });
   const [searchQuery, setSearchQuery] = useState('');
   const [transcriptBuffer, setTranscriptBuffer] = useState<string[]>([]);
   const [deltas, setDeltas] = useState<TranscriptDelta[]>([]);
@@ -136,10 +158,7 @@ export default function App() {
   const mockProviderRef = useRef(new MockAsrProvider());
   const liveProviderRef = useRef(new OpenAiRealtimeAsrProvider());
   const localWhisperProviderRef = useRef(
-    new LocalWhisperAsrProvider({
-      ...DEFAULT_LOCAL_WHISPER_SETTINGS,
-      ...stored?.localWhisperSettings
-    })
+    new LocalWhisperAsrProvider(initialLocalWhisperSettings)
   );
   const resyncArmedRef = useRef(false);
   const lowConfidenceCountRef = useRef(0);
@@ -390,7 +409,10 @@ export default function App() {
     const liveStatusOff = liveProviderRef.current.onConnectionStatus(setLiveStatus);
     const localWhisperOff = localWhisperProviderRef.current.onDelta(processDelta);
     const localWhisperStatusOff = localWhisperProviderRef.current.onConnectionStatus(setLocalWhisperStatus);
-    const doneOff = mockProviderRef.current.onDone(() => setIsMockPlaying(false));
+    const doneOff = mockProviderRef.current.onDone(() => {
+      setIsMockPlaying(false);
+      if (selectedAsrProviderRef.current === 'mock') setFollowState('manual');
+    });
     return () => {
       manualOff();
       mockOff();
@@ -405,6 +427,14 @@ export default function App() {
   useEffect(() => {
     localWhisperProviderRef.current.setSettings(localWhisperSettings);
   }, [localWhisperSettings]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('narration-prompter.controls-visible', controlsVisible ? 'true' : 'false');
+    } catch {
+      // Controls visibility is a convenience preference; persistence failure is harmless.
+    }
+  }, [controlsVisible]);
 
   useEffect(() => {
     let cancelled = false;
@@ -542,12 +572,14 @@ export default function App() {
     if (followStateRef.current === 'manual' || followStateRef.current === 'paused') {
       setFollowState('following');
     }
+    setControlsVisible(false);
     await mockProviderRef.current.start();
   }, [mockScript]);
 
   const stopMock = useCallback(async () => {
     await mockProviderRef.current.stop();
     setIsMockPlaying(false);
+    setFollowState('manual');
   }, []);
 
   const startMicMonitor = useCallback(async () => {
@@ -576,13 +608,14 @@ export default function App() {
     if (selectedAsrProviderRef.current === 'openai-realtime') {
       if (liveStatus.listening) {
         await liveProviderRef.current.stop();
-        if (followStateRef.current !== 'manual') setFollowState('paused');
+        setFollowState('manual');
       } else {
         try {
           await liveProviderRef.current.start();
           if (followStateRef.current === 'paused' || followStateRef.current === 'manual') {
             setFollowState('following');
           }
+          setControlsVisible(false);
         } catch {
           // Provider status already carries the sanitized error; manual and mock remain usable.
         }
@@ -593,7 +626,7 @@ export default function App() {
     if (selectedAsrProviderRef.current === 'local-whisper') {
       if (localWhisperStatus.listening) {
         await localWhisperProviderRef.current.stop();
-        if (followStateRef.current !== 'manual') setFollowState('paused');
+        setFollowState('manual');
       } else {
         if (!localWhisperStatus.bridge.localWhisperBridgeAvailable) {
           await localWhisperProviderRef.current.refreshStatus().catch(() => undefined);
@@ -606,6 +639,7 @@ export default function App() {
           if (followStateRef.current === 'paused' || followStateRef.current === 'manual') {
             setFollowState('following');
           }
+          setControlsVisible(false);
         } catch {
           // Provider status already carries the error; manual, mock, and OpenAI remain usable.
         }
@@ -616,13 +650,14 @@ export default function App() {
     if (isListening) {
       await manualProviderRef.current.stop();
       setIsListening(false);
-      if (followStateRef.current !== 'manual') setFollowState('paused');
+      setFollowState('manual');
     } else {
       await manualProviderRef.current.start();
       setIsListening(true);
       if (followStateRef.current === 'paused' || followStateRef.current === 'manual') {
         setFollowState('following');
       }
+      setControlsVisible(false);
     }
   }, [
     isListening,
@@ -689,6 +724,36 @@ export default function App() {
     setSelectedAsrProviderId(coerceSelectedProvider(providerId, liveConfig, localWhisperSettings));
   }, [liveConfig, localWhisperSettings]);
 
+  const localWhisperSettingsDirty = !localWhisperSettingsEqual(
+    localWhisperSettings,
+    localWhisperDraftSettings
+  );
+
+  const applyLocalWhisperSettings = useCallback(() => {
+    setLocalWhisperSettings(localWhisperDraftSettings);
+  }, [localWhisperDraftSettings]);
+
+  const restartLocalWhisper = useCallback(async () => {
+    const nextSettings = localWhisperDraftSettings;
+    if (!localWhisperStatus.listening) {
+      setLocalWhisperSettings(nextSettings);
+      return;
+    }
+
+    try {
+      await localWhisperProviderRef.current.stop();
+      setLocalWhisperSettings(nextSettings);
+      localWhisperProviderRef.current.setSettings(nextSettings);
+      await localWhisperProviderRef.current.start();
+      if (followStateRef.current === 'paused' || followStateRef.current === 'manual') {
+        setFollowState('following');
+      }
+      setControlsVisible(false);
+    } catch {
+      // Provider status already carries the user-facing restart error.
+    }
+  }, [localWhisperDraftSettings, localWhisperStatus.listening]);
+
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       const editable = isEditableTarget(event.target);
@@ -716,6 +781,9 @@ export default function App() {
       if (event.ctrlKey && event.altKey && event.key.toLowerCase() === 'l') {
         event.preventDefault();
         void toggleListening();
+      } else if (event.ctrlKey && event.altKey && event.key.toLowerCase() === 'c') {
+        event.preventDefault();
+        setControlsVisible((visible) => !visible);
       } else if (event.ctrlKey && event.altKey && event.key.toLowerCase() === 'f') {
         event.preventDefault();
         toggleFollow();
@@ -772,13 +840,78 @@ export default function App() {
         : selectedAsrProviderId === 'local-whisper'
           ? localWhisperStatus.listening
           : isListening;
+  const selectedProviderStarting =
+    selectedAsrProviderId === 'openai-realtime'
+      ? liveStatus.status === 'starting'
+      : selectedAsrProviderId === 'local-whisper'
+        ? localWhisperStatus.status === 'starting' ||
+          localWhisperStatus.modelPhase === 'starting' ||
+          localWhisperStatus.modelPhase === 'process-started' ||
+          localWhisperStatus.modelPhase === 'model-loading'
+        : false;
   const selectedInputLevel =
     selectedAsrProviderId === 'local-whisper'
       ? localWhisperStatus.mic.inputLevel
       : inputLevel;
+  const providerOptions = getAsrProviderOptions(liveConfig, localWhisperSettings);
+  const selectedProviderLabel =
+    providerOptions.find((option) => option.id === selectedAsrProviderId)?.label ?? 'Manual';
+  const localMicState = localWhisperStatus.mic.captureState;
+  const localMicActive =
+    localMicState === 'stream-active' ||
+    localMicState === 'pcm-capturing' ||
+    localMicState === 'chunk-sent' ||
+    localMicState === 'chunk-returned' ||
+    localMicState === 'media-recorder-recording';
+  const selectedProviderExpectsMic =
+    selectedAsrProviderId === 'local-whisper' || selectedAsrProviderId === 'openai-realtime';
+  const selectedProviderMicActive =
+    selectedAsrProviderId === 'local-whisper'
+      ? localMicActive
+      : selectedAsrProviderId === 'openai-realtime'
+        ? liveStatus.connected || liveStatus.listening
+        : false;
+  const localQueueLagging =
+    selectedAsrProviderId === 'local-whisper' &&
+    (
+      localWhisperStatus.chunk.lastRealtimeFactor > 1.2 ||
+      localWhisperStatus.chunk.avgRealtimeFactor > 1.2 ||
+      localWhisperStatus.chunk.estimatedQueueLatencyMs > 4000 ||
+      localWhisperStatus.chunk.queueLength >= Math.max(1, localWhisperStatus.chunk.maxQueueLength)
+    );
+  const selectedProviderError =
+    selectedAsrProviderId === 'openai-realtime'
+      ? liveStatus.errorMessage
+      : selectedAsrProviderId === 'local-whisper'
+        ? localWhisperStatus.errorMessage ??
+          localWhisperStatus.mic.errorMessage ??
+          (!localWhisperStatus.bridge.localWhisperBridgeAvailable
+            ? localWhisperStatus.bridge.errorMessage
+            : null)
+        : null;
+  const selectedProviderWarning =
+    selectedAsrProviderId === 'local-whisper'
+      ? localWhisperStatus.chunk.warningMessage
+      : null;
+  const narrationStatus = deriveNarrationStatus({
+    isRunning: selectedProviderListening,
+    isStarting: selectedProviderStarting,
+    followState,
+    confidence: alignment.confidence,
+    expectsMic: selectedProviderExpectsMic,
+    micActive: selectedProviderMicActive,
+    inputLevel: selectedInputLevel,
+    isLagging: localQueueLagging,
+    errorMessage: selectedProviderError,
+    warningMessage: selectedProviderWarning
+  });
+  const startStopDisabled =
+    selectedAsrProviderId === 'local-whisper' &&
+    !selectedProviderListening &&
+    !localWhisperStatus.bridge.localWhisperBridgeAvailable;
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${controlsVisible ? '' : 'controls-hidden'}`}>
       <ControlPanel
         projectTitle={projectTitle}
         onProjectTitleChange={setProjectTitle}
@@ -792,8 +925,12 @@ export default function App() {
         onSelectedAsrProviderChange={selectAsrProvider}
         liveConfig={liveConfig}
         liveStatus={liveStatus}
-        localWhisperSettings={localWhisperSettings}
-        onLocalWhisperSettingsChange={setLocalWhisperSettings}
+        localWhisperSettings={localWhisperDraftSettings}
+        appliedLocalWhisperSettings={localWhisperSettings}
+        onLocalWhisperSettingsChange={setLocalWhisperDraftSettings}
+        localWhisperSettingsDirty={localWhisperSettingsDirty}
+        onApplyLocalWhisperSettings={applyLocalWhisperSettings}
+        onRestartLocalWhisper={restartLocalWhisper}
         localWhisperStatus={localWhisperStatus}
         isListening={selectedProviderListening}
         isMockPlaying={isMockPlaying}
@@ -833,14 +970,26 @@ export default function App() {
         alignmentBufferDebug={alignmentBufferDebug}
         traceLog={traceLog}
       />
-      <PrompterView
-        model={manuscript}
-        currentSentenceIndex={currentSentenceIndex}
-        followState={followState}
-        confidence={alignment.confidence}
-        settings={displaySettings}
-        onTraceScroll={onTraceScroll}
-      />
+      <div className="prompter-stage">
+        <NarrationBar
+          status={narrationStatus}
+          providerLabel={selectedProviderLabel}
+          isRunning={selectedProviderListening}
+          inputLevel={selectedInputLevel}
+          controlsVisible={controlsVisible}
+          startStopDisabled={startStopDisabled}
+          onStartStop={toggleListening}
+          onToggleControls={() => setControlsVisible((visible) => !visible)}
+        />
+        <PrompterView
+          model={manuscript}
+          currentSentenceIndex={currentSentenceIndex}
+          followState={followState}
+          confidence={alignment.confidence}
+          settings={displaySettings}
+          onTraceScroll={onTraceScroll}
+        />
+      </div>
     </div>
   );
 }

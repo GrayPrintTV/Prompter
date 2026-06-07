@@ -68,12 +68,18 @@ The alignment engine lives in `src/domain/alignment.ts` and related domain modul
 
 `src/components/ControlPanel.tsx` owns the main controls, ASR provider status, Mic Monitor controls, Local Whisper counters, and Heard transcript history.
 
+`src/components/NarrationBar.tsx` is the always-visible narration overlay. It exposes the primary Start/Stop control, provider/status label, mic level meter, key warning text, and controls toggle.
+
+`src/components/PrompterView.tsx` renders the manuscript pane. It owns the fixed reading-band overlay and scroll animation refs. Reading-zone geometry and scroll-step math live in `src/domain/prompterScroll.ts` so the component can keep animation state out of React state while still being testable.
+
+Narration status labels are derived in `src/domain/narrationStatus.ts` from provider/follow/mic/lag/error inputs. This keeps UI labels such as Idle, Starting, Following, Holding, Lagging, and Error separate from ASR provider internals.
+
 `src/components/DebugPanel.tsx` shows transcript buffer, current token, best match, confidence, follow state, search window, and reason.
 
 `src/components/TortureTestPanel.tsx` runs simulated transcript chunks through the alignment harness for reproducible failure cases.
 
 ## Settings Storage
 
-Local session state is stored in renderer `localStorage` through `src/state/projectStore.ts`. Stored fields include project title, manuscript text, current position, display settings, selected ASR provider, Local Whisper settings, mock script, and debug panel visibility.
+Local session state is stored in renderer `localStorage` through `src/state/projectStore.ts`. Stored fields include project title, manuscript text, current position, display settings, selected ASR provider, applied Local Whisper settings, mock script, and debug panel visibility. Controls visibility is stored as a separate local convenience preference.
 
 Secrets must not be stored in localStorage. OpenAI API keys belong in environment variables or ignored local env files read by Electron main.

@@ -6,13 +6,15 @@ export const DEFAULT_DISPLAY_SETTINGS: DisplaySettings = {
   lineHeight: 1.55,
   textWidthCh: 64,
   paragraphSpacingEm: 1.35,
-  readingZonePercent: 62,
+  readingZonePercent: 43,
+  showActiveHighlight: true,
+  continuousAssistScroll: false,
   theme: 'dark'
 };
 
 export const DEFAULT_LOCAL_WHISPER_SETTINGS: LocalWhisperSettings = {
   pythonExecutablePath: 'python',
-  modelName: 'turbo',
+  modelName: 'base.en',
   device: 'cpu',
   computeType: 'int8',
   chunkDurationSeconds: 2

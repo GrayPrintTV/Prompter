@@ -14,11 +14,12 @@ Future coding agents should start with `AGENTS.md` and `docs/current-state.md` b
 - Optional Local Whisper transcription provider using a Python faster-whisper sidecar.
 - Conservative fuzzy alignment against a local manuscript window.
 - Confidence states: following, holding, uncertain, lost, paused, manual, resyncing, retake.
-- Smooth scrolling only on high-confidence alignment.
+- Fixed center reading band with custom smooth scrolling only on high-confidence alignment.
 - Manual sentence and paragraph recovery controls.
 - Keyboard shortcuts suitable for Stream Deck hotkey mapping.
 - Debug panel with transcript buffer, match, confidence, token position, search window, and reason.
 - Developer torture-test harness for stepping or autoplaying simulated transcript chunks against the current manuscript.
+- Prompter-first narration mode with a minimal Start/Stop/status/mic-level overlay and hideable controls.
 - Unit tests for normalization and alignment edge cases.
 
 ## Install
@@ -75,13 +76,15 @@ Do not commit `.env.local`; it is ignored by git.
 
 Local Whisper is optional and runs through this repo's Python sidecar, not the separate audiobook proofing tool. It captures microphone audio as local PCM, encodes short WAV chunks in the renderer, sends them to Electron main, and Electron main sends temporary `.wav` files to `python/local_whisper_sidecar.py`. The sidecar uses faster-whisper and returns transcript chunks in the same `TranscriptDelta` shape used by Manual, Mock, and OpenAI Realtime.
 
-The defaults match the existing proofing tool's local setup closely:
+The Local Whisper defaults are tuned for conservative CPU live following:
 
 - Python executable: `python`
-- Whisper model: `turbo`
+- Whisper model: `base.en`
 - Device: `cpu`
 - Compute type: `int8`
-- Chunk duration: `4` seconds
+- Chunk duration: `2` seconds
+
+Live testing has generally favored `base.en / cpu / int8 / 2s` over `turbo` or `tiny.en` for this near-live prompter use.
 
 Install sidecar dependencies in a Python environment:
 
@@ -91,7 +94,9 @@ python -m pip install -r python/requirements.txt
 
 Then select `Local Whisper` in the ASR Provider dropdown. The settings panel lets you adjust the Python path, model, device, compute type, and chunk duration. A little chunk latency is expected; the aligner only needs enough recognized words every sentence or two.
 
-Use `Start Monitor` first. Mic Monitor only requests microphone access and holds the input stream for the live level meter; it does not start Whisper transcription or move the prompter. When the meter is moving, press `Start Following` to start PCM/WAV chunking, send chunks through Electron main to the Python sidecar, receive transcript text, and feed normal transcript deltas into the existing aligner. `Stop Following` stops transcription and following, but leaves Mic Monitor visible/running when it was started separately.
+Use the always-visible top bar `Start` button for narration. It starts microphone monitoring and following as needed for the selected provider. `Stop` stops transcription/following and returns the narration state to Idle. The advanced Local Whisper panel still exposes separate Mic Monitor controls for diagnostics.
+
+Local Whisper settings in the advanced panel are draft settings. Typing into Python/model/device/compute/chunk fields does not silently change a running sidecar. Use `Apply` while stopped, or `Restart Whisper` while following; when following is active, the UI labels draft edits as applying after restart.
 
 The Local Whisper panel shows mic state, selected/default input label when Chromium exposes it, sidecar phase, chunk counters, chunk format, MIME type, extension, first-byte header signature such as `RIFF/WAVE`, sample rate, duration, last transcript text, recent ASR transcript history under `Heard`, and warnings for missing PCM/WAV chunks or sidecar response timeouts. Empty Whisper returns are shown as `[empty transcript]` so silence is visible instead of looking like nothing happened. Provider status messages such as `Sidecar is running` are diagnostics only and should not appear in `Heard`, `Last delta`, or feed the aligner.
 
@@ -104,7 +109,7 @@ $env:LOCAL_WHISPER_MODEL_READY_TIMEOUT_MS = "240000"
 Run the Local Whisper sidecar self-test without Electron:
 
 ```powershell
-python python/local_whisper_sidecar.py --self-test --model turbo --device cpu --compute-type int8
+python python/local_whisper_sidecar.py --self-test --model base.en --device cpu --compute-type int8
 ```
 
 The self-test verifies Python starts, imports faster-whisper, loads the requested model, generates a small WAV file, and asks faster-whisper to decode/transcribe it. A silent or tone fixture may produce an empty transcript; `wavDecoded: true` is the important decode check.
@@ -140,6 +145,26 @@ Use the Mock Playback box to enter one transcript chunk per line, then press `Pl
 
 The Manual Transcript box emits a single transcript delta. Press `Ctrl+Enter` inside the box or click `Inject Transcript`.
 
+## Prompter reading zone
+
+The prompter uses a fixed horizontal reading band inside the visible manuscript pane. Fresh sessions default the band somewhat above center (`readingZonePercent: 43`); existing saved sessions keep their stored reading-zone setting. Lower zone percentages place the band higher in the viewport.
+
+When follow mode advances with high confidence, the manuscript scrolls underneath the fixed band so the top edge of the active sentence lands inside the band. First and last manuscript lines have dynamic spacer padding so they can also align to the same band. Active sentence highlighting remains as a secondary cue.
+
+Scrolling is controlled by a `requestAnimationFrame` animation loop rather than browser native smooth scrolling. It accelerates gently, caps velocity, brakes into the target, retargets in-flight motion when a new alignment update arrives, and skips movement when the active text is already within the reading-band deadband. Systems with `prefers-reduced-motion` enabled use minimal motion.
+
+Optional `Assist Scroll` gently continues moving the manuscript for a few seconds after a recent high-confidence match. It stops when following is no longer confident, when the app is holding/lost/paused/manual, or when no fresh confident match arrives. It is off by default. Active sentence highlighting can also be hidden from the Display controls.
+
+## Narration mode
+
+During narration, the left control panel can be hidden with the top-bar `Hide Controls` button or `Ctrl+Alt+C`. The prompter remains full-screen with an always-visible top bar containing:
+
+- `Start` / `Stop`
+- selected provider and narration state: Idle, Starting, Listening, Following, Holding, Lagging, or Error
+- mic level meter
+- key warning text when something needs attention
+- `Controls` to bring back the advanced panel
+
 ## Alignment torture-test harness
 
 Use the `Torture Test` panel to stress-test the aligner without live ASR:
@@ -164,6 +189,7 @@ Phase 0.5 alignment hardening covers the repeated-sentence-after-flub fixture, d
 - `Alt+Left` / `Alt+Right`: back/forward one sentence
 - `Alt+Up` / `Alt+Down`: back/forward one paragraph
 - `Ctrl+Alt+R`: resync using a wider search on the next transcript chunk
+- `Ctrl+Alt+C`: show/hide controls
 - `Ctrl+F`: search
 - `Ctrl+=` / `Ctrl+-`: increase/decrease font size
 - `F11`: toggle full screen

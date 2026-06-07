@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-Phase 1 is in progress. The app has Phase 0/0.5 manuscript alignment, torture-test harnesses, Manual and Mock ASR, OpenAI Realtime provider scaffolding, and Local Whisper provider scaffolding. The current focus is making Local Whisper live provider plumbing reliable before tuning transcription quality.
+Phase 1 is in progress. The app has Phase 0/0.5 manuscript alignment, torture-test harnesses, Manual and Mock ASR, optional OpenAI Realtime ASR, and Local Whisper ASR working end-to-end through the Python sidecar. The current focus is real narration usability: keeping live following reliable while refining the prompter-first narration view.
 
 ## What Works
 
@@ -13,11 +13,15 @@ Phase 1 is in progress. The app has Phase 0/0.5 manuscript alignment, torture-te
 - Alignment torture-test panel and Vitest fixture coverage.
 - Conservative fuzzy manuscript alignment with confidence states.
 - OpenAI Realtime provider behind the ASR boundary, disabled until configured.
-- Local Whisper provider behind the ASR boundary.
+- Local Whisper provider behind the ASR boundary, including microphone capture, WAV chunks, sidecar transcription, Heard transcript display, and manuscript following.
 - Mic Monitor for Local Whisper with input level meter and microphone state diagnostics.
 - Local Whisper sidecar launch path and chunk counters.
 - Local Whisper PCM/WAV chunking path: renderer encodes microphone samples as WAV and Electron main writes `.wav` temp files for the Python sidecar.
 - Bridge diagnostics for Electron preload, Local Whisper IPC, ping, preload path, preload existence, preload status, and preload errors.
+- Prompter reading zone uses a fixed above-center band, dynamic top/bottom manuscript spacers, and a custom `requestAnimationFrame` scroll controller instead of native smooth scrolling.
+- Prompter-first narration mode can hide the left control panel and keeps a minimal Start/Stop/status/mic-level overlay visible.
+- Local Whisper settings use draft/apply semantics; changes made while following are labeled as applying after Restart Whisper.
+- Optional continuous assist scroll is implemented and off by default.
 
 ## Current Active Bug/Fix Status
 
@@ -66,7 +70,7 @@ Sidecar readiness is now split:
 ## Known Fragile Areas
 
 - Local Whisper bridge should be manually smoke-tested after full Electron restart when Electron main/preload/build files change.
-- Local Whisper WAV chunks still need real microphone testing in the target Python/faster-whisper environment.
+- Local Whisper transcription quality and following behavior remain model/chunk-duration sensitive; the app now defaults to `base.en` with 2-second chunks on `cpu`/`int8` because it has looked better in live narration than `turbo` or `tiny.en`.
 - Local Whisper sidecar self-test exists, but model download/load can take time on first run.
 - Audio input selector is not implemented yet; Chromium default device is used.
 - Number and abbreviation normalization is intentionally narrow.
@@ -76,10 +80,10 @@ Sidecar readiness is now split:
 
 - Restart dev app and confirm Local Whisper bridge diagnostics show Yes/Yes/Yes.
 - Run the Local Whisper sidecar self-test.
-- Verify WAV chunks can be decoded by faster-whisper in the user's Python environment.
 - Add an input-device selector.
-- Continue Local Whisper UX diagnostics only after bridge and sidecar path are proven.
-- Tune Local Whisper chunk duration and silence handling.
+- Tune Local Whisper model/chunk defaults further from longer real narration sessions if needed.
+- Continue prompter reading-zone tuning after real narration sessions, especially band height and whether sentence top-edge targeting is enough for long wrapped sentences.
+- Evaluate continuous assist scroll in real narration; it is intentionally conservative and may need speed tuning.
 
 ## Local Whisper Manual Smoke-Test Steps
 
@@ -100,5 +104,5 @@ Sidecar readiness is now split:
 Sidecar self-test:
 
 ```powershell
-python python/local_whisper_sidecar.py --self-test --model turbo --device cpu --compute-type int8
+python python/local_whisper_sidecar.py --self-test --model base.en --device cpu --compute-type int8
 ```

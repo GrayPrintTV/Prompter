@@ -114,6 +114,8 @@ export type DisplaySettings = {
   textWidthCh: number;
   paragraphSpacingEm: number;
   readingZonePercent: number;
+  showActiveHighlight: boolean;
+  continuousAssistScroll: boolean;
   theme: 'dark' | 'light';
 };
 

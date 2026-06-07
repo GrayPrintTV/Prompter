@@ -34,7 +34,11 @@ type Props = {
   liveConfig: LiveAsrConfigStatus;
   liveStatus: LiveAsrConnectionStatus;
   localWhisperSettings: LocalWhisperSettings;
+  appliedLocalWhisperSettings: LocalWhisperSettings;
   onLocalWhisperSettingsChange(settings: LocalWhisperSettings): void;
+  localWhisperSettingsDirty: boolean;
+  onApplyLocalWhisperSettings(): void;
+  onRestartLocalWhisper(): void;
   localWhisperStatus: LocalWhisperStatus;
   isListening: boolean;
   isMockPlaying: boolean;
@@ -139,7 +143,11 @@ export function ControlPanel(props: Props) {
     liveConfig,
     liveStatus,
     localWhisperSettings,
+    appliedLocalWhisperSettings,
     onLocalWhisperSettingsChange,
+    localWhisperSettingsDirty,
+    onApplyLocalWhisperSettings,
+    onRestartLocalWhisper,
     localWhisperStatus,
     isListening,
     isMockPlaying,
@@ -197,6 +205,7 @@ export function ControlPanel(props: Props) {
     ? isListening ? 'Stop Following' : 'Start Following'
     : isListening ? 'Stop' : 'Start';
   const startStopDisabled = localBridgeUnavailable && !isListening;
+  const localWhisperRunning = selectedAsrProviderId === 'local-whisper' && localWhisperStatus.listening;
 
   // Collapsed state for sections per UX task. Defaults: advanced/dev/bridge/mock/manual/torture/search? /display/shortcuts collapsed to declutter.
   // Persist to localStorage (easy).
@@ -545,12 +554,30 @@ export function ControlPanel(props: Props) {
           <div>
             {/* LW settings (was always visible for LW) moved here to declutter */}
             {selectedAsrProviderId === 'local-whisper' && (
-              <div className="local-whisper-settings" style={{marginBottom: '8px'}}>
-                <label>Python <input value={localWhisperSettings.pythonExecutablePath} onChange={(e) => onLocalWhisperSettingsChange({...localWhisperSettings, pythonExecutablePath: e.target.value})} /></label>
-                <label>Model <input value={localWhisperSettings.modelName} onChange={(e) => onLocalWhisperSettingsChange({...localWhisperSettings, modelName: e.target.value})} /></label>
-                <label>Device <select value={localWhisperSettings.device} onChange={(e) => onLocalWhisperSettingsChange({...localWhisperSettings, device: e.target.value})}><option value="cpu">cpu</option><option value="cuda">cuda</option><option value="auto">auto</option></select></label>
-                <label>Compute <select value={localWhisperSettings.computeType} onChange={(e) => onLocalWhisperSettingsChange({...localWhisperSettings, computeType: e.target.value})}><option value="int8">int8</option><option value="float16">float16</option><option value="float32">float32</option></select></label>
-                <label>Chunk s <input type="number" min={1} max={20} step={0.5} value={localWhisperSettings.chunkDurationSeconds} onChange={(e) => onLocalWhisperSettingsChange({...localWhisperSettings, chunkDurationSeconds: Number(e.target.value)})} /></label>
+              <div className="local-whisper-settings-block">
+                <div className="settings-apply-note">
+                  <strong>Applied:</strong> {appliedLocalWhisperSettings.modelName} / {appliedLocalWhisperSettings.device} / {appliedLocalWhisperSettings.computeType} / {appliedLocalWhisperSettings.chunkDurationSeconds}s
+                  {localWhisperSettingsDirty && (
+                    <span className="settings-pending">
+                      {localWhisperRunning ? ' Draft changes apply after Restart Whisper.' : ' Draft changes are not applied yet.'}
+                    </span>
+                  )}
+                </div>
+                <div className="local-whisper-settings" style={{marginBottom: '8px'}}>
+                  <label>Python <input value={localWhisperSettings.pythonExecutablePath} onChange={(e) => onLocalWhisperSettingsChange({...localWhisperSettings, pythonExecutablePath: e.target.value})} /></label>
+                  <label>Model <input value={localWhisperSettings.modelName} onChange={(e) => onLocalWhisperSettingsChange({...localWhisperSettings, modelName: e.target.value})} /></label>
+                  <label>Device <select value={localWhisperSettings.device} onChange={(e) => onLocalWhisperSettingsChange({...localWhisperSettings, device: e.target.value})}><option value="cpu">cpu</option><option value="cuda">cuda</option><option value="auto">auto</option></select></label>
+                  <label>Compute <select value={localWhisperSettings.computeType} onChange={(e) => onLocalWhisperSettingsChange({...localWhisperSettings, computeType: e.target.value})}><option value="int8">int8</option><option value="float16">float16</option><option value="float32">float32</option></select></label>
+                  <label>Chunk s <input type="number" min={1} max={20} step={0.5} value={localWhisperSettings.chunkDurationSeconds} onChange={(e) => onLocalWhisperSettingsChange({...localWhisperSettings, chunkDurationSeconds: Number(e.target.value)})} /></label>
+                </div>
+                <div className="inline-actions">
+                  <button type="button" onClick={onApplyLocalWhisperSettings} disabled={!localWhisperSettingsDirty || localWhisperRunning}>
+                    Apply
+                  </button>
+                  <button type="button" onClick={onRestartLocalWhisper} disabled={!localWhisperSettingsDirty || !localWhisperRunning}>
+                    Restart Whisper
+                  </button>
+                </div>
               </div>
             )}
 
@@ -621,10 +648,17 @@ export function ControlPanel(props: Props) {
                     <label>Font <input type="number" min={22} max={78} value={settings.fontSizePx} onChange={(event) => onSettingsChange({ ...settings, fontSizePx: Number(event.target.value) })} /></label>
                     <label>Line <input type="number" min={1.1} max={2.2} step={0.05} value={settings.lineHeight} onChange={(event) => onSettingsChange({ ...settings, lineHeight: Number(event.target.value) })} /></label>
                     <label>Width <input type="number" min={42} max={92} value={settings.textWidthCh} onChange={(event) => onSettingsChange({ ...settings, textWidthCh: Number(event.target.value) })} /></label>
-                    <label>Zone <input type="number" min={45} max={75} value={settings.readingZonePercent} onChange={(event) => onSettingsChange({ ...settings, readingZonePercent: Number(event.target.value) })} /></label>
+                    <label>Zone % <input type="number" min={30} max={75} value={settings.readingZonePercent} onChange={(event) => onSettingsChange({ ...settings, readingZonePercent: Number(event.target.value) })} /></label>
                   </div>
+                  <div className="settings-subtle">Lower zone values place the reading band higher in the viewport.</div>
                   <div className="inline-actions">
                     <button type="button" onClick={() => onSettingsChange({ ...settings, theme: settings.theme === 'dark' ? 'light' : 'dark' })}>{settings.theme === 'dark' ? 'Light' : 'Dark'}</button>
+                    <button type="button" onClick={() => onSettingsChange({ ...settings, showActiveHighlight: !settings.showActiveHighlight })}>
+                      {settings.showActiveHighlight ? 'Hide Highlight' : 'Show Highlight'}
+                    </button>
+                    <button type="button" onClick={() => onSettingsChange({ ...settings, continuousAssistScroll: !settings.continuousAssistScroll })}>
+                      Assist Scroll {settings.continuousAssistScroll ? 'On' : 'Off'}
+                    </button>
                     <button type="button" onClick={onToggleAlwaysOnTop}>Top</button>
                     <button type="button" onClick={onToggleDebug}>{debugVisible ? 'Hide Debug' : 'Debug'}</button>
                   </div>
