@@ -29,6 +29,7 @@ import type {
   AlignmentBufferDebug,
   AlignmentResult,
   AsrProviderId,
+  AssistStatusInfo,
   DisplaySettings,
   FollowState,
   LiveAsrConfigStatus,
@@ -36,6 +37,8 @@ import type {
   LocalWhisperSettings,
   LocalWhisperStatus,
   ManuscriptModel,
+  ScrollAnimationStatusInfo,
+  ScrollTestRequest,
   TranscriptDelta
 } from './domain/types';
 import {
@@ -169,6 +172,11 @@ export default function App() {
   const [transcriptBuffer, setTranscriptBuffer] = useState<string[]>([]);
   const [deltas, setDeltas] = useState<TranscriptDelta[]>([]);
   const [traceLog, setTraceLog] = useState<string[]>([]);
+  const [slowMock, setSlowMock] = useState(false);
+  const [assistStatus, setAssistStatus] = useState<AssistStatusInfo | null>(null);
+  const [anchorDebug, setAnchorDebug] = useState(null);
+  const [scrollTestRequest, setScrollTestRequest] = useState<ScrollTestRequest | null>(null);
+  const [scrollAnimationStatus, setScrollAnimationStatus] = useState<ScrollAnimationStatusInfo | null>(null);
   const [alignmentBufferDebug, setAlignmentBufferDebug] = useState<AlignmentBufferDebug>(
     EMPTY_ALIGNMENT_BUFFER_DEBUG
   );
@@ -185,18 +193,29 @@ export default function App() {
   const resyncArmedRef = useRef(false);
   const lowConfidenceCountRef = useRef(0);
   const localAlignmentBufferRef = useRef(createAlignmentBufferState());
+  const scrollTestIdRef = useRef(0);
   const manuscript = useMemo(() => buildManuscript(manuscriptText), [manuscriptText]);
   const manuscriptRef = useRef(manuscript);
   const currentTokenRef = useRef(currentTokenIndex);
   const followStateRef = useRef(followState);
   const [alignment, setAlignment] = useState<AlignmentResult>(() => emptyAlignment(manuscript, currentTokenIndex));
   const selectedAsrProviderRef = useRef(selectedAsrProviderId);
+  const slowMockRef = useRef(false);
+  const displaySettingsRef = useRef<DisplaySettings | null>(null);
 
   useEffect(() => {
     if (shouldRunDisplaySettingsMigration) {
       markDisplaySettingsMigrationRun();
     }
   }, [shouldRunDisplaySettingsMigration]);
+
+  useEffect(() => {
+    displaySettingsRef.current = displaySettings;
+  }, [displaySettings]);
+
+  useEffect(() => {
+    slowMockRef.current = slowMock;
+  }, [slowMock]);
 
   useEffect(() => {
     manuscriptRef.current = manuscript;
@@ -238,6 +257,26 @@ export default function App() {
     setTraceLog((prev) => [...prev.slice(-39), entry]);
   }, []);
 
+  const requestSmoothScrollTest = useCallback((lineCount: number) => {
+    scrollTestIdRef.current += 1;
+    const safeLineCount = Math.max(1, Math.round(lineCount));
+    appendTrace(`scroll test request: ${safeLineCount} lines`);
+    setScrollTestRequest({
+      id: scrollTestIdRef.current,
+      type: 'lines',
+      lineCount: safeLineCount
+    });
+  }, [appendTrace]);
+
+  const requestResetScrollTest = useCallback(() => {
+    scrollTestIdRef.current += 1;
+    appendTrace('scroll test request: reset to top');
+    setScrollTestRequest({
+      id: scrollTestIdRef.current,
+      type: 'reset'
+    });
+  }, [appendTrace]);
+
   const resetAlignmentContext = useCallback(() => {
     localAlignmentBufferRef.current = createAlignmentBufferState();
     setTranscriptBuffer([]);
@@ -245,8 +284,36 @@ export default function App() {
   }, []);
 
   const onTraceScroll = useCallback((info: { sentenceIndex: number; didScroll: boolean; reason: string }) => {
-    appendTrace(`scroll s${info.sentenceIndex} ${info.didScroll ? 'SCROLLED' : 'NO-SCROLL'} (${info.reason})`);
+    const r = info.reason || '';
+    if (r.includes('assist cruise')) {
+      const ds = displaySettingsRef.current;
+      const extra = ds ? ` | assist continuous=${ds.continuousAssistScroll ? 1 : 0} speed=${ds.assistScrollSpeed} feel=${ds.assistCorrectionFeel}` : '';
+      appendTrace(`scroll s${info.sentenceIndex} ${info.didScroll ? 'SCROLLED' : 'NO-SCROLL'} (${r})${extra}`);
+    } else {
+      appendTrace(`scroll s${info.sentenceIndex} ${info.didScroll ? 'SCROLLED' : 'NO-SCROLL'} (${info.reason})`);
+    }
   }, [appendTrace]);
+
+  const onAssistStatus = useCallback((info: AssistStatusInfo) => {
+    setAssistStatus(info);
+    // also surface key changes in trace for diagnostics (but UI status is the primary per req)
+    if (info.state && info.state !== 'OFF') {
+      appendTrace(`assist status: ${info.state}${info.cruiseVelocityPxPerSec != null ? ` vel=${Math.round(info.cruiseVelocityPxPerSec)}px/s` : ''}${info.estimatedPaceLinesPerMin != null ? ` pace=${info.estimatedPaceLinesPerMin}lpm` : ''}`);
+    }
+  }, [appendTrace]);
+
+  const onAnchorDebug = useCallback((info: any) => {
+    setAnchorDebug(info);
+  }, []);
+
+  const onScrollAnimationStatus = useCallback((info: ScrollAnimationStatusInfo) => {
+    setScrollAnimationStatus(info);
+  }, []);
+
+  // Trace assist param changes (enabled/speed/feel) when user adjusts Display controls. Runs after appendTrace exists.
+  useEffect(() => {
+    appendTrace(`assist settings: continuous=${displaySettings.continuousAssistScroll ? 1 : 0} speed=${displaySettings.assistScrollSpeed} feel=${displaySettings.assistCorrectionFeel}`);
+  }, [displaySettings.continuousAssistScroll, displaySettings.assistScrollSpeed, displaySettings.assistCorrectionFeel, appendTrace]);
 
   const processDelta = useCallback((delta: TranscriptDelta) => {
     const raw = delta.text;
@@ -627,7 +694,8 @@ export default function App() {
 
   const playMock = useCallback(async () => {
     const lines = mockScript.split(/\r?\n/);
-    mockProviderRef.current.setScript(lines);
+    const intervalMs = slowMockRef.current ? 2800 : 950;
+    mockProviderRef.current.setScript(lines, intervalMs);
     setIsMockPlaying(true);
     if (followStateRef.current === 'manual' || followStateRef.current === 'paused') {
       setFollowState('following');
@@ -675,7 +743,9 @@ export default function App() {
           if (followStateRef.current === 'paused' || followStateRef.current === 'manual') {
             setFollowState('following');
           }
-          setControlsVisible(false);
+          if (displaySettings.autoHideControlsOnStart) {
+            setControlsVisible(false);
+          }
         } catch {
           // Provider status already carries the sanitized error; manual and mock remain usable.
         }
@@ -699,7 +769,9 @@ export default function App() {
           if (followStateRef.current === 'paused' || followStateRef.current === 'manual') {
             setFollowState('following');
           }
-          setControlsVisible(false);
+          if (displaySettings.autoHideControlsOnStart) {
+            setControlsVisible(false);
+          }
         } catch {
           // Provider status already carries the error; manual, mock, and OpenAI remain usable.
         }
@@ -1020,11 +1092,15 @@ export default function App() {
         onMockScriptChange={setMockScript}
         onPlayMock={playMock}
         onStopMock={stopMock}
+        slowMock={slowMock}
+        onSlowMockChange={setSlowMock}
         searchQuery={searchQuery}
         onSearchQueryChange={setSearchQuery}
         onSearchJump={searchJump}
         settings={displaySettings}
         onSettingsChange={setDisplaySettings}
+        onTestSmoothScroll={requestSmoothScrollTest}
+        onResetTestScroll={requestResetScrollTest}
         onToggleDebug={() => setDebugVisible((visible) => !visible)}
         onToggleFullScreen={toggleFullScreen}
         onToggleAlwaysOnTop={toggleAlwaysOnTop}
@@ -1035,6 +1111,9 @@ export default function App() {
         currentTokenIndex={currentTokenIndex}
         alignmentBufferDebug={alignmentBufferDebug}
         traceLog={traceLog}
+        assistStatus={assistStatus}
+        anchorDebug={anchorDebug}
+        scrollAnimationStatus={scrollAnimationStatus}
       />
       <div className="prompter-stage" ref={prompterStageRef}>
         <NarrationBar
@@ -1050,12 +1129,17 @@ export default function App() {
         <PrompterView
           model={manuscript}
           currentSentenceIndex={currentSentenceIndex}
+          currentTokenIndex={currentTokenIndex}
           followState={followState}
           confidence={alignment.confidence}
           settings={displaySettings}
           layoutMode={controlsVisible ? 'with-controls' : 'prompter-only'}
           assistScrollLagging={localQueueLagging}
+          scrollTestRequest={scrollTestRequest}
           onTraceScroll={onTraceScroll}
+          onAssistStatus={onAssistStatus}
+          onScrollAnimationStatus={onScrollAnimationStatus}
+          onAnchorDebug={onAnchorDebug}
         />
       </div>
     </div>

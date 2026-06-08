@@ -2,18 +2,23 @@ import { describe, expect, it } from 'vitest';
 import {
   assistSpeedToLinesPerMinute,
   computeAssistTargetVelocity,
+  computeCorrectionAnimationPlan,
   computeAssistCruiseStep,
+  DEFAULT_CORRECTION_MAX_DURATION_MS,
+  DEFAULT_CORRECTION_MIN_DURATION_MS,
   computePrompterScrollTarget,
   computeReadingZoneGeometry,
   correctionFeelToMotion,
+  easeInOutCubic,
   estimateAssistVelocityFromAnchors,
+  interpolateCorrectionScroll,
   isAnchorInReadingBand,
   stepPrompterScroll
 } from '../domain/prompterScroll';
 import { DEFAULT_DISPLAY_SETTINGS } from '../state/appStore';
 
 describe('prompter reading-zone geometry', () => {
-  it('places the default reading band around the vertical center', () => {
+  it('places the default reading band around the vertical center (thinner ~1.10x band)', () => {
     const geometry = computeReadingZoneGeometry({
       viewportHeight: 900,
       fontSizePx: 34,
@@ -21,13 +26,14 @@ describe('prompter reading-zone geometry', () => {
       readingZonePercent: 50
     });
 
-    expect(geometry.bandTop).toBeGreaterThan(390);
-    expect(geometry.bandBottom).toBeLessThan(510);
+    // Thin visual band (~1.06 * fontSize) for one glyph row.
+    expect(geometry.bandTop).toBeGreaterThan(425);
+    expect(geometry.bandBottom).toBeLessThan(475);
     expect(geometry.targetY).toBeGreaterThanOrEqual(geometry.bandTop);
     expect(geometry.targetY).toBeLessThanOrEqual(geometry.bandBottom);
   });
 
-  it('places the narration default band higher for real reading', () => {
+  it('places the narration default band higher for real reading (thinner band)', () => {
     const geometry = computeReadingZoneGeometry({
       viewportHeight: 900,
       fontSizePx: 34,
@@ -37,8 +43,9 @@ describe('prompter reading-zone geometry', () => {
 
     expect(DEFAULT_DISPLAY_SETTINGS.readingZonePercent).toBe(38);
     expect(DEFAULT_DISPLAY_SETTINGS.showActiveHighlight).toBe(false);
-    expect(geometry.bandTop).toBeGreaterThan(285);
-    expect(geometry.bandBottom).toBeLessThan(400);
+    // Higher on screen for narration % (thin ~1.06*font band).
+    expect(geometry.bandTop).toBeGreaterThan(310);
+    expect(geometry.bandBottom).toBeLessThan(362);
   });
 
   it('moves the band higher when the reading-zone percent is lower', () => {
@@ -71,16 +78,18 @@ describe('prompter reading-zone geometry', () => {
     expect(geometry.bottomSpacerPx).toBeGreaterThan(720 - geometry.targetY);
   });
 
-  it('treats near-target anchors as already inside the band', () => {
+  it('treats near-target anchors as already inside the band (line-based deadband ~0.22 lh)', () => {
     const geometry = computeReadingZoneGeometry({
       viewportHeight: 800,
       fontSizePx: 34,
       lineHeight: 1.55,
       readingZonePercent: 50
     });
-
-    expect(isAnchorInReadingBand(geometry.targetY + 8, geometry, 18)).toBe(true);
-    expect(isAnchorInReadingBand(geometry.bandBottom + 42, geometry, 18)).toBe(false);
+    const linePx = geometry.lineHeightPx; // ~52.7
+    const dead = Math.max(6, Math.min(28, linePx * 0.22)); // ~11.6 px
+    // Near target (within ~0.6 * dead) still inside; far beyond band+dead is out.
+    expect(isAnchorInReadingBand(geometry.targetY + dead * 0.6, geometry, dead)).toBe(true);
+    expect(isAnchorInReadingBand(geometry.bandBottom + dead * 2.5, geometry, dead)).toBe(false);
   });
 });
 
@@ -135,6 +144,68 @@ describe('prompter scroll controller helpers', () => {
 
     expect(Math.abs(retargeted.nextScrollTop - first.nextScrollTop)).toBeLessThan(30);
     expect(retargeted.nextScrollTop).toBeLessThan(420);
+  });
+
+  it('plans deterministic cubic correction animations from distance and feel', () => {
+    const shortGentle = computeCorrectionAnimationPlan({
+      fromScrollTop: 100,
+      targetScrollTop: 150,
+      correctionFeelPercent: 20
+    });
+    const longGentle = computeCorrectionAnimationPlan({
+      fromScrollTop: 100,
+      targetScrollTop: 900,
+      correctionFeelPercent: 20
+    });
+    const longFirm = computeCorrectionAnimationPlan({
+      fromScrollTop: 100,
+      targetScrollTop: 900,
+      correctionFeelPercent: 85
+    });
+
+    expect(shortGentle.easingCurve).toBe('cubic ease-in-out');
+    expect(shortGentle.durationMs).toBeGreaterThanOrEqual(DEFAULT_CORRECTION_MIN_DURATION_MS);
+    expect(longGentle.durationMs).toBeGreaterThan(shortGentle.durationMs);
+    expect(longGentle.durationMs).toBeLessThanOrEqual(DEFAULT_CORRECTION_MAX_DURATION_MS);
+    expect(longFirm.durationMs).toBeLessThan(longGentle.durationMs);
+  });
+
+  it('keeps multi-line proof moves long enough to be visibly animated', () => {
+    const gentleFifteenLines = computeCorrectionAnimationPlan({
+      fromScrollTop: 0,
+      targetScrollTop: 780,
+      correctionFeelPercent: 10
+    });
+    const firmFifteenLines = computeCorrectionAnimationPlan({
+      fromScrollTop: 0,
+      targetScrollTop: 780,
+      correctionFeelPercent: 95
+    });
+
+    expect(gentleFifteenLines.durationMs).toBeGreaterThan(1700);
+    expect(firmFifteenLines.durationMs).toBeGreaterThan(900);
+    expect(firmFifteenLines.durationMs).toBeLessThan(gentleFifteenLines.durationMs);
+  });
+
+  it('interpolates eased correction scroll without overshoot', () => {
+    const plan = computeCorrectionAnimationPlan({
+      fromScrollTop: 100,
+      targetScrollTop: 500,
+      correctionFeelPercent: 45
+    });
+
+    const start = interpolateCorrectionScroll(plan, 0);
+    const middle = interpolateCorrectionScroll(plan, plan.durationMs / 2);
+    const end = interpolateCorrectionScroll(plan, plan.durationMs);
+
+    expect(easeInOutCubic(0)).toBe(0);
+    expect(easeInOutCubic(0.5)).toBeCloseTo(0.5, 6);
+    expect(easeInOutCubic(1)).toBe(1);
+    expect(start.nextScrollTop).toBe(100);
+    expect(middle.nextScrollTop).toBeGreaterThan(100);
+    expect(middle.nextScrollTop).toBeLessThan(500);
+    expect(end.nextScrollTop).toBe(500);
+    expect(end.done).toBe(true);
   });
 
   it('moves continuous assist scroll slowly and clamps at the bottom', () => {

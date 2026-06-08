@@ -620,6 +620,27 @@ textarea {
   gap: 7px;
 }
 
+.scroll-test-control {
+  display: grid;
+  gap: 7px;
+}
+
+.scroll-test-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.scroll-animation-status {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.scroll-animation-status.is-warning {
+  color: var(--warn);
+}
+
 .reading-zone-label,
 .toggle-row {
   display: flex;

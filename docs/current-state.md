@@ -19,6 +19,7 @@ Phase 1 is in progress. The app has Phase 0/0.5 manuscript alignment, torture-te
 - Local Whisper PCM/WAV chunking path: renderer encodes microphone samples as WAV and Electron main writes `.wav` temp files for the Python sidecar.
 - Bridge diagnostics for Electron preload, Local Whisper IPC, ping, preload path, preload existence, preload status, and preload errors.
 - Prompter reading zone uses a fixed higher-on-screen band, dynamic top/bottom manuscript spacers, visible Display tuning controls, and a custom `requestAnimationFrame` scroll controller instead of native smooth scrolling.
+- Correction scroll now uses a deterministic cubic ease-in-out plan with explicit from/target scrollTop, duration, easing curve, Correction feel, cancellation, reduced-motion, and frame-count diagnostics. The Display panel has scroll proof buttons for 1, 5, and 15-line tests plus reset so physical scroll feel can be tested without ASR or alignment.
 - Fresh sessions default `readingZonePercent` to 38 and active sentence highlighting off. The Display controls show the value as percent down from top, include Move up / Move down buttons, and migrate older bottom-half saved band positions once to the narration default.
 - Optional Assist Scroll is now predictive: high-confidence following matches become correction anchors, estimated reading pace drives gentle cruise between ASR chunks, and Display controls expose Assist speed plus Correction feel.
 - Prompter-first narration mode can hide the left control panel and keeps a minimal Start/Stop/status/mic-level overlay visible.
@@ -87,6 +88,7 @@ Sidecar readiness is now split:
 - Tune Local Whisper model/chunk defaults further from longer real narration sessions if needed.
 - Continue prompter reading-zone tuning after real narration sessions, especially band height and whether sentence top-edge targeting is enough for long wrapped sentences.
 - Evaluate predictive Assist Scroll in real narration; it is intentionally conservative and may need speed/correction tuning.
+- Use the Display panel scroll proof buttons to tune Correction feel before blaming ASR/alignment for motion feel.
 
 ## Local Whisper Manual Smoke-Test Steps
 

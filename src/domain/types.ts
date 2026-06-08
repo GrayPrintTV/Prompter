@@ -119,6 +119,38 @@ export type DisplaySettings = {
   assistScrollSpeed: number;
   assistCorrectionFeel: number;
   theme: 'dark' | 'light';
+  // Default false so Start does not hide controls during tuning/debug (manual Hide + shortcut still work).
+  autoHideControlsOnStart?: boolean;
+  // Conservative token lookahead for scroll target (confirmed + N). 0 = exact confirmed token (current behavior).
+  readingLookaheadTokens?: number;
+};
+
+export type AssistStatusInfo = {
+  enabled: boolean;
+  state: string; // e.g. 'OFF', 'ON, waiting for confident match', 'cruising', 'stopped: low confidence', 'slowed: Local Whisper lag', ...
+  reason?: string;
+  cruiseVelocityPxPerSec?: number;
+  estimatedPaceLinesPerMin?: number;
+};
+
+export type ScrollTestRequest = {
+  id: number;
+  type: 'lines' | 'reset';
+  lineCount?: number;
+};
+
+export type ScrollAnimationStatusInfo = {
+  reducedMotion: boolean;
+  status: string;
+  source?: 'live' | 'test';
+  reason?: string;
+  fromScrollTop?: number;
+  targetScrollTop?: number;
+  distancePx?: number;
+  durationMs?: number;
+  easingCurve?: string;
+  correctionFeelPercent?: number;
+  frameCount?: number;
 };
 
 export type LiveAsrConfigStatus = {

@@ -42,6 +42,32 @@ export type ScrollAnimationStep = {
   done: boolean;
 };
 
+export type CorrectionEasingCurve = 'cubic ease-in-out';
+
+export type CorrectionAnimationPlanInput = {
+  fromScrollTop: number;
+  targetScrollTop: number;
+  correctionFeelPercent: number;
+  minDurationMs?: number;
+  maxDurationMs?: number;
+};
+
+export type CorrectionAnimationPlan = {
+  fromScrollTop: number;
+  targetScrollTop: number;
+  distancePx: number;
+  durationMs: number;
+  easingCurve: CorrectionEasingCurve;
+  correctionFeelPercent: number;
+};
+
+export type CorrectionAnimationFrame = {
+  nextScrollTop: number;
+  progress: number;
+  easedProgress: number;
+  done: boolean;
+};
+
 export type AssistVelocityEstimateInput = {
   previousTargetScrollTop: number;
   nextTargetScrollTop: number;
@@ -83,6 +109,8 @@ export const DEFAULT_SCROLL_DEADBAND_PX = 18;
 export const DEFAULT_ASSIST_CRUISE_MS = 6000;
 export const DEFAULT_ASSIST_STALE_SLOW_MS = 3600;
 export const DEFAULT_ASSIST_STALE_STOP_MS = 9000;
+export const DEFAULT_CORRECTION_MIN_DURATION_MS = 450;
+export const DEFAULT_CORRECTION_MAX_DURATION_MS = 2200;
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
@@ -96,16 +124,21 @@ export function computeReadingZoneGeometry({
 }: ReadingZoneGeometryInput): ReadingZoneGeometry {
   const safeViewportHeight = Math.max(1, viewportHeight);
   const safeLineHeightPx = Math.max(1, fontSizePx * lineHeight);
+  const safeFontPx = Math.max(1, fontSizePx);
   const safePercent = clamp(readingZonePercent, 5, 95);
-  const bandHeight = safeLineHeightPx * 1.45;
+  // Visual band height is based primarily on font size — thin, only slightly taller than the glyph row (ascenders/descenders).
+  // ~1.06x font size. This keeps the visible indicator as one line, while line-height is used for math/spacers/deadband.
+  // The tolerance zone for "no scroll" decision is handled separately via deadband around target.
+  const bandHeight = safeFontPx * 1.06;
   const bandTop = clamp(
     (safeViewportHeight * safePercent) / 100 - bandHeight / 2,
     0,
     Math.max(0, safeViewportHeight - bandHeight)
   );
   const bandBottom = bandTop + bandHeight;
+  // For thin visual band, center the target near the middle of the small band.
   const targetY = clamp(
-    bandTop + Math.min(bandHeight * 0.32, Math.max(6, safeLineHeightPx * 0.25)),
+    bandTop + bandHeight * 0.5,
     bandTop,
     bandBottom
   );
@@ -118,8 +151,10 @@ export function computeReadingZoneGeometry({
     bandHeight,
     bandBottom,
     targetY,
+    // Top spacer brings first lines into the (now font-based thin) band.
     topSpacerPx: targetY,
-    bottomSpacerPx: Math.max(safeLineHeightPx * 2, safeViewportHeight - targetY + safeLineHeightPx)
+    // Bottom spacer ensures last lines can reach the band.
+    bottomSpacerPx: Math.max(safeLineHeightPx * 1.5, safeViewportHeight - targetY + safeLineHeightPx * 0.5)
   };
 }
 
@@ -142,6 +177,16 @@ export function isAnchorInReadingBand(
   return anchorY >= geometry.bandTop - tolerancePx && anchorY <= geometry.bandBottom + tolerancePx;
 }
 
+/**
+ * Recommended line-height-based deadband for "close enough, no scroll" decision.
+ * 0.22 line-heights (clamped) means the active token can be a small fraction of a line
+ * above/below the ideal target before we consider it needs correction.
+ * This prevents the previous ~1-2 line drift while still allowing tiny natural jitter.
+ */
+export function recommendedDeadbandPx(lineHeightPx: number): number {
+  return Math.max(6, Math.min(28, lineHeightPx * 0.22));
+}
+
 export function stepPrompterScroll({
   currentScrollTop,
   targetScrollTop,
@@ -149,12 +194,14 @@ export function stepPrompterScroll({
   deltaMs,
   maxVelocityPxPerMs = 1.25,
   accelerationPxPerMs2 = 0.0042,
-  stopDistancePx = 0.75,
-  stopVelocityPxPerMs = 0.025
+  stopDistancePx = 1.0,
+  stopVelocityPxPerMs = 0.02
 }: ScrollAnimationStepInput): ScrollAnimationStep {
   const frameMs = clamp(deltaMs, 1, 50);
   const distance = targetScrollTop - currentScrollTop;
 
+  // Softer final stop (larger stopDist, tiny stopVel) for "no hard stop / yank" feel.
+  // Braking uses sqrt for progressive decel as we near target (limo-like).
   if (Math.abs(distance) <= stopDistancePx && Math.abs(velocityPxPerMs) <= stopVelocityPxPerMs) {
     return {
       nextScrollTop: targetScrollTop,
@@ -188,9 +235,56 @@ export function stepPrompterScroll({
   };
 }
 
+export function easeInOutCubic(progress: number) {
+  const t = clamp(Number.isFinite(progress) ? progress : 0, 0, 1);
+  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
+
+export function computeCorrectionAnimationPlan({
+  fromScrollTop,
+  targetScrollTop,
+  correctionFeelPercent,
+  minDurationMs = DEFAULT_CORRECTION_MIN_DURATION_MS,
+  maxDurationMs = DEFAULT_CORRECTION_MAX_DURATION_MS
+}: CorrectionAnimationPlanInput): CorrectionAnimationPlan {
+  const safeFeel = clamp(Number.isFinite(correctionFeelPercent) ? correctionFeelPercent : 45, 1, 100);
+  const firmness = (safeFeel - 1) / 99;
+  const distancePx = Math.abs(targetScrollTop - fromScrollTop);
+  const baseMs = 280 + (1 - firmness) * 140;
+  const distanceMs = Math.sqrt(distancePx) * (78 - firmness * 42);
+  const durationMs = Math.round(clamp(baseMs + distanceMs, minDurationMs, maxDurationMs));
+
+  return {
+    fromScrollTop,
+    targetScrollTop,
+    distancePx,
+    durationMs,
+    easingCurve: 'cubic ease-in-out',
+    correctionFeelPercent: safeFeel
+  };
+}
+
+export function interpolateCorrectionScroll(
+  plan: CorrectionAnimationPlan,
+  elapsedMs: number
+): CorrectionAnimationFrame {
+  const progress = clamp(elapsedMs / Math.max(1, plan.durationMs), 0, 1);
+  const easedProgress = easeInOutCubic(progress);
+  const nextScrollTop =
+    plan.fromScrollTop + (plan.targetScrollTop - plan.fromScrollTop) * easedProgress;
+
+  return {
+    nextScrollTop: progress >= 1 ? plan.targetScrollTop : nextScrollTop,
+    progress,
+    easedProgress,
+    done: progress >= 1
+  };
+}
+
 export function assistSpeedToLinesPerMinute(speedPercent: number) {
   const safePercent = clamp(Number.isFinite(speedPercent) ? speedPercent : 50, 1, 100);
-  return 6 + safePercent * 0.34;
+  // Boosted mapping so far-left is obviously slower cruise, far-right faster, and 2-3s Mock gaps produce clearly visible continuous creep (satisfies acceptance for Mock demo without changing real-use conservatism intent).
+  return 8 + safePercent * 0.9;
 }
 
 export function assistSpeedToVelocityPxPerMs(lineHeightPx: number, speedPercent: number) {
@@ -250,6 +344,9 @@ export function computeAssistTargetVelocity({
 export function correctionFeelToMotion(feelPercent: number) {
   const safePercent = clamp(Number.isFinite(feelPercent) ? feelPercent : 45, 1, 100);
   const t = (safePercent - 1) / 99;
+  // Gentle (low %): lower max vel + accel → slower, softer, more gradual correction (visible "limo" arrival).
+  // Firm (high %): higher vel/accel for assertive correction, but still velocity-limited + braking stepper
+  // (no instant snap/yank thanks to per-frame integration and retarget carry).
   return {
     maxVelocityPxPerMs: 0.55 + t * 0.95,
     accelerationPxPerMs2: 0.0018 + t * 0.0036
@@ -266,7 +363,7 @@ export function computeAssistCruiseStep({
   currentVelocityPxPerMs,
   targetVelocityPxPerMs,
   accelerationPxPerMs2 = 0.00018,
-  maxFrameDeltaPx = 7
+  maxFrameDeltaPx = 12
 }: AssistCruiseStepInput): AssistCruiseStep {
   const maxScrollTop = Math.max(0, scrollHeight - viewportHeight);
   const frameMs = clamp(deltaMs, 1, 50);

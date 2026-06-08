@@ -40,6 +40,8 @@ The fixed reading band currently targets the top edge of the active sentence int
 
 Optional Assist Scroll is intentionally conservative and off by default. It now estimates reading pace from recent high-confidence correction anchors, cruises between ASR chunks, slows for stale confidence or Local Whisper lag, and stops on holds, lost/manual/paused/retake states, or low confidence. Its default speed, correction feel, stale timing, and lag slowdown may need tuning after longer audiobook sessions.
 
+The physical correction-scroll path can now be tested separately with the Display panel scroll proof buttons. Use those first when diagnosing motion feel; if the 1/5/15-line tests feel right but live following feels late, the likely culprit is ASR/alignment timing, lookahead, or Assist cruise tuning rather than the correction animation itself. If the tests jump instantly, check the Display panel reduced-motion status and the animation trace/status first.
+
 ## Generated and Local Files
 
 Build outputs, local env files, logs, temp audio chunks, Python caches, virtual environments, and `node_modules/` should remain uncommitted. Some smoke-test images under `logs/` may already be tracked from earlier work; do not remove tracked files unless the task explicitly asks.

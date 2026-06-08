@@ -8,6 +8,7 @@ import type {
   AlignmentBufferDebug,
   AlignmentResult,
   AsrProviderId,
+  AssistStatusInfo,
   DisplaySettings,
   FollowState,
   LiveAsrConfigStatus,
@@ -17,6 +18,7 @@ import type {
   LocalWhisperStatus,
   ManuscriptModel,
   MicCaptureState,
+  ScrollAnimationStatusInfo,
   TranscriptDelta
 } from '../domain/types';
 import { DEFAULT_DISPLAY_SETTINGS } from '../state/appStore';
@@ -63,11 +65,15 @@ type Props = {
   onMockScriptChange(text: string): void;
   onPlayMock(): void;
   onStopMock(): void;
+  slowMock?: boolean;
+  onSlowMockChange?(v: boolean): void;
   searchQuery: string;
   onSearchQueryChange(text: string): void;
   onSearchJump(): void;
   settings: DisplaySettings;
   onSettingsChange(settings: DisplaySettings): void;
+  onTestSmoothScroll(lineCount: number): void;
+  onResetTestScroll(): void;
   onToggleDebug(): void;
   onToggleFullScreen(): void;
   onToggleAlwaysOnTop(): void;
@@ -78,6 +84,9 @@ type Props = {
   currentTokenIndex: number;
   alignmentBufferDebug: AlignmentBufferDebug;
   traceLog?: string[];
+  assistStatus?: AssistStatusInfo | null;
+  anchorDebug?: any;
+  scrollAnimationStatus?: ScrollAnimationStatusInfo | null;
 };
 
 function formatMicCaptureState(state: MicCaptureState) {
@@ -182,11 +191,15 @@ export function ControlPanel(props: Props) {
     onMockScriptChange,
     onPlayMock,
     onStopMock,
+    slowMock,
+    onSlowMockChange,
     searchQuery,
     onSearchQueryChange,
     onSearchJump,
     settings,
     onSettingsChange,
+    onTestSmoothScroll,
+    onResetTestScroll,
     onToggleDebug,
     onToggleFullScreen,
     onToggleAlwaysOnTop,
@@ -196,7 +209,10 @@ export function ControlPanel(props: Props) {
     alignment,
     currentTokenIndex,
     alignmentBufferDebug,
-    traceLog
+    traceLog,
+    assistStatus,
+    anchorDebug,
+    scrollAnimationStatus
   } = props;
   const providerOptions = getAsrProviderOptions(liveConfig, localWhisperSettings);
   const selectedProviderLabel =
@@ -217,6 +233,18 @@ export function ControlPanel(props: Props) {
     : isListening ? 'Stop' : 'Start';
   const startStopDisabled = localBridgeUnavailable && !isListening;
   const localWhisperRunning = selectedAsrProviderId === 'local-whisper' && localWhisperStatus.listening;
+
+  // Derive LW lag for assist exposure (same conditions as App passes to PrompterView)
+  const chunk = localWhisperStatus.chunk || {};
+  const isLwLaggingForAssist =
+    selectedAsrProviderId === 'local-whisper' &&
+    (
+      (chunk.lastRealtimeFactor || 0) > 1.2 ||
+      (chunk.avgRealtimeFactor || 0) > 1.2 ||
+      (chunk.estimatedQueueLatencyMs || 0) > 4000 ||
+      (chunk.queueLength || 0) >= Math.max(1, chunk.maxQueueLength || 4)
+    );
+
   const setReadingZonePercent = (readingZonePercent: number) => {
     onSettingsChange({ ...settings, readingZonePercent: clampReadingZonePercent(readingZonePercent) });
   };
@@ -234,6 +262,11 @@ export function ControlPanel(props: Props) {
         DEFAULT_DISPLAY_SETTINGS.assistCorrectionFeel
       )
     });
+  };
+
+  const setReadingLookaheadTokens = (n: number) => {
+    const clamped = Math.max(0, Math.min(20, Math.round(n)));
+    onSettingsChange({ ...settings, readingLookaheadTokens: clamped });
   };
 
   // Collapsed state for developer-oriented sections. Core narration controls stay visible.
@@ -592,6 +625,16 @@ export function ControlPanel(props: Props) {
           />
           <span>Active sentence highlight</span>
         </label>
+        {/* Default off during tuning/debug so Start does not auto-hide controls.
+            Manual "Hide Controls" and shortcut still work. */}
+        <label className="toggle-row">
+          <input
+            type="checkbox"
+            checked={!!settings.autoHideControlsOnStart}
+            onChange={(event) => onSettingsChange({ ...settings, autoHideControlsOnStart: event.target.checked })}
+          />
+          <span>Auto-hide controls when starting narration</span>
+        </label>
         <div className="assist-scroll-control">
           <div className="reading-zone-label">
             <span>Assist speed</span>
@@ -650,13 +693,94 @@ export function ControlPanel(props: Props) {
             <span>Firm</span>
           </div>
         </div>
+        <div className="scroll-test-control">
+          <div className="reading-zone-label">
+            <span>Scroll test</span>
+            <strong>Same correction path</strong>
+          </div>
+          <div className="scroll-test-actions">
+            <button type="button" onClick={() => onTestSmoothScroll(1)}>Test smooth scroll: 1 line</button>
+            <button type="button" onClick={() => onTestSmoothScroll(5)}>Test smooth scroll: 5 lines</button>
+            <button type="button" onClick={() => onTestSmoothScroll(15)}>Test smooth scroll: 15 lines</button>
+            <button type="button" onClick={onResetTestScroll}>Reset test scroll position</button>
+          </div>
+          <div className={`scroll-animation-status ${scrollAnimationStatus?.reducedMotion ? 'is-warning' : ''}`}>
+            <div>
+              <strong>Motion:</strong>{' '}
+              {scrollAnimationStatus?.status ?? 'ready'} | Reduced motion:{' '}
+              {scrollAnimationStatus?.reducedMotion ? 'On' : 'Off'}
+            </div>
+            {scrollAnimationStatus?.distancePx !== undefined && (
+              <div>
+                {Math.round(scrollAnimationStatus.distancePx)}px
+                {scrollAnimationStatus.durationMs !== undefined ? ` over ${scrollAnimationStatus.durationMs}ms` : ''}
+                {scrollAnimationStatus.easingCurve ? ` | ${scrollAnimationStatus.easingCurve}` : ''}
+                {scrollAnimationStatus.correctionFeelPercent !== undefined ? ` | feel ${scrollAnimationStatus.correctionFeelPercent}%` : ''}
+                {scrollAnimationStatus.frameCount !== undefined ? ` | frames ${scrollAnimationStatus.frameCount}` : ''}
+              </div>
+            )}
+            {scrollAnimationStatus?.reason && <div>{scrollAnimationStatus.reason}</div>}
+          </div>
+        </div>
+        {/* Conservative token lookahead for scroll target (confirmed + N). 0 = target last confirmed token exactly.
+            Higher values move the reading band / Assist target earlier (reduces "one line late" feel).
+            Clamped 0-20. */}
+        <div className="assist-scroll-control">
+          <div className="reading-zone-label">
+            <span>Reading lookahead</span>
+            <strong>{settings.readingLookaheadTokens ?? 6} tokens</strong>
+          </div>
+          <div className="range-with-value">
+            <input
+              type="range"
+              min={0}
+              max={20}
+              step={1}
+              value={settings.readingLookaheadTokens ?? 6}
+              onChange={(event) => setReadingLookaheadTokens(Number(event.target.value))}
+              aria-label="Reading lookahead tokens"
+            />
+            <input
+              type="number"
+              min={0}
+              max={20}
+              value={settings.readingLookaheadTokens ?? 6}
+              onChange={(event) => setReadingLookaheadTokens(Number(event.target.value))}
+              aria-label="Reading lookahead tokens"
+            />
+          </div>
+          <div className="range-end-labels" aria-hidden="true">
+            <span>0 (exact)</span>
+            <span>20</span>
+          </div>
+        </div>
+        {/* Live visible anchor diagnostics (updated from prompter scroll decisions) */}
+        {anchorDebug && (
+          <div style={{ fontSize: '0.75em', marginTop: '6px', padding: '3px 4px', background: '#1a1f24', border: '1px solid #333', borderRadius: '2px' }}>
+            <div style={{ fontWeight: 'bold', marginBottom: '2px' }}>Anchor status (live)</div>
+            <div>Confirmed: {anchorDebug.confirmedToken} | Target: {anchorDebug.targetToken} (la={anchorDebug.lookahead})</div>
+            <div>Dist: {anchorDebug.distLines?.toFixed(2)} lines | Decision: {anchorDebug.decision}</div>
+            <div>Band: {anchorDebug.bandH?.toFixed(1)}px / {(anchorDebug.bandH / anchorDebug.fontSize)?.toFixed(2)}fs | Line: {anchorDebug.lineH?.toFixed(1)}px | Tol zone: {anchorDebug.toleranceZoneH?.toFixed(1)}px</div>
+          </div>
+        )}
         <div className="inline-actions">
           <button type="button" onClick={() => onSettingsChange({ ...settings, theme: settings.theme === 'dark' ? 'light' : 'dark' })}>{settings.theme === 'dark' ? 'Light' : 'Dark'}</button>
           <button type="button" onClick={() => onSettingsChange({ ...settings, continuousAssistScroll: !settings.continuousAssistScroll })}>
-            Assist Scroll {settings.continuousAssistScroll ? 'On' : 'Off'}
+            {settings.continuousAssistScroll ? 'Turn off Assist' : 'Turn on Assist'}
           </button>
           <button type="button" onClick={onToggleAlwaysOnTop}>Top</button>
           <button type="button" onClick={onToggleDebug}>{debugVisible ? 'Hide Debug' : 'Debug'}</button>
+        </div>
+        {/* Unambiguous Assist status (req 7,8): always shows ON/OFF + runtime state/vel/pace from cruise controller. Visible near Display controls. */}
+        <div style={{ fontSize: '0.85em', marginTop: '4px', padding: '2px 4px', border: '1px solid #555', borderRadius: '3px' }}>
+          <strong>
+            Assist: {settings.continuousAssistScroll ? 'ON' : 'OFF'}
+          </strong>
+          {assistStatus && assistStatus.state !== 'OFF' && (
+            <> — {assistStatus.state}{assistStatus.cruiseVelocityPxPerSec != null ? ` • ${assistStatus.cruiseVelocityPxPerSec} px/sec` : ''}{assistStatus.estimatedPaceLinesPerMin != null ? ` • ${assistStatus.estimatedPaceLinesPerMin} lines/min` : ''}</>
+          )}
+          {!assistStatus && settings.continuousAssistScroll && <span> (waiting for update)</span>}
+          {settings.continuousAssistScroll && isLwLaggingForAssist && <span style={{ color: '#f90' }}> • LW lag: cruise slowed</span>}
         </div>
       </section>
 
@@ -782,6 +906,14 @@ export function ControlPanel(props: Props) {
                     <button type="button" onClick={onPlayMock} disabled={isMockPlaying}>Play Mock</button>
                     <button type="button" onClick={onStopMock} disabled={!isMockPlaying}>Stop Mock</button>
                   </div>
+                  <label style={{ fontSize: '0.85em', display: 'inline-flex', alignItems: 'center', gap: '4px', marginTop: '4px' }}>
+                    <input
+                      type="checkbox"
+                      checked={!!slowMock}
+                      onChange={(e) => onSlowMockChange?.(e.target.checked)}
+                    />
+                    Slow gaps (~3s) — demo cruise between chunks
+                  </label>
                 </div>
               )}
             </details>
