@@ -8,6 +8,7 @@ import {
 } from '../asr/LocalWhisperAsrProvider';
 import { OpenAiRealtimeAsrProvider } from '../asr/OpenAiRealtimeAsrProvider';
 import { coerceSelectedProvider, getAsrProviderOptions, isLocalWhisperConfigured } from '../asr/providerRegistry';
+import localWhisperPcmWorkletSource from '../asr/localWhisperPcmWorklet.js?raw';
 import { getActiveAsrTranscriptHistory } from '../components/ControlPanel';
 import type {
   ElectronBridgeDiagnostics,
@@ -17,6 +18,7 @@ import type {
 } from '../domain/types';
 
 const UNCONFIGURED_LIVE: LiveAsrConfigStatus = {
+  enabled: false,
   configured: false,
   providerId: 'openai-realtime',
   model: 'gpt-4o-transcribe',
@@ -26,6 +28,7 @@ const UNCONFIGURED_LIVE: LiveAsrConfigStatus = {
 
 const CONFIGURED_LIVE: LiveAsrConfigStatus = {
   ...UNCONFIGURED_LIVE,
+  enabled: true,
   configured: true
 };
 
@@ -61,18 +64,32 @@ const BRIDGE_OK: ElectronBridgeDiagnostics = {
 };
 
 describe('ASR provider selection', () => {
-  it('keeps manual and mock available while disabling live Realtime until configured', () => {
+  it('shows Manual, Mock, and Local Whisper while Realtime is disabled by default', () => {
     const options = getAsrProviderOptions(UNCONFIGURED_LIVE);
-    expect(options.find((option) => option.id === 'manual')?.enabled).toBe(true);
-    expect(options.find((option) => option.id === 'mock')?.enabled).toBe(true);
-    expect(options.find((option) => option.id === 'openai-realtime')?.enabled).toBe(false);
+    expect(options.map((option) => option.id)).toEqual(['manual', 'mock', 'local-whisper']);
     expect(coerceSelectedProvider('openai-realtime', UNCONFIGURED_LIVE)).toBe('manual');
   });
 
-  it('allows selecting live Realtime when configured', () => {
+  it('shows experimental Realtime only when explicitly enabled', () => {
     const options = getAsrProviderOptions(CONFIGURED_LIVE);
     expect(options.find((option) => option.id === 'openai-realtime')?.enabled).toBe(true);
+    expect(options.find((option) => option.id === 'openai-realtime')?.label).toContain('Experimental');
     expect(coerceSelectedProvider('openai-realtime', CONFIGURED_LIVE)).toBe('openai-realtime');
+  });
+
+  it('shows enabled-but-unconfigured Realtime as unavailable without hiding normal providers', () => {
+    const options = getAsrProviderOptions({
+      ...UNCONFIGURED_LIVE,
+      enabled: true
+    });
+
+    expect(options.map((option) => option.id)).toEqual([
+      'manual',
+      'mock',
+      'local-whisper',
+      'openai-realtime'
+    ]);
+    expect(options.find((option) => option.id === 'openai-realtime')?.enabled).toBe(false);
   });
 
   it('registers Local Whisper when Python and model settings are present', () => {
@@ -92,6 +109,160 @@ describe('ASR provider selection', () => {
 });
 
 describe('OpenAI Realtime ASR provider', () => {
+  function realtimeStartupHarness(exchangeError?: Error) {
+    const createOfferSdp = [
+      'v=0',
+      'o=- 1 2 IN IP4 127.0.0.1',
+      's=-',
+      't=0 0',
+      'm=audio 9 UDP/TLS/RTP/SAVPF 111',
+      ''
+    ].join('\r\n');
+    const localDescriptionSdp = [
+      'v=0',
+      'o=- 3 4 IN IP4 127.0.0.1',
+      's=-',
+      't=0 0',
+      'm=audio 9 UDP/TLS/RTP/SAVPF 111',
+      'a=sendrecv',
+      ''
+    ].join('\r\n');
+    const track = { stop: vi.fn() };
+    const stream = {
+      getAudioTracks: vi.fn(() => [track]),
+      getTracks: vi.fn(() => [track])
+    } as unknown as MediaStream;
+    const dataChannelListeners = new Map<string, EventListener>();
+    const dataChannel = {
+      readyState: 'open',
+      addEventListener: vi.fn((type: string, listener: EventListener) => {
+        dataChannelListeners.set(type, listener);
+      }),
+      send: vi.fn(),
+      close: vi.fn()
+    } as unknown as RTCDataChannel;
+    const peerConnection = {
+      connectionState: 'new',
+      localDescription: null as RTCSessionDescription | null,
+      createDataChannel: vi.fn(() => dataChannel),
+      addEventListener: vi.fn(),
+      addTrack: vi.fn(),
+      createOffer: vi.fn(async () => ({ type: 'offer' as const, sdp: createOfferSdp })),
+      setLocalDescription: vi.fn(async () => {
+        Object.defineProperty(peerConnection, 'localDescription', {
+          value: {
+            type: 'offer',
+            sdp: localDescriptionSdp,
+            toJSON: () => ({ type: 'offer', sdp: localDescriptionSdp })
+          },
+          configurable: true
+        });
+      }),
+      setRemoteDescription: vi.fn(async () => undefined),
+      close: vi.fn()
+    } as unknown as RTCPeerConnection;
+    const bridge = {
+      getOpenAiRealtimeConfigStatus: vi.fn(async () => CONFIGURED_LIVE),
+      exchangeOpenAiRealtimeSdp: vi.fn(async (_offerSdp: string) => {
+        if (exchangeError) throw exchangeError;
+        return {
+          answerSdp: 'v=0\r\no=openai-answer',
+          endpointLabel: 'OpenAI /v1/realtime/calls',
+          model: 'gpt-realtime-whisper'
+        };
+      })
+    };
+    const provider = new OpenAiRealtimeAsrProvider({
+      bridge,
+      getUserMedia: vi.fn(async () => stream),
+      createPeerConnection: () => peerConnection
+    });
+
+    return {
+      provider,
+      bridge,
+      peerConnection,
+      dataChannel,
+      dataChannelListeners,
+      createOfferSdp,
+      localDescriptionSdp
+    };
+  }
+
+  it('does not request microphone access or SDP exchange while the experimental flag is disabled', async () => {
+    const getUserMedia = vi.fn();
+    const exchangeOpenAiRealtimeSdp = vi.fn();
+    const provider = new OpenAiRealtimeAsrProvider({
+      bridge: {
+        getOpenAiRealtimeConfigStatus: vi.fn(async () => UNCONFIGURED_LIVE),
+        exchangeOpenAiRealtimeSdp
+      },
+      getUserMedia
+    });
+
+    await expect(provider.start()).rejects.toThrow('experimental and disabled');
+    expect(getUserMedia).not.toHaveBeenCalled();
+    expect(exchangeOpenAiRealtimeSdp).not.toHaveBeenCalled();
+  });
+
+  it('exchanges the browser SDP offer through Electron IPC instead of renderer fetch', async () => {
+    const { provider, bridge, peerConnection, createOfferSdp, localDescriptionSdp } = realtimeStartupHarness();
+
+    await provider.start();
+
+    expect(localDescriptionSdp).not.toBe(createOfferSdp);
+    expect(localDescriptionSdp.endsWith('\r\n')).toBe(true);
+    expect(bridge.exchangeOpenAiRealtimeSdp).toHaveBeenCalledWith(localDescriptionSdp);
+    expect(peerConnection.setRemoteDescription).toHaveBeenCalledWith({
+      type: 'answer',
+      sdp: 'v=0\r\no=openai-answer'
+    });
+    expect(provider.getStatus()).toBe('listening');
+  });
+
+  it('rejects malformed SDP before calling the Electron OpenAI exchange', async () => {
+    const { provider, bridge, peerConnection } = realtimeStartupHarness();
+    peerConnection.setLocalDescription = vi.fn(async () => {
+      Object.defineProperty(peerConnection, 'localDescription', {
+        value: { type: 'offer', sdp: '' },
+        configurable: true
+      });
+    });
+
+    await expect(provider.start()).rejects.toThrow('empty SDP offer before OpenAI POST');
+    expect(bridge.exchangeOpenAiRealtimeSdp).not.toHaveBeenCalled();
+  });
+
+  it('commits WebRTC audio periodically for gpt-realtime-whisper transcription', async () => {
+    vi.useFakeTimers();
+    try {
+      const { provider, dataChannel, dataChannelListeners } = realtimeStartupHarness();
+      await provider.start();
+
+      dataChannelListeners.get('open')?.(new Event('open'));
+      await vi.advanceTimersByTimeAsync(2000);
+
+      expect(dataChannel.send).toHaveBeenCalledWith(
+        JSON.stringify({ type: 'input_audio_buffer.commit' })
+      );
+      await provider.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('surfaces the IPC SDP exchange stage and sanitized main-process HTTP error', async () => {
+    const { provider } = realtimeStartupHarness(
+      new Error('OpenAI Realtime calls POST failed: 401 Unauthorized. OpenAI authentication failed.')
+    );
+
+    await expect(provider.start()).rejects.toThrow(
+      "OpenAI Realtime step 'IPC SDP exchange' failed"
+    );
+    expect(provider.getConnectionStatus().errorMessage).toContain('401 Unauthorized');
+    expect(provider.getConnectionStatus().errorMessage).not.toBe('Failed to fetch');
+  });
+
   it('hands transcription events off as normal TranscriptDelta objects', () => {
     const provider = new OpenAiRealtimeAsrProvider({ now: () => 1234 });
     const deltas: TranscriptDelta[] = [];
@@ -138,6 +309,46 @@ describe('OpenAI Realtime ASR provider', () => {
 });
 
 describe('Local Whisper ASR provider', () => {
+  it('accumulates mono worklet input into exact target-sized transferable chunks', () => {
+    const postMessage = vi.fn();
+    class FakeAudioWorkletProcessor {
+      port = { postMessage };
+    }
+    let Processor!: new (options: { processorOptions: { targetSamples: number } }) => {
+      process(inputs: Float32Array[][]): boolean;
+    };
+    const registerProcessor = vi.fn((_name: string, processorClass: typeof Processor) => {
+      Processor = processorClass;
+    });
+    const loadModule = new Function(
+      'AudioWorkletProcessor',
+      'sampleRate',
+      'registerProcessor',
+      localWhisperPcmWorkletSource
+    );
+    loadModule(FakeAudioWorkletProcessor, 48000, registerProcessor);
+
+    const processor = new Processor({ processorOptions: { targetSamples: 5 } });
+    expect(processor.process([[new Float32Array([0.1, 0.2, 0.3])]])).toBe(true);
+    expect(postMessage).not.toHaveBeenCalled();
+    expect(processor.process([[new Float32Array([0.4, 0.5, 0.6, 0.7])]])).toBe(true);
+
+    expect(registerProcessor).toHaveBeenCalledWith(
+      'local-whisper-pcm-processor',
+      expect.any(Function)
+    );
+    const [message, transfer] = postMessage.mock.calls[0];
+    expect(message.type).toBe('chunk');
+    expect(Array.from(message.samples)).toEqual([
+      expect.closeTo(0.1),
+      expect.closeTo(0.2),
+      expect.closeTo(0.3),
+      expect.closeTo(0.4),
+      expect.closeTo(0.5)
+    ]);
+    expect(transfer).toEqual([message.samples.buffer]);
+  });
+
   function localWhisperBridge(overrides: Partial<typeof window.prompterApi> = {}) {
     return {
       ping: vi.fn(() => 'pong'),
@@ -200,6 +411,71 @@ describe('Local Whisper ASR provider', () => {
     };
   }
 
+  function fakeAudioWorkletCapture(sampleRate = 1000) {
+    const meterSource = {
+      connect: vi.fn(),
+      disconnect: vi.fn()
+    };
+    const analyser = {
+      fftSize: 1024,
+      getByteTimeDomainData: vi.fn((samples: Uint8Array) => samples.fill(128))
+    };
+    const meterContext = {
+      sampleRate,
+      createAnalyser: vi.fn(() => analyser),
+      createMediaStreamSource: vi.fn(() => meterSource),
+      resume: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined)
+    } as unknown as AudioContext;
+
+    const captureSource = {
+      connect: vi.fn(),
+      disconnect: vi.fn()
+    };
+    const muteNode = {
+      gain: { value: 1 },
+      connect: vi.fn(),
+      disconnect: vi.fn()
+    };
+    const captureContext = {
+      sampleRate,
+      audioWorklet: {},
+      destination: {},
+      createMediaStreamSource: vi.fn(() => captureSource),
+      createGain: vi.fn(() => muteNode),
+      resume: vi.fn(async () => undefined),
+      close: vi.fn(async () => undefined)
+    } as unknown as AudioContext;
+
+    const port = {
+      onmessage: null as ((event: MessageEvent<unknown>) => void) | null,
+      onmessageerror: null as (() => void) | null,
+      close: vi.fn()
+    };
+    const workletNode = {
+      port,
+      onprocessorerror: null as (() => void) | null,
+      connect: vi.fn(),
+      disconnect: vi.fn()
+    } as unknown as AudioWorkletNode;
+    const createAudioContext = vi
+      .fn<() => AudioContext | null>()
+      .mockReturnValueOnce(meterContext)
+      .mockReturnValueOnce(captureContext);
+    const loadAudioWorkletModule = vi.fn(async () => undefined);
+    const createAudioWorkletNode = vi.fn(() => workletNode);
+
+    return {
+      meterContext,
+      captureContext,
+      port,
+      workletNode,
+      createAudioContext,
+      loadAudioWorkletModule,
+      createAudioWorkletNode
+    };
+  }
+
   it('hands sidecar transcript results off as normal TranscriptDelta objects', async () => {
     const provider = new LocalWhisperAsrProvider(LOCAL_WHISPER_SETTINGS, { now: () => 5678 });
     const deltas: TranscriptDelta[] = [];
@@ -222,6 +498,78 @@ describe('Local Whisper ASR provider', () => {
     const audioData = encodePcmWav(new Float32Array([0, 0.5, -0.5]), 16000);
     expect(audioHeaderSignature(audioData)).toBe('RIFF/WAVE');
     expect(new DataView(audioData).getUint32(24, true)).toBe(16000);
+  });
+
+  it('captures mono PCM through AudioWorklet and preserves WAV diagnostics', async () => {
+    const bridge = localWhisperBridge();
+    const audio = fakeAudioWorkletCapture();
+    const provider = new LocalWhisperAsrProvider(LOCAL_WHISPER_SETTINGS, {
+      bridge,
+      getUserMedia: vi.fn(async () => fakeMediaStream()),
+      createAudioContext: audio.createAudioContext,
+      loadAudioWorkletModule: audio.loadAudioWorkletModule,
+      createAudioWorkletNode: audio.createAudioWorkletNode,
+      requestAnimationFrame: vi.fn(() => 1),
+      cancelAnimationFrame: vi.fn()
+    });
+
+    await provider.start();
+
+    expect(audio.loadAudioWorkletModule).toHaveBeenCalledWith(audio.captureContext);
+    expect(audio.createAudioWorkletNode).toHaveBeenCalledWith(
+      audio.captureContext,
+      'local-whisper-pcm-processor',
+      { processorOptions: { targetSamples: 4000 } }
+    );
+
+    audio.port.onmessage?.({
+      data: {
+        type: 'chunk',
+        samples: new Float32Array(4000).fill(0.2)
+      }
+    } as MessageEvent<unknown>);
+
+    await vi.waitFor(() => {
+      expect(bridge.transcribeLocalWhisperChunk).toHaveBeenCalled();
+    });
+    expect(bridge.transcribeLocalWhisperChunk).toHaveBeenCalledWith(
+      expect.objectContaining({
+        audioData: expect.any(ArrayBuffer),
+        mimeType: 'audio/wav',
+        format: 'wav',
+        extension: 'wav',
+        sampleRate: 1000,
+        durationSeconds: 4,
+        headerSignature: 'RIFF/WAVE'
+      })
+    );
+    expect(provider.getConnectionStatus().mic.log.join('\n')).toContain(
+      'AudioWorklet PCM WAV capture armed'
+    );
+
+    await provider.stop();
+    expect(audio.port.close).toHaveBeenCalled();
+  });
+
+  it('fails clearly when AudioWorklet setup is unavailable', async () => {
+    const bridge = localWhisperBridge();
+    const audio = fakeAudioWorkletCapture();
+    audio.loadAudioWorkletModule.mockRejectedValueOnce(new Error('module load failed'));
+    const provider = new LocalWhisperAsrProvider(LOCAL_WHISPER_SETTINGS, {
+      bridge,
+      getUserMedia: vi.fn(async () => fakeMediaStream()),
+      createAudioContext: audio.createAudioContext,
+      loadAudioWorkletModule: audio.loadAudioWorkletModule,
+      createAudioWorkletNode: audio.createAudioWorkletNode,
+      requestAnimationFrame: vi.fn(() => 1),
+      cancelAnimationFrame: vi.fn()
+    });
+
+    await expect(provider.start()).rejects.toThrow(
+      'AudioWorklet PCM capture setup failed: module load failed'
+    );
+    expect(audio.createAudioWorkletNode).not.toHaveBeenCalled();
+    expect(provider.getConnectionStatus().errorMessage).toContain('AudioWorklet PCM capture setup failed');
   });
 
   it('does not treat provider status text as ASR transcript text', async () => {
@@ -254,6 +602,54 @@ describe('Local Whisper ASR provider', () => {
     expect(provider.getConnectionStatus().mic.captureState).toBe('not-requested');
     expect(provider.getConnectionStatus().mic.errorMessage).toContain('Setup failed before microphone request');
     expect(provider.getConnectionStatus().mic.log.join('\n')).toContain('before getUserMedia');
+  });
+
+  it('clears stale provider, microphone, and queue errors in the first starting status', async () => {
+    const startLocalWhisper = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('Previous startup failed.'))
+      .mockResolvedValue({
+        ...DEFAULT_LOCAL_WHISPER_STATUS,
+        sidecarRunning: true,
+        modelPhase: 'ready' as const,
+        status: 'listening' as const,
+        listening: true
+      });
+    const bridge = localWhisperBridge({ startLocalWhisper });
+    const pcm = fakePcmRecorder();
+    const provider = new LocalWhisperAsrProvider(LOCAL_WHISPER_SETTINGS, {
+      bridge,
+      getUserMedia: vi.fn(async () => fakeMediaStream()),
+      createPcmChunkRecorder: pcm.create
+    });
+
+    await expect(provider.start()).rejects.toThrow('Previous startup failed.');
+    const statuses: Array<{
+      status: string;
+      errorMessage: string | null;
+      micError: string | null;
+      warningMessage: string | null;
+    }> = [];
+    const off = provider.onConnectionStatus((status) => {
+      statuses.push({
+        status: status.status,
+        errorMessage: status.errorMessage,
+        micError: status.mic.errorMessage,
+        warningMessage: status.chunk.warningMessage
+      });
+    });
+    statuses.length = 0;
+
+    await provider.start();
+
+    expect(statuses[0]).toEqual({
+      status: 'starting',
+      errorMessage: null,
+      micError: null,
+      warningMessage: null
+    });
+    off();
+    await provider.stop();
   });
 
   it('keeps Start Following unavailable when the Electron bridge is absent', async () => {

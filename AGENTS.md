@@ -8,9 +8,9 @@ The product center is known-script alignment, not speech recognition by itself. 
 
 ## Architecture Summary
 
-- `electron/main.ts`: Electron shell, file dialogs, window controls, OpenAI Realtime secret-bearing setup, Local Whisper sidecar process, IPC handlers, bridge diagnostics.
+- `electron/main.ts`: Electron shell, file dialogs, window controls, Local Whisper sidecar process, IPC handlers, bridge diagnostics, and the default-off experimental OpenAI Realtime boundary.
 - `electron/preload.cts`: CommonJS preload bridge exposed as `window.prompterApi` with `contextBridge`. It must compile to `dist-electron/preload.cjs`.
-- `src/asr/`: ASR provider boundary and providers for Manual, Mock, OpenAI Realtime, and Local Whisper.
+- `src/asr/`: ASR provider boundary and providers for Manual, Mock, Local Whisper, and parked experimental OpenAI Realtime.
 - `src/domain/`: manuscript model, normalization, tokenization, fuzzy alignment, follow/scroll state.
 - `src/components/`: prompter UI, control panel, debug panel, torture-test panel.
 - `src/state/`: default settings and local session persistence.
@@ -19,7 +19,7 @@ The product center is known-script alignment, not speech recognition by itself. 
 ## Do-Not-Break Rules
 
 - Do not change the alignment engine for ASR plumbing work unless explicitly asked.
-- Do not remove or regress Manual, Mock, OpenAI Realtime, or Local Whisper providers.
+- Do not remove or regress Manual, Mock, or Local Whisper providers. Keep OpenAI Realtime default-off and experimental unless a task explicitly targets it.
 - Keep ASR provider logic behind the provider boundary.
 - Keep `TranscriptDelta` handoff shape consistent across providers.
 - Keep `contextIsolation: true` and `nodeIntegration: false`.
@@ -40,7 +40,7 @@ If the Codex shell lacks normal `npm` on `PATH`, use the legacy workaround in `R
 ## Security Rules
 
 - Do not commit API keys, `.env`, `.env.local`, microphone recordings, temp audio chunks, or logs.
-- Renderer may receive ephemeral OpenAI client secrets only, never the real API key.
+- OpenAI API keys must remain in Electron main/environment handling and must never reach renderer state or logs.
 - Electron main owns secret-bearing setup and Local Whisper sidecar process control.
 - Do not print secrets to logs or diagnostics.
 - Confirm `.gitignore` coverage before adding new local config, logs, or generated assets.

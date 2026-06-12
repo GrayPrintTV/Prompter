@@ -81,7 +81,11 @@ export function evaluateProvisionalAlignmentBuffer(
   state: AlignmentBufferState,
   deltaTokens: string[],
   currentTokenIndex: number,
-  options: { widenWindow?: boolean } = {}
+  options: {
+    widenWindow?: boolean;
+    backwardWindow?: number;
+    forwardWindow?: number;
+  } = {}
 ): AlignmentBufferDecision {
   const candidateTokens = clampRecent(
     [...state.committedTokens, ...state.provisionalTokens, ...deltaTokens],
@@ -89,10 +93,14 @@ export function evaluateProvisionalAlignmentBuffer(
   );
   const result = alignTranscript(model, candidateTokens, currentTokenIndex, {
     widenWindow: options.widenWindow,
+    backwardWindow: options.backwardWindow,
+    forwardWindow: options.forwardWindow,
     maxTranscriptTokens: MAX_COMMITTED_TOKENS
   });
   const deltaResult = alignTranscript(model, deltaTokens, currentTokenIndex, {
     widenWindow: options.widenWindow,
+    backwardWindow: options.backwardWindow,
+    forwardWindow: options.forwardWindow,
     maxTranscriptTokens: MAX_COMMITTED_TOKENS
   });
 

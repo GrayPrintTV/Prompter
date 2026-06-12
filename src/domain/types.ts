@@ -114,6 +114,7 @@ export type DisplaySettings = {
   textWidthCh: number;
   paragraphSpacingEm: number;
   readingZonePercent: number;
+  readingZoneHeightLines: number;
   showActiveHighlight: boolean;
   continuousAssistScroll: boolean;
   assistScrollSpeed: number;
@@ -154,6 +155,7 @@ export type ScrollAnimationStatusInfo = {
 };
 
 export type LiveAsrConfigStatus = {
+  enabled: boolean;
   configured: boolean;
   providerId: 'openai-realtime';
   model: string;
@@ -161,10 +163,9 @@ export type LiveAsrConfigStatus = {
   promptConfigured: boolean;
 };
 
-export type OpenAiRealtimeClientSession = {
-  clientSecret: string;
-  expiresAt?: number;
-  webRtcUrl: string;
+export type OpenAiRealtimeSdpAnswer = {
+  answerSdp: string;
+  endpointLabel: string;
   model: string;
 };
 

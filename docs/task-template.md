@@ -35,7 +35,7 @@ Adjust this list for the actual task.
 ## Constraints / Do Not Change
 
 - Do not change the alignment engine unless the task explicitly asks.
-- Do not remove Manual, Mock, OpenAI Realtime, or Local Whisper providers.
+- Do not remove Manual, Mock, or Local Whisper providers. Leave parked OpenAI Realtime disabled unless the task explicitly targets it.
 - Do not expose API keys or secrets to renderer code.
 - Do not commit local env files, logs, temp audio, or generated build output.
 - Preserve existing Phase 0/0.5 behavior unless the task requires otherwise.

@@ -9,13 +9,18 @@ import {
   computeAssistTargetVelocity,
   computeCorrectionAnimationPlan,
   computePrompterScrollTarget,
+  computeRenderedLineCenterY,
   computeReadingZoneGeometry,
   estimateAssistVelocityFromAnchors,
   interpolateCorrectionScroll,
-  isAnchorInReadingBand,
+  isAnchorNearReadingTarget,
   type CorrectionAnimationPlan,
   type ReadingZoneGeometry
 } from '../domain/prompterScroll';
+import {
+  nearestVisibleTokenIndex,
+  type VisibleReacquireSource
+} from '../domain/manualFollow';
 import type { AssistStatusInfo } from '../domain/types';
 import { HIGH_CONFIDENCE, shouldScrollForState } from '../domain/scrollModel';
 import type {
@@ -39,6 +44,20 @@ type Props = {
   onTraceScroll?: (info: { sentenceIndex: number; didScroll: boolean; reason: string }) => void;
   onAssistStatus?: (info: AssistStatusInfo) => void;
   onScrollAnimationStatus?: (info: ScrollAnimationStatusInfo) => void;
+  manualScrollTrackingEnabled?: boolean;
+  visibleReacquireActive?: boolean;
+  visibleReacquireSource?: VisibleReacquireSource;
+  startupVisibleAnchorRequestId?: number;
+  onStartupVisibleAnchor?: (info: {
+    requestId: number;
+    visibleTokenIndex: number;
+    scrollTop: number;
+  }) => void;
+  onManualScroll?: (info: {
+    visibleTokenIndex: number;
+    scrollTop: number;
+    direction: 'backward' | 'forward' | 'stationary';
+  }) => void;
   onAnchorDebug?: (info: {
     confirmedToken: number;
     targetToken: number;
@@ -46,11 +65,31 @@ type Props = {
     distLines: number;
     decision: string;
     bandH: number;
-    fontSize: number;
+    bandHeightLines: number;
     lineH: number;
+    targetY: number;
+    targetOffsetPx: number;
+    targetOffsetLines: number;
     toleranceZoneH: number;
   }) => void;
 };
+
+function visibleTokenAtReadingBand(
+  container: HTMLDivElement,
+  geometry: ReadingZoneGeometry
+) {
+  const containerRect = container.getBoundingClientRect();
+  const positions = Array.from(
+    container.querySelectorAll<HTMLElement>('[data-token-index]')
+  ).map((element) => {
+    const rect = element.getClientRects()[0] ?? element.getBoundingClientRect();
+    return {
+      tokenIndex: Number(element.dataset.tokenIndex),
+      topInViewport: computeRenderedLineCenterY(rect.top - containerRect.top, rect.height)
+    };
+  });
+  return nearestVisibleTokenIndex(positions, geometry.targetY);
+}
 
 export function PrompterView({
   model,
@@ -65,6 +104,12 @@ export function PrompterView({
   onTraceScroll,
   onAssistStatus,
   onScrollAnimationStatus,
+  manualScrollTrackingEnabled = false,
+  visibleReacquireActive = false,
+  visibleReacquireSource,
+  startupVisibleAnchorRequestId = 0,
+  onStartupVisibleAnchor,
+  onManualScroll,
   onAnchorDebug
 }: Props) {
   const paneRef = useRef<HTMLElement | null>(null);
@@ -116,6 +161,13 @@ export function PrompterView({
     lastSentenceIndex: -1,
     estimatedVelocityPxPerMs: 0
   });
+  const lastProgrammaticScrollRef = useRef<{ scrollTop: number; timestampMs: number } | null>(null);
+  const manualScrollIntentUntilRef = useRef(0);
+  const manualScrollDebounceRef = useRef<number | null>(null);
+  const lastObservedScrollTopRef = useRef(0);
+  const pendingManualDirectionRef = useRef<'backward' | 'forward' | 'stationary'>('stationary');
+  const manualScrollHoldRef = useRef(false);
+  const lastStartupVisibleAnchorRequestRef = useRef(0);
   const latestMotionRef = useRef({
     followState,
     confidence,
@@ -123,7 +175,9 @@ export function PrompterView({
     assistScrollSpeed: settings.assistScrollSpeed,
     assistCorrectionFeel: settings.assistCorrectionFeel,
     readingLookaheadTokens: settings.readingLookaheadTokens,
-    assistScrollLagging
+    assistScrollLagging,
+    manualScrollTrackingEnabled,
+    visibleReacquireActive
   });
 
   // Store latest callback in ref so we can call it without including the (possibly unstable) callback
@@ -132,6 +186,8 @@ export function PrompterView({
   const onTraceScrollRef = useRef(onTraceScroll);
   const onAssistStatusRef = useRef(onAssistStatus);
   const onScrollAnimationStatusRef = useRef(onScrollAnimationStatus);
+  const onStartupVisibleAnchorRef = useRef(onStartupVisibleAnchor);
+  const onManualScrollRef = useRef(onManualScroll);
   const onAnchorDebugRef = useRef(onAnchorDebug);
 
   useEffect(() => {
@@ -147,6 +203,14 @@ export function PrompterView({
   }, [onScrollAnimationStatus]);
 
   useEffect(() => {
+    onStartupVisibleAnchorRef.current = onStartupVisibleAnchor;
+  }, [onStartupVisibleAnchor]);
+
+  useEffect(() => {
+    onManualScrollRef.current = onManualScroll;
+  }, [onManualScroll]);
+
+  useEffect(() => {
     onAnchorDebugRef.current = onAnchorDebug;
   }, [onAnchorDebug]);
 
@@ -158,7 +222,9 @@ export function PrompterView({
       assistScrollSpeed: settings.assistScrollSpeed,
       assistCorrectionFeel: settings.assistCorrectionFeel,
       readingLookaheadTokens: settings.readingLookaheadTokens,
-      assistScrollLagging
+      assistScrollLagging,
+      manualScrollTrackingEnabled,
+      visibleReacquireActive
     };
   }, [
     assistScrollLagging,
@@ -167,7 +233,9 @@ export function PrompterView({
     settings.assistCorrectionFeel,
     settings.assistScrollSpeed,
     settings.continuousAssistScroll,
-    settings.readingLookaheadTokens
+    settings.readingLookaheadTokens,
+    manualScrollTrackingEnabled,
+    visibleReacquireActive
   ]);
 
   // Remember last emitted scroll trace key so we only emit when the scroll *decision* actually changes
@@ -223,6 +291,14 @@ export function PrompterView({
     });
   };
 
+  const writeProgrammaticScrollTop = (container: HTMLDivElement, targetScrollTop: number) => {
+    lastProgrammaticScrollRef.current = {
+      scrollTop: targetScrollTop,
+      timestampMs: window.performance?.now?.() ?? Date.now()
+    };
+    container.scrollTop = targetScrollTop;
+  };
+
   const planStatusDetails = (plan: CorrectionAnimationPlan): Partial<ScrollAnimationStatusInfo> => ({
     fromScrollTop: plan.fromScrollTop,
     targetScrollTop: plan.targetScrollTop,
@@ -276,7 +352,7 @@ export function PrompterView({
     reason: string
   ) => {
     const fromScrollTop = container.scrollTop;
-    container.scrollTop = targetScrollTop;
+    writeProgrammaticScrollTop(container, targetScrollTop);
     const distancePx = Math.abs(targetScrollTop - fromScrollTop);
     emitTrace(
       sentenceIndex,
@@ -442,7 +518,7 @@ export function PrompterView({
         currentVelocityPxPerMs: activeCruise.velocityPxPerMs,
         targetVelocityPxPerMs
       });
-      activeContainer.scrollTop = step.nextScrollTop;
+      writeProgrammaticScrollTop(activeContainer, step.nextScrollTop);
       activeCruise.velocityPxPerMs = step.velocityPxPerMs;
 
       if (step.done) {
@@ -622,7 +698,7 @@ export function PrompterView({
       }
 
       const step = interpolateCorrectionScroll(plan, timestamp - activeAnimation.startTimestamp);
-      activeContainer.scrollTop = step.nextScrollTop;
+      writeProgrammaticScrollTop(activeContainer, step.nextScrollTop);
       activeAnimation.frameCount += 1;
 
       if (step.done) {
@@ -636,7 +712,7 @@ export function PrompterView({
         activeAnimation.startTimestamp = null;
         activeAnimation.plan = null;
         activeAnimation.frameCount = 0;
-        activeContainer.scrollTop = completedPlan.targetScrollTop;
+        writeProgrammaticScrollTop(activeContainer, completedPlan.targetScrollTop);
         emitTrace(
           completedSentence,
           true,
@@ -702,7 +778,8 @@ export function PrompterView({
         viewportHeight: container.clientHeight,
         fontSizePx: settings.fontSizePx,
         lineHeight: settings.lineHeight,
-        readingZonePercent: settings.readingZonePercent
+        readingZonePercent: settings.readingZonePercent,
+        readingZoneHeightLines: settings.readingZoneHeightLines
       });
       geometryRef.current = geometry;
       pane.style.setProperty('--reading-zone-top', `${geometry.bandTop}px`);
@@ -735,8 +812,188 @@ export function PrompterView({
     layoutMode,
     settings.fontSizePx,
     settings.lineHeight,
+    settings.readingZoneHeightLines,
     settings.readingZonePercent
   ]);
+
+  useEffect(() => {
+    if (
+      startupVisibleAnchorRequestId <= 0 ||
+      startupVisibleAnchorRequestId === lastStartupVisibleAnchorRequestRef.current
+    ) {
+      return;
+    }
+    const container = scrollRef.current;
+    if (!container) return;
+    const geometry =
+      geometryRef.current ??
+      computeReadingZoneGeometry({
+        viewportHeight: container.clientHeight,
+        fontSizePx: settings.fontSizePx,
+        lineHeight: settings.lineHeight,
+        readingZonePercent: settings.readingZonePercent,
+        readingZoneHeightLines: settings.readingZoneHeightLines
+      });
+    geometryRef.current = geometry;
+    const visibleTokenIndex = visibleTokenAtReadingBand(container, geometry);
+    lastStartupVisibleAnchorRequestRef.current = startupVisibleAnchorRequestId;
+    if (visibleTokenIndex === null) {
+      emitTrace(
+        currentSentenceIndexRef.current,
+        false,
+        `startup visible anchor unavailable request=${startupVisibleAnchorRequestId}`
+      );
+      return;
+    }
+    emitTrace(
+      currentSentenceIndexRef.current,
+      false,
+      `startup visible anchor set token=${visibleTokenIndex} request=${startupVisibleAnchorRequestId}`
+    );
+    onStartupVisibleAnchorRef.current?.({
+      requestId: startupVisibleAnchorRequestId,
+      visibleTokenIndex,
+      scrollTop: container.scrollTop
+    });
+  }, [
+    layoutMode,
+    model.rawText,
+    settings.fontSizePx,
+    settings.lineHeight,
+    settings.readingZoneHeightLines,
+    settings.readingZonePercent,
+    startupVisibleAnchorRequestId
+  ]);
+
+  useEffect(() => {
+    const container = scrollRef.current;
+    if (!container) return;
+    lastObservedScrollTopRef.current = container.scrollTop;
+
+    const now = () => window.performance?.now?.() ?? Date.now();
+    const markManualIntent = () => {
+      manualScrollIntentUntilRef.current = now() + 1200;
+    };
+    const stopAutomaticMotionForManualScroll = () => {
+      manualScrollHoldRef.current = true;
+      cancelAnimation('manual scroll detected');
+      cancelCruise('assist cruise stopped: manual scroll');
+      assistAnchorRef.current = {
+        lastConfirmedAt: 0,
+        lastTargetScrollTop: container.scrollTop,
+        lastSentenceIndex: -1,
+        estimatedVelocityPxPerMs: 0
+      };
+    };
+    const reportSettledManualScroll = () => {
+      manualScrollDebounceRef.current = null;
+      const geometry =
+        geometryRef.current ??
+        computeReadingZoneGeometry({
+          viewportHeight: container.clientHeight,
+          fontSizePx: settings.fontSizePx,
+          lineHeight: settings.lineHeight,
+          readingZonePercent: settings.readingZonePercent,
+          readingZoneHeightLines: settings.readingZoneHeightLines
+        });
+      geometryRef.current = geometry;
+      const visibleTokenIndex = visibleTokenAtReadingBand(container, geometry);
+      if (visibleTokenIndex === null) return;
+      const direction = pendingManualDirectionRef.current;
+      emitTrace(
+        currentSentenceIndexRef.current,
+        false,
+        `manual scroll detected direction=${direction} visible anchor token=${visibleTokenIndex}`
+      );
+      onManualScrollRef.current?.({
+        visibleTokenIndex,
+        scrollTop: container.scrollTop,
+        direction
+      });
+    };
+    const handleScroll = () => {
+      const currentScrollTop = container.scrollTop;
+      const previousScrollTop = lastObservedScrollTopRef.current;
+      lastObservedScrollTopRef.current = currentScrollTop;
+      const direction =
+        currentScrollTop < previousScrollTop - 0.5
+          ? 'backward'
+          : currentScrollTop > previousScrollTop + 0.5
+            ? 'forward'
+            : 'stationary';
+      if (direction === 'stationary') return;
+
+      const latest = latestMotionRef.current;
+      if (!latest.manualScrollTrackingEnabled) return;
+      const timestamp = now();
+      const manualIntentActive = timestamp <= manualScrollIntentUntilRef.current;
+      const lastWrite = lastProgrammaticScrollRef.current;
+      const matchesRecentProgrammaticWrite = Boolean(
+        lastWrite &&
+        timestamp - lastWrite.timestampMs <= 300 &&
+        Math.abs(currentScrollTop - lastWrite.scrollTop) <= 2
+      );
+      const automaticMotionActive =
+        animationRef.current.active || cruiseRef.current.frameId !== null;
+      if (!manualIntentActive && (matchesRecentProgrammaticWrite || automaticMotionActive)) {
+        return;
+      }
+
+      pendingManualDirectionRef.current = direction;
+      stopAutomaticMotionForManualScroll();
+      manualScrollIntentUntilRef.current = 0;
+      if (manualScrollDebounceRef.current !== null) {
+        window.clearTimeout(manualScrollDebounceRef.current);
+      }
+      manualScrollDebounceRef.current = window.setTimeout(reportSettledManualScroll, 120);
+    };
+    const handleWheel = () => {
+      if (!latestMotionRef.current.manualScrollTrackingEnabled) return;
+      markManualIntent();
+      stopAutomaticMotionForManualScroll();
+    };
+    const handlePotentialManualIntent = () => {
+      if (latestMotionRef.current.manualScrollTrackingEnabled) markManualIntent();
+    };
+    const handlePointerDown = (event: PointerEvent) => {
+      if (event.target === container) handlePotentialManualIntent();
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) {
+        handlePotentialManualIntent();
+      }
+    };
+
+    container.addEventListener('scroll', handleScroll, { passive: true });
+    container.addEventListener('wheel', handleWheel, { passive: true });
+    container.addEventListener('touchstart', handlePotentialManualIntent, { passive: true });
+    container.addEventListener('pointerdown', handlePointerDown, { passive: true });
+    container.addEventListener('keydown', handleKeyDown);
+    return () => {
+      container.removeEventListener('scroll', handleScroll);
+      container.removeEventListener('wheel', handleWheel);
+      container.removeEventListener('touchstart', handlePotentialManualIntent);
+      container.removeEventListener('pointerdown', handlePointerDown);
+      container.removeEventListener('keydown', handleKeyDown);
+      if (manualScrollDebounceRef.current !== null) {
+        window.clearTimeout(manualScrollDebounceRef.current);
+        manualScrollDebounceRef.current = null;
+      }
+    };
+  }, [
+    layoutMode,
+    model.rawText,
+    settings.fontSizePx,
+    settings.lineHeight,
+    settings.readingZoneHeightLines,
+    settings.readingZonePercent
+  ]);
+
+  useEffect(() => {
+    if (!visibleReacquireActive) {
+      manualScrollHoldRef.current = false;
+    }
+  }, [visibleReacquireActive]);
 
   useEffect(() => () => {
     cancelAnimation('PrompterView unmounted');
@@ -744,6 +1001,20 @@ export function PrompterView({
   }, []);
 
   useEffect(() => {
+    if (visibleReacquireActive || manualScrollHoldRef.current) {
+      const reacquireLabel =
+        visibleReacquireSource === 'startup' ? 'startup visible anchor' : 'manual scroll';
+      cancelAnimation(`${reacquireLabel} reacquire pending`);
+      cancelCruise(`assist cruise stopped: ${reacquireLabel} reacquire pending`);
+      if (settings.continuousAssistScroll) {
+        reportAssistStatus(`stopped: ${reacquireLabel}`, {
+          velocityPxPerSec: 0,
+          reason: `${reacquireLabel} reacquire pending`
+        });
+      }
+      return;
+    }
+
     if (!settings.continuousAssistScroll) {
       if (cruiseRef.current.frameId !== null) {
         cancelCruise('assist cruise disabled');
@@ -808,16 +1079,21 @@ export function PrompterView({
         viewportHeight: container.clientHeight,
         fontSizePx: settings.fontSizePx,
         lineHeight: settings.lineHeight,
-        readingZonePercent: settings.readingZonePercent
+        readingZonePercent: settings.readingZonePercent,
+        readingZoneHeightLines: settings.readingZoneHeightLines
       });
     geometryRef.current = geometry;
 
-    const activeRect = active.getBoundingClientRect();
+    const activeRect = active.getClientRects()[0] ?? active.getBoundingClientRect();
     const containerRect = container.getBoundingClientRect();
     const activeTopInViewport = activeRect.top - containerRect.top;
+    const activeCenterInViewport = computeRenderedLineCenterY(
+      activeTopInViewport,
+      activeRect.height
+    );
     const desiredTop = computePrompterScrollTarget({
       currentScrollTop: container.scrollTop,
-      anchorY: activeTopInViewport,
+      anchorY: activeCenterInViewport,
       scrollHeight: container.scrollHeight,
       viewportHeight: container.clientHeight,
       targetY: geometry.targetY
@@ -828,7 +1104,11 @@ export function PrompterView({
     // Line-height-based deadband (0.22 lh clamped). Prevents full-line drift while allowing micro jitter.
     const linePx = geometry.lineHeightPx;
     const deadbandPx = Math.max(6, Math.min(28, linePx * 0.22));
-    const alreadyInBand = isAnchorInReadingBand(activeTopInViewport, geometry, deadbandPx);
+    const alreadyInBand = isAnchorNearReadingTarget(
+      activeCenterInViewport,
+      geometry,
+      deadbandPx
+    );
 
     // Record using the lookahead target token (confirmed + N). This makes Assist Scroll use the lookahead as its anchor basis
     // (pace estimation and cruise advance target the "now/next" position rather than the last confirmed ASR token).
@@ -842,20 +1122,25 @@ export function PrompterView({
 
     const bandH = geometry.bandHeight;
     const bandHLines = bandH / linePx;
-    const fontRatio = (bandH / (settings.fontSizePx || 1)).toFixed(2);
     const deadLines = deadbandPx / linePx;
-    const distToTarget = activeTopInViewport - geometry.targetY;
+    const distToTarget = activeCenterInViewport - geometry.targetY;
     const distLines = distToTarget / linePx;
-    const insideBand = activeTopInViewport >= geometry.bandTop && activeTopInViewport <= geometry.bandBottom;
-    const decisionReason = insideBand ? 'inside band' : (Math.abs(distToTarget) <= deadbandPx ? 'inside deadband' : 'needs correction');
+    const insideBand =
+      activeCenterInViewport >= geometry.bandTop &&
+      activeCenterInViewport <= geometry.bandBottom;
+    const decisionReason = alreadyInBand
+      ? 'centered on target'
+      : insideBand
+        ? 'inside band, off-center'
+        : 'needs correction';
 
-    // Rich diagnostics including confirmed vs lookahead target, band height in px + font-size ratio (primary for visual band),
-    // deadband, anchor distance in px + line-heights, decision reason.
+    // Rich diagnostics include the rendered line center, band height, target offset, deadband,
+    // anchor distance in line heights, and the resulting correction decision.
     // These appear in the Alignment Trace (Debug panel).
-    emitTrace(currentSentenceIndex, false, `anchor-detail confirmedT=${confirmedToken} targetT=${targetTokenIndex} src=${anchorSource} topInView=${activeTopInViewport.toFixed(1)} targetY=${geometry.targetY.toFixed(1)} distToTarget=${distToTarget.toFixed(1)}px/${distLines.toFixed(2)}lh bandH=${bandH.toFixed(1)}px/${bandHLines.toFixed(2)}lh (${fontRatio}fs) deadband=${deadbandPx.toFixed(1)}px/${deadLines.toFixed(2)}lh decision=${decisionReason} already=${alreadyInBand} d=${distance.toFixed(1)}`);
+    emitTrace(currentSentenceIndex, false, `anchor-detail confirmedT=${confirmedToken} targetT=${targetTokenIndex} src=${anchorSource} topInView=${activeTopInViewport.toFixed(1)} centerInView=${activeCenterInViewport.toFixed(1)} targetY=${geometry.targetY.toFixed(1)} targetOffset=${geometry.targetOffsetPx.toFixed(1)}px/${(geometry.targetOffsetPx / linePx).toFixed(2)}lh distToTarget=${distToTarget.toFixed(1)}px/${distLines.toFixed(2)}lh bandH=${bandH.toFixed(1)}px/${bandHLines.toFixed(2)}lh deadband=${deadbandPx.toFixed(1)}px/${deadLines.toFixed(2)}lh decision=${decisionReason} already=${alreadyInBand} d=${distance.toFixed(1)}`);
 
     // Visible diagnostics (for ControlPanel live display)
-    const debugKey = `${confirmedToken}|${targetTokenIndex}|${la}|${distLines.toFixed(2)}|${decisionReason}`;
+    const debugKey = `${confirmedToken}|${targetTokenIndex}|${la}|${distLines.toFixed(2)}|${bandHLines.toFixed(2)}|${decisionReason}`;
     if (debugKey !== lastAnchorDebugKeyRef.current) {
       lastAnchorDebugKeyRef.current = debugKey;
       onAnchorDebugRef.current?.({
@@ -865,8 +1150,11 @@ export function PrompterView({
         distLines,
         decision: decisionReason,
         bandH,
-        fontSize: settings.fontSizePx,
+        bandHeightLines: geometry.readingZoneHeightLines,
         lineH: linePx,
+        targetY: geometry.targetY,
+        targetOffsetPx: geometry.targetOffsetPx,
+        targetOffsetLines: geometry.targetOffsetPx / linePx,
         toleranceZoneH: deadbandPx * 2
       });
     }
@@ -893,11 +1181,14 @@ export function PrompterView({
     followState,
     layoutMode,
     model.rawText,
+    visibleReacquireActive,
+    visibleReacquireSource,
     settings.assistCorrectionFeel,
     settings.assistScrollSpeed,
     settings.continuousAssistScroll,
     settings.fontSizePx,
     settings.lineHeight,
+    settings.readingZoneHeightLines,
     settings.readingZonePercent,
     settings.readingLookaheadTokens
   ]);
@@ -916,7 +1207,8 @@ export function PrompterView({
         viewportHeight: container.clientHeight,
         fontSizePx: settings.fontSizePx,
         lineHeight: settings.lineHeight,
-        readingZonePercent: settings.readingZonePercent
+        readingZonePercent: settings.readingZonePercent,
+        readingZoneHeightLines: settings.readingZoneHeightLines
       });
     geometryRef.current = geometry;
 

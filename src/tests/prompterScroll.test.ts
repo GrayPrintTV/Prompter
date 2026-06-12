@@ -7,45 +7,68 @@ import {
   DEFAULT_CORRECTION_MAX_DURATION_MS,
   DEFAULT_CORRECTION_MIN_DURATION_MS,
   computePrompterScrollTarget,
+  computeRenderedLineCenterY,
   computeReadingZoneGeometry,
   correctionFeelToMotion,
   easeInOutCubic,
   estimateAssistVelocityFromAnchors,
   interpolateCorrectionScroll,
   isAnchorInReadingBand,
+  isAnchorNearReadingTarget,
   stepPrompterScroll
 } from '../domain/prompterScroll';
 import { DEFAULT_DISPLAY_SETTINGS } from '../state/appStore';
 
 describe('prompter reading-zone geometry', () => {
-  it('places the default reading band around the vertical center (thinner ~1.10x band)', () => {
+  it('places a one-line reading band around the vertical center', () => {
     const geometry = computeReadingZoneGeometry({
       viewportHeight: 900,
       fontSizePx: 34,
       lineHeight: 1.55,
-      readingZonePercent: 50
+      readingZonePercent: 50,
+      readingZoneHeightLines: 1
     });
 
-    // Thin visual band (~1.06 * fontSize) for one glyph row.
-    expect(geometry.bandTop).toBeGreaterThan(425);
-    expect(geometry.bandBottom).toBeLessThan(475);
-    expect(geometry.targetY).toBeGreaterThanOrEqual(geometry.bandTop);
-    expect(geometry.targetY).toBeLessThanOrEqual(geometry.bandBottom);
+    expect(geometry.bandHeight).toBeCloseTo(geometry.lineHeightPx, 5);
+    expect(geometry.bandTop).toBeCloseTo(450 - geometry.lineHeightPx / 2, 5);
+    expect(geometry.targetY).toBe(450);
+    expect(geometry.targetOffsetPx).toBeCloseTo(geometry.bandHeight / 2, 5);
   });
 
-  it('places the narration default band higher for real reading (thinner band)', () => {
+  it('places the narration default band higher for real reading', () => {
     const geometry = computeReadingZoneGeometry({
       viewportHeight: 900,
       fontSizePx: 34,
       lineHeight: 1.55,
-      readingZonePercent: DEFAULT_DISPLAY_SETTINGS.readingZonePercent
+      readingZonePercent: DEFAULT_DISPLAY_SETTINGS.readingZonePercent,
+      readingZoneHeightLines: DEFAULT_DISPLAY_SETTINGS.readingZoneHeightLines
     });
 
     expect(DEFAULT_DISPLAY_SETTINGS.readingZonePercent).toBe(38);
     expect(DEFAULT_DISPLAY_SETTINGS.showActiveHighlight).toBe(false);
-    // Higher on screen for narration % (thin ~1.06*font band).
-    expect(geometry.bandTop).toBeGreaterThan(310);
-    expect(geometry.bandBottom).toBeLessThan(362);
+    expect(geometry.targetY).toBeCloseTo(342, 5);
+    expect(geometry.bandHeight).toBeCloseTo(geometry.lineHeightPx, 5);
+  });
+
+  it('scales and clamps Focus Bar height in line heights', () => {
+    const taller = computeReadingZoneGeometry({
+      viewportHeight: 900,
+      fontSizePx: 34,
+      lineHeight: 1.55,
+      readingZonePercent: 50,
+      readingZoneHeightLines: 2.2
+    });
+    const clamped = computeReadingZoneGeometry({
+      viewportHeight: 900,
+      fontSizePx: 34,
+      lineHeight: 1.55,
+      readingZonePercent: 50,
+      readingZoneHeightLines: 8
+    });
+
+    expect(taller.bandHeight).toBeCloseTo(taller.lineHeightPx * 2.2, 5);
+    expect(taller.targetY).toBe(450);
+    expect(clamped.readingZoneHeightLines).toBe(2.5);
   });
 
   it('moves the band higher when the reading-zone percent is lower', () => {
@@ -53,13 +76,15 @@ describe('prompter reading-zone geometry', () => {
       viewportHeight: 900,
       fontSizePx: 34,
       lineHeight: 1.55,
-      readingZonePercent: 35
+      readingZonePercent: 35,
+      readingZoneHeightLines: 1
     });
     const lower = computeReadingZoneGeometry({
       viewportHeight: 900,
       fontSizePx: 34,
       lineHeight: 1.55,
-      readingZonePercent: 45
+      readingZonePercent: 45,
+      readingZoneHeightLines: 1
     });
 
     expect(higher.bandTop).toBeLessThan(lower.bandTop);
@@ -71,10 +96,14 @@ describe('prompter reading-zone geometry', () => {
       viewportHeight: 720,
       fontSizePx: 32,
       lineHeight: 1.5,
-      readingZonePercent: 50
+      readingZonePercent: 50,
+      readingZoneHeightLines: 1
     });
 
-    expect(geometry.topSpacerPx).toBeCloseTo(geometry.targetY, 5);
+    expect(geometry.topSpacerPx + geometry.lineHeightPx / 2).toBeCloseTo(
+      geometry.targetY,
+      5
+    );
     expect(geometry.bottomSpacerPx).toBeGreaterThan(720 - geometry.targetY);
   });
 
@@ -83,13 +112,20 @@ describe('prompter reading-zone geometry', () => {
       viewportHeight: 800,
       fontSizePx: 34,
       lineHeight: 1.55,
-      readingZonePercent: 50
+      readingZonePercent: 50,
+      readingZoneHeightLines: 2.5
     });
     const linePx = geometry.lineHeightPx; // ~52.7
     const dead = Math.max(6, Math.min(28, linePx * 0.22)); // ~11.6 px
     // Near target (within ~0.6 * dead) still inside; far beyond band+dead is out.
     expect(isAnchorInReadingBand(geometry.targetY + dead * 0.6, geometry, dead)).toBe(true);
     expect(isAnchorInReadingBand(geometry.bandBottom + dead * 2.5, geometry, dead)).toBe(false);
+    expect(isAnchorNearReadingTarget(geometry.targetY + dead * 0.6, geometry, dead)).toBe(true);
+    expect(isAnchorNearReadingTarget(geometry.bandTop + 2, geometry, dead)).toBe(false);
+  });
+
+  it('targets the visual center of the rendered token line', () => {
+    expect(computeRenderedLineCenterY(312, 36)).toBe(330);
   });
 });
 

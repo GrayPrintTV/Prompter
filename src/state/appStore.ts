@@ -7,11 +7,14 @@ export const DEFAULT_DISPLAY_SETTINGS: DisplaySettings = {
   textWidthCh: 64,
   paragraphSpacingEm: 1.35,
   readingZonePercent: 38,
+  readingZoneHeightLines: 1,
   showActiveHighlight: false,
   continuousAssistScroll: false,
   assistScrollSpeed: 50,
   assistCorrectionFeel: 45,
-  theme: 'dark'
+  theme: 'dark',
+  autoHideControlsOnStart: false,
+  readingLookaheadTokens: 6
 };
 
 export const LEGACY_LOW_READING_ZONE_PERCENT = 55;
@@ -29,6 +32,15 @@ export function resolveInitialDisplaySettings(
     settings.readingZonePercent = DEFAULT_DISPLAY_SETTINGS.readingZonePercent;
   }
 
+  if (!Number.isFinite(settings.readingZoneHeightLines)) {
+    settings.readingZoneHeightLines = DEFAULT_DISPLAY_SETTINGS.readingZoneHeightLines;
+  } else {
+    settings.readingZoneHeightLines = Math.max(
+      1,
+      Math.min(2.5, Math.round(settings.readingZoneHeightLines * 10) / 10)
+    );
+  }
+
   if (!Number.isFinite(settings.assistScrollSpeed)) {
     settings.assistScrollSpeed = DEFAULT_DISPLAY_SETTINGS.assistScrollSpeed;
   } else {
@@ -39,6 +51,16 @@ export function resolveInitialDisplaySettings(
     settings.assistCorrectionFeel = DEFAULT_DISPLAY_SETTINGS.assistCorrectionFeel;
   } else {
     settings.assistCorrectionFeel = Math.max(1, Math.min(100, Math.round(settings.assistCorrectionFeel)));
+  }
+
+  if (typeof settings.autoHideControlsOnStart !== 'boolean') {
+    settings.autoHideControlsOnStart = DEFAULT_DISPLAY_SETTINGS.autoHideControlsOnStart;
+  }
+
+  if (typeof settings.readingLookaheadTokens !== 'number' || !Number.isFinite(settings.readingLookaheadTokens)) {
+    settings.readingLookaheadTokens = DEFAULT_DISPLAY_SETTINGS.readingLookaheadTokens;
+  } else {
+    settings.readingLookaheadTokens = Math.max(0, Math.min(20, Math.round(settings.readingLookaheadTokens)));
   }
 
   if (options.migrateLegacyNarrationDefaults && storedDisplaySettings) {

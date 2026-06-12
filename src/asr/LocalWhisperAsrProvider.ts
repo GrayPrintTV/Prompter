@@ -1,4 +1,5 @@
 import type { AsrProvider, AsrStatus, TranscriptDelta } from './AsrProvider';
+import localWhisperPcmWorkletSource from './localWhisperPcmWorklet.js?raw';
 import type {
   AsrTranscriptHistoryItem,
   ElectronBridgeDiagnostics,
@@ -56,6 +57,12 @@ type LocalWhisperDeps = {
   getUserMedia?: (constraints: MediaStreamConstraints) => Promise<MediaStream>;
   createPcmChunkRecorder?: (stream: MediaStream, options: PcmChunkRecorderOptions) => PcmChunkRecorder;
   createAudioContext?: () => AudioContext | null;
+  loadAudioWorkletModule?: (context: AudioContext) => Promise<void>;
+  createAudioWorkletNode?: (
+    context: AudioContext,
+    name: string,
+    options: AudioWorkletNodeOptions
+  ) => AudioWorkletNode;
   requestAnimationFrame?: (callback: FrameRequestCallback) => number;
   cancelAnimationFrame?: (handle: number) => void;
   chunkResponseTimeoutMs?: number;
@@ -65,6 +72,7 @@ type LocalWhisperDeps = {
 const MAX_MIC_LOG_LINES = 18;
 const MAX_TRANSCRIPT_HISTORY = 25;
 const DEFAULT_CHUNK_RESPONSE_TIMEOUT_MS = 15000;
+const LOCAL_WHISPER_PCM_WORKLET_NAME = 'local-whisper-pcm-processor';
 const MAX_CHUNK_QUEUE_LENGTH = 4; // bounded FIFO, 3-5 recommended for narration latency vs. drop tradeoff
 const SILENCE_RMS_THRESHOLD = 0.005; // conservative threshold for pre-transcribe silence detection on PCM samples (0..1)
 const MAX_QUEUE_LATENCY_MS = 7000; // 6-8s latency budget; if estimated queued audio time exceeds, drop stale (oldest) chunks to prefer current narration over backlog
@@ -131,25 +139,6 @@ function writeAscii(view: DataView, offset: number, text: string) {
   for (let index = 0; index < text.length; index += 1) {
     view.setUint8(offset + index, text.charCodeAt(index));
   }
-}
-
-function takeSamples(buffers: Float32Array[], sampleCount: number) {
-  const output = new Float32Array(sampleCount);
-  let written = 0;
-  while (written < sampleCount && buffers.length > 0) {
-    const first = buffers[0];
-    const needed = sampleCount - written;
-    if (first.length <= needed) {
-      output.set(first, written);
-      written += first.length;
-      buffers.shift();
-    } else {
-      output.set(first.slice(0, needed), written);
-      buffers[0] = first.slice(needed);
-      written += needed;
-    }
-  }
-  return output;
 }
 
 function createDefaultMicDiagnostics(): MicCaptureDiagnostics {
@@ -269,6 +258,7 @@ export class LocalWhisperAsrProvider implements AsrProvider {
   private micAnimationFrame: number | null = null;
   private lastLevelUpdateMs = 0;
   private chunkWatchdogTimeout: number | null = null;
+  private hasStoppedIntentionally = false;
 
   constructor(private settings: LocalWhisperSettings, private deps: LocalWhisperDeps = {}) {
     this.setConnectionStatus({ bridge: this.inspectBridge() });
@@ -335,6 +325,24 @@ export class LocalWhisperAsrProvider implements AsrProvider {
 
   async start() {
     if (this.status === 'listening' || this.status === 'starting') return;
+    this.status = 'starting';
+    this.setConnectionStatus({
+      status: 'starting',
+      listening: true,
+      errorMessage: null,
+      mic: {
+        ...this.connectionStatus.mic,
+        errorMessage: null,
+        log: ['Start Following requested.']
+      },
+      chunk: {
+        ...this.connectionStatus.chunk,
+        warningMessage: null,
+        lastSidecarError: null,
+        pendingResponses: 0
+      }
+    });
+
     const bridgeDiagnostics = await this.refreshBridgeDiagnostics();
     if (!bridgeDiagnostics.localWhisperBridgeAvailable) {
       const message = 'Local Whisper bridge unavailable. Are you running inside Electron?';
@@ -357,22 +365,6 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       this.updateMic({ captureState: 'not-requested', errorMessage: message }, 'Setup failed before microphone request.');
       throw new Error(message);
     }
-
-    this.setProviderStatus('starting', null);
-    this.updateMic(
-      {
-        errorMessage: null,
-        log: []
-      },
-      'Start Following requested.'
-    );
-    this.updateChunk(
-      {
-        warningMessage: null,
-        lastSidecarError: null,
-        pendingResponses: 0
-      }
-    );
 
     try {
       const bridge = this.getBridge();
@@ -434,6 +426,7 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       this.totalRealtimeFactor = 0;
       this.realtimeFactorCount = 0;
       this.setProviderStatus('listening', null);
+      this.hasStoppedIntentionally = false;
     } catch (error) {
       await this.stop();
       this.setProviderStatus('error', this.errorMessage(error, 'Local Whisper failed to start.'));
@@ -442,6 +435,7 @@ export class LocalWhisperAsrProvider implements AsrProvider {
   }
 
   async stop() {
+    this.hasStoppedIntentionally = true;
     this.pcmRecorder?.stop();
     this.pcmRecorder = null;
     this.stopChunkWatchdog();
@@ -546,6 +540,10 @@ export class LocalWhisperAsrProvider implements AsrProvider {
   }
 
   async acceptTranscriptResult(result: LocalWhisperTranscriptResult) {
+    if (this.hasStoppedIntentionally) {
+      this.updateMic({}, `Ignoring transcript result after intentional stop (normal shutdown).`);
+      return;
+    }
     const text = result.text.trim();
     if (isProviderStatusText(text)) {
       this.updateMic({}, `Ignored provider status text: ${text}`);
@@ -782,9 +780,14 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       await this.acceptTranscriptResult(result);
     } catch (error) {
       const message = this.errorMessage(error, 'Local Whisper transcription failed.');
-      this.updateChunk({ lastSidecarError: message, warningMessage: message, chunksFailed: (this.connectionStatus.chunk.chunksFailed || 0) + 1 });
-      this.updateMic({ errorMessage: message }, `Sidecar response failed: ${message}`);
-      this.setProviderStatus('error', message);
+      if (this.hasStoppedIntentionally) {
+        this.updateMic({}, `Ignoring post-stop transcription error (normal shutdown): ${message}`);
+        // do not set error status / errorMessage for intentional stop; in-flight classified normal
+      } else {
+        this.updateChunk({ lastSidecarError: message, warningMessage: message, chunksFailed: (this.connectionStatus.chunk.chunksFailed || 0) + 1 });
+        this.updateMic({ errorMessage: message }, `Sidecar response failed: ${message}`);
+        this.setProviderStatus('error', message);
+      }
     } finally {
       this.clearResponseTimeout(timeoutHandle);
       this.updateChunk({ pendingResponses: Math.max(0, this.connectionStatus.chunk.pendingResponses - 1) });
@@ -1244,24 +1247,26 @@ export class LocalWhisperAsrProvider implements AsrProvider {
 
     let audioContext: AudioContext | null = null;
     let sourceNode: MediaStreamAudioSourceNode | null = null;
-    let processorNode: ScriptProcessorNode | null = null;
+    let processorNode: AudioWorkletNode | null = null;
     let muteNode: GainNode | null = null;
     let stopped = true;
     let sequence = 0;
-    let bufferedSamples = 0;
-    const buffers: Float32Array[] = [];
     const thisProvider = this;
 
     const stop = () => {
       stopped = true;
+      if (processorNode) {
+        processorNode.port.onmessage = null;
+        processorNode.port.onmessageerror = null;
+        processorNode.onprocessorerror = null;
+        processorNode.port.close();
+      }
       processorNode?.disconnect();
       sourceNode?.disconnect();
       muteNode?.disconnect();
       processorNode = null;
       sourceNode = null;
       muteNode = null;
-      buffers.length = 0;
-      bufferedSamples = 0;
       if (audioContext) {
         void audioContext.close().catch(() => undefined);
         audioContext = null;
@@ -1280,48 +1285,92 @@ export class LocalWhisperAsrProvider implements AsrProvider {
         const sampleRate = audioContext.sampleRate;
         const targetSamples = Math.max(1, Math.round(sampleRate * Math.max(1, options.chunkDurationSeconds)));
         sourceNode = audioContext.createMediaStreamSource(stream);
-        processorNode = audioContext.createScriptProcessor(4096, 1, 1);
+        try {
+          await thisProvider.loadAudioWorkletModule(audioContext);
+          processorNode = thisProvider.createAudioWorkletNode(audioContext, {
+            processorOptions: { targetSamples }
+          });
+        } catch (error) {
+          const message = thisProvider.errorMessage(error, 'Unknown AudioWorklet setup error.');
+          throw new Error(`AudioWorklet PCM capture setup failed: ${message}`);
+        }
         muteNode = audioContext.createGain();
         muteNode.gain.value = 0;
 
-        processorNode.onaudioprocess = (event) => {
+        processorNode.port.onmessage = (event: MessageEvent<unknown>) => {
           if (stopped) return;
           try {
-            const input = event.inputBuffer.getChannelData(0);
-            const copy = new Float32Array(input);
-            buffers.push(copy);
-            bufferedSamples += copy.length;
-
-            while (bufferedSamples >= targetSamples) {
-              const samples = takeSamples(buffers, targetSamples);
-              bufferedSamples -= targetSamples;
-              sequence += 1;
-              // Compute simple RMS for pre-transcribe silence detection (for overflow drop preference)
-              let sumSq = 0;
-              for (let i = 0; i < samples.length; i++) sumSq += samples[i] * samples[i];
-              const rmsLevel = samples.length > 0 ? Math.sqrt(sumSq / samples.length) : 0;
-              const audioData = encodePcmWav(samples, sampleRate);
-              options.onChunk({
-                audioData,
-                sampleRate,
-                durationSeconds: samples.length / sampleRate,
-                sequence,
-                rmsLevel
-              });
+            const data = event.data as { type?: unknown; samples?: unknown } | null;
+            if (data?.type !== 'chunk' || !(data.samples instanceof Float32Array)) {
+              throw new Error('AudioWorklet PCM capture returned an invalid sample message.');
             }
+            const samples = data.samples;
+            sequence += 1;
+            let sumSq = 0;
+            for (let i = 0; i < samples.length; i++) sumSq += samples[i] * samples[i];
+            const rmsLevel = samples.length > 0 ? Math.sqrt(sumSq / samples.length) : 0;
+            const audioData = encodePcmWav(samples, sampleRate);
+            options.onChunk({
+              audioData,
+              sampleRate,
+              durationSeconds: samples.length / sampleRate,
+              sequence,
+              rmsLevel
+            });
           } catch (error) {
             options.onError(error instanceof Error ? error : new Error('PCM capture failed.'));
           }
+        };
+        processorNode.port.onmessageerror = () => {
+          options.onError(new Error('AudioWorklet PCM capture message could not be decoded.'));
+        };
+        processorNode.onprocessorerror = () => {
+          options.onError(new Error('AudioWorklet PCM processor failed.'));
         };
 
         sourceNode.connect(processorNode);
         processorNode.connect(muteNode);
         muteNode.connect(audioContext.destination);
         await audioContext.resume();
-        options.onLog(`PCM WAV capture armed at ${sampleRate} Hz.`);
+        options.onLog(`AudioWorklet PCM WAV capture armed at ${sampleRate} Hz.`);
       },
       stop
     };
+  }
+
+  private async loadAudioWorkletModule(context: AudioContext) {
+    if (this.deps.loadAudioWorkletModule) {
+      await this.deps.loadAudioWorkletModule(context);
+      return;
+    }
+    if (!context.audioWorklet) {
+      throw new Error('AudioWorklet is unavailable in this renderer.');
+    }
+    const moduleBlob = new Blob([localWhisperPcmWorkletSource], { type: 'text/javascript' });
+    const moduleUrl = URL.createObjectURL(moduleBlob);
+    try {
+      await context.audioWorklet.addModule(moduleUrl);
+    } finally {
+      URL.revokeObjectURL(moduleUrl);
+    }
+  }
+
+  private createAudioWorkletNode(
+    context: AudioContext,
+    options: AudioWorkletNodeOptions
+  ) {
+    if (this.deps.createAudioWorkletNode) {
+      return this.deps.createAudioWorkletNode(context, LOCAL_WHISPER_PCM_WORKLET_NAME, options);
+    }
+    return new AudioWorkletNode(context, LOCAL_WHISPER_PCM_WORKLET_NAME, {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [1],
+      channelCount: 1,
+      channelCountMode: 'explicit',
+      channelInterpretation: 'speakers',
+      ...options
+    });
   }
 
   private createAudioContext() {

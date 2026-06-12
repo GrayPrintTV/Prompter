@@ -1,6 +1,6 @@
 # Narration Prompter
 
-Windows-first Electron + React desktop teleprompter for audiobook and voiceover narration. Phase 1 adds optional live OpenAI Realtime transcription behind the same alignment engine used by manual and mock transcript input.
+Windows-first Electron + React desktop teleprompter for audiobook and voiceover narration. Local Whisper is the intended live narration provider, with Manual and Mock input available for testing and recovery.
 
 Future coding agents should start with `AGENTS.md` and `docs/current-state.md` before changing code.
 
@@ -10,8 +10,7 @@ Future coding agents should start with `AGENTS.md` and `docs/current-state.md` b
 - Large prompter view with an optional current sentence highlight.
 - Manual transcript injection for alignment testing.
 - Mock ASR playback from scripted transcript chunks.
-- Optional live OpenAI Realtime transcription provider, disabled until configured.
-- Optional Local Whisper transcription provider using a Python faster-whisper sidecar.
+- Local Whisper transcription using a Python faster-whisper sidecar.
 - Conservative fuzzy alignment against a local manuscript window.
 - Confidence states: following, holding, uncertain, lost, paused, manual, resyncing, retake.
 - Fixed reading band with custom smooth scrolling only on high-confidence alignment.
@@ -49,32 +48,25 @@ npm run build
 npm start
 ```
 
-## Live OpenAI Realtime transcription
+## Experimental OpenAI Realtime
 
-Live ASR is optional. Manual transcript injection and Mock Playback continue to work without an API key.
+OpenAI Realtime is parked as an experimental comparison path. It is disabled by default and absent from the normal provider list. Normal use does not require an OpenAI API key or network access; use Local Whisper for live narration.
 
-1. Copy `.env.example` to `.env.local`.
-2. Set `OPENAI_API_KEY` in `.env.local` or in the Windows environment.
-3. Restart the Electron app.
-4. Select `Live OpenAI Realtime` in the ASR Provider dropdown.
-5. Press `Start` and allow microphone access.
-
-The renderer never receives the real OpenAI API key. Electron main reads environment/local config and requests a short-lived Realtime client secret over IPC. The renderer uses that ephemeral client secret for the WebRTC microphone session and emits normal `TranscriptDelta` objects into the existing aligner.
-
-Supported local config values:
+Developers explicitly testing the retained provider can enable it in an ignored `.env.local` file, then fully restart Electron:
 
 ```powershell
+OPENAI_REALTIME_ENABLED=true
 OPENAI_API_KEY=replace-with-your-openai-api-key
-OPENAI_REALTIME_TRANSCRIPTION_MODEL=gpt-4o-transcribe
+OPENAI_REALTIME_TRANSCRIPTION_MODEL=gpt-realtime-whisper
 OPENAI_REALTIME_LANGUAGE=en
 OPENAI_REALTIME_TRANSCRIPTION_PROMPT=
 ```
 
-Do not commit `.env.local`; it is ignored by git.
+When enabled, it appears as `Live OpenAI Realtime (Experimental)`. Electron main owns the permanent API key and OpenAI network exchange; keys, authorization headers, and prompts are not logged or stored in renderer state. Do not commit `.env.local`; it is ignored by git.
 
 ## Local Whisper transcription
 
-Local Whisper is optional and runs through this repo's Python sidecar, not the separate audiobook proofing tool. It captures microphone audio as local PCM, encodes short WAV chunks in the renderer, sends them to Electron main, and Electron main sends temporary `.wav` files to `python/local_whisper_sidecar.py`. The sidecar uses faster-whisper and returns transcript chunks in the same `TranscriptDelta` shape used by Manual, Mock, and OpenAI Realtime.
+Local Whisper is the intended live provider and runs through this repo's Python sidecar, not the separate audiobook proofing tool. It captures microphone audio as local PCM, encodes short WAV chunks in the renderer, sends them to Electron main, and Electron main sends temporary `.wav` files to `python/local_whisper_sidecar.py`. The sidecar uses faster-whisper and returns transcript chunks in the same `TranscriptDelta` shape used by Manual and Mock.
 
 The Local Whisper defaults are tuned for conservative CPU live following:
 
@@ -159,6 +151,8 @@ The Display panel includes proof buttons for the physical scroll engine: `Test s
 
 Optional `Assist Scroll` is a predictive cruise layer and remains off by default. When enabled, recent high-confidence `following` matches become correction anchors; the prompter estimates reading pace from confirmed target movement and keeps the manuscript moving gently between ASR chunks. The Display panel includes Assist speed (`Slower` / `Faster`) and Correction feel (`Gentle` / `Firm`) sliders. Assist cruise slows when Local Whisper is lagging, decays when confidence becomes stale, and stops on holding, lost, paused, manual, retake, or low confidence. Active sentence highlighting can also be hidden from the Display controls.
 
+The Display panel also includes a compact `Movement decision` diagnostic area. It shows the latest confirmed manuscript token, proposed lookahead target, prior fresh anchor, token/line delta, current Reading Lookahead, time since the last high-confidence anchor, a 160 WPM diagnostic pace prior, expected progress corridor, confidence, retake/duplicate/jump penalty flags when available, final outcome, plain-English reason, and the last 10 movement decisions. The 160 WPM value is observability only; it does not force scrolling or change alignment acceptance.
+
 ## Narration mode
 
 During narration, the left control panel can be hidden with the top-bar `Hide Controls` button or `Ctrl+Alt+C`. The prompter remains full-screen with an always-visible top bar containing:
@@ -204,10 +198,10 @@ Phase 0.5 alignment hardening covers the repeated-sentence-after-flub fixture, d
 ## Architecture
 
 - `electron/`: desktop shell, preload bridge, file dialog, window controls.
-- `src/asr/`: swappable ASR provider interface plus manual, mock, live OpenAI Realtime, and Local Whisper providers.
+- `src/asr/`: swappable ASR provider interface plus Manual, Mock, Local Whisper, and a default-off experimental OpenAI Realtime provider.
 - `src/domain/`: normalization, segmentation, tokenization, alignment, and scroll policy.
 - `src/components/`: control panel, prompter view, status, shortcuts, and debug UI.
 - `src/state/`: defaults and local session persistence.
 - `src/tests/`: Vitest coverage and fixtures.
 
-Live ASR is implemented as a swappable provider behind the existing ASR boundary. The alignment engine receives the same transcript delta shape from manual, mock, and live providers.
+ASR is implemented behind a swappable provider boundary. The alignment engine receives the same transcript delta shape from Manual, Mock, and Local Whisper; the parked OpenAI comparison path uses the same boundary only when explicitly enabled.

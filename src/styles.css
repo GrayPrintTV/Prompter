@@ -210,6 +210,18 @@ textarea {
   color: var(--warn);
 }
 
+.start-diagnostic {
+  color: var(--warn);
+}
+
+.start-diagnostic.blocking {
+  color: var(--danger);
+}
+
+.start-diagnostic.recovered {
+  color: var(--muted);
+}
+
 .app-header,
 .panel-section {
   padding: 14px;
@@ -610,6 +622,10 @@ textarea {
   gap: 12px;
 }
 
+.display-setting-help {
+  margin-top: -7px;
+}
+
 .reading-zone-control {
   display: grid;
   gap: 7px;
@@ -639,6 +655,61 @@ textarea {
 
 .scroll-animation-status.is-warning {
   color: var(--warn);
+}
+
+.movement-decision-panel {
+  display: grid;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid #35454f;
+  border-radius: 6px;
+  background: #11181d;
+}
+
+.movement-decision-grid {
+  display: grid;
+  grid-template-columns: 112px minmax(0, 1fr);
+  gap: 6px 9px;
+  margin: 0;
+  font-size: 11px;
+}
+
+.movement-decision-grid dt {
+  color: var(--muted);
+}
+
+.movement-decision-grid dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+}
+
+.movement-decision-reason,
+.movement-decision-engine {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.movement-decision-reason strong,
+.movement-decision-engine strong {
+  color: #dce7ea;
+}
+
+.movement-decision-history {
+  display: grid;
+  gap: 5px;
+  margin: 2px 0 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.movement-decision-history li {
+  overflow-wrap: anywhere;
 }
 
 .reading-zone-label,

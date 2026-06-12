@@ -4,6 +4,8 @@ import { ShortcutHelp } from './ShortcutHelp';
 import { StatusIndicator } from './StatusIndicator';
 import { TortureTestPanel } from './TortureTestPanel';
 import { getAsrProviderOptions } from '../asr/providerRegistry';
+import type { MovementDecisionInfo } from '../domain/movementDiagnostics';
+import type { StartDiagnostic } from '../domain/narrationStatus';
 import type {
   AlignmentBufferDebug,
   AlignmentResult,
@@ -87,6 +89,9 @@ type Props = {
   assistStatus?: AssistStatusInfo | null;
   anchorDebug?: any;
   scrollAnimationStatus?: ScrollAnimationStatusInfo | null;
+  movementDecision?: MovementDecisionInfo | null;
+  movementDecisionHistory?: MovementDecisionInfo[];
+  lastStartDiagnostic?: StartDiagnostic | null;
 };
 
 function formatMicCaptureState(state: MicCaptureState) {
@@ -123,6 +128,11 @@ function clampReadingZonePercent(value: number) {
   return Math.max(25, Math.min(70, Math.round(value)));
 }
 
+function clampReadingZoneHeightLines(value: number) {
+  if (!Number.isFinite(value)) return DEFAULT_DISPLAY_SETTINGS.readingZoneHeightLines;
+  return Math.max(1, Math.min(2.5, Math.round(value * 10) / 10));
+}
+
 function clampDisplayPercent(value: number, fallback: number) {
   if (!Number.isFinite(value)) return fallback;
   return Math.max(1, Math.min(100, Math.round(value)));
@@ -146,6 +156,31 @@ export function getActiveAsrTranscriptHistory(
       displayText: delta.text || '[empty transcript]',
       isEmpty: delta.text.trim().length === 0
     }));
+}
+
+function formatSignedInteger(value: number) {
+  const rounded = Math.round(value);
+  return `${rounded > 0 ? '+' : ''}${rounded}`;
+}
+
+function formatSignedLines(value: number) {
+  const rounded = Number.isFinite(value) ? value : 0;
+  return `${rounded > 0 ? '+' : ''}${rounded.toFixed(1)}`;
+}
+
+function formatElapsed(ms: number | null) {
+  if (ms === null) return 'No fresh anchor yet';
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  return `${(ms / 1000).toFixed(1)} s`;
+}
+
+function formatExpectedTokens(value: number | null) {
+  if (value === null) return 'unknown';
+  return `${value.toFixed(1)} tokens`;
+}
+
+function formatTokenWithSnippet(index: number, snippet: string) {
+  return `#${index} - ${snippet}`;
 }
 
 export function ControlPanel(props: Props) {
@@ -212,7 +247,10 @@ export function ControlPanel(props: Props) {
     traceLog,
     assistStatus,
     anchorDebug,
-    scrollAnimationStatus
+    scrollAnimationStatus,
+    movementDecision,
+    movementDecisionHistory,
+    lastStartDiagnostic
   } = props;
   const providerOptions = getAsrProviderOptions(liveConfig, localWhisperSettings);
   const selectedProviderLabel =
@@ -247,6 +285,12 @@ export function ControlPanel(props: Props) {
 
   const setReadingZonePercent = (readingZonePercent: number) => {
     onSettingsChange({ ...settings, readingZonePercent: clampReadingZonePercent(readingZonePercent) });
+  };
+  const setReadingZoneHeightLines = (readingZoneHeightLines: number) => {
+    onSettingsChange({
+      ...settings,
+      readingZoneHeightLines: clampReadingZoneHeightLines(readingZoneHeightLines)
+    });
   };
   const setAssistScrollSpeed = (assistScrollSpeed: number) => {
     onSettingsChange({
@@ -494,6 +538,33 @@ export function ControlPanel(props: Props) {
                 ? localWhisperStatus.errorMessage ?? localWhisperStatus.bridge.errorMessage ?? 'None'
                 : 'None'}
           </dd>
+          <dt>Last start warning/error</dt>
+          <dd
+            className={`start-diagnostic ${
+              lastStartDiagnostic?.recovered
+                ? 'recovered'
+                : lastStartDiagnostic?.blocking
+                  ? 'blocking'
+                  : ''
+            }`}
+          >
+            {lastStartDiagnostic ? (
+              <>
+                <div>
+                  {new Date(lastStartDiagnostic.timestampMs).toLocaleString()} - {lastStartDiagnostic.source}
+                </div>
+                <div>
+                  {lastStartDiagnostic.level === 'error' ? 'Error' : 'Warning'} -{' '}
+                  {lastStartDiagnostic.blocking
+                    ? 'Blocking'
+                    : lastStartDiagnostic.recovered
+                      ? 'Recovered/temporary'
+                      : 'Observed during startup'}
+                </div>
+                <div>{lastStartDiagnostic.message}</div>
+              </>
+            ) : 'None recorded'}
+          </dd>
         </dl>
       </section>
 
@@ -566,7 +637,10 @@ export function ControlPanel(props: Props) {
         <div className="settings-grid display-settings-grid">
           <label>Font <input type="number" min={22} max={78} value={settings.fontSizePx} onChange={(event) => onSettingsChange({ ...settings, fontSizePx: Number(event.target.value) })} /></label>
           <label>Line <input type="number" min={1.1} max={2.2} step={0.05} value={settings.lineHeight} onChange={(event) => onSettingsChange({ ...settings, lineHeight: Number(event.target.value) })} /></label>
-          <label>Width <input type="number" min={42} max={92} value={settings.textWidthCh} onChange={(event) => onSettingsChange({ ...settings, textWidthCh: Number(event.target.value) })} /></label>
+          <label title="Changes the manuscript column width and side margins. The difference is most visible in wider or landscape windows.">Text width <input type="number" min={42} max={92} value={settings.textWidthCh} onChange={(event) => onSettingsChange({ ...settings, textWidthCh: Number(event.target.value) })} /></label>
+        </div>
+        <div className="settings-subtle display-setting-help">
+          Text width changes the manuscript column and side margins. On narrow portrait windows, the available screen width may already be the limiting factor.
         </div>
         <div className="reading-zone-control">
           <div className="reading-zone-label">
@@ -616,6 +690,40 @@ export function ControlPanel(props: Props) {
           >
             Reset to {DEFAULT_DISPLAY_SETTINGS.readingZonePercent}% default
           </button>
+        </div>
+        <div className="reading-zone-control">
+          <div className="reading-zone-label">
+            <span>Focus Bar height</span>
+            <strong>{settings.readingZoneHeightLines.toFixed(1)} lines</strong>
+          </div>
+          <div className="range-with-value">
+            <input
+              id="reading-zone-height"
+              type="range"
+              min={1}
+              max={2.5}
+              step={0.1}
+              value={settings.readingZoneHeightLines}
+              onChange={(event) => setReadingZoneHeightLines(Number(event.target.value))}
+              aria-label="Focus Bar height in line heights"
+            />
+            <input
+              type="number"
+              min={1}
+              max={2.5}
+              step={0.1}
+              value={settings.readingZoneHeightLines}
+              onChange={(event) => setReadingZoneHeightLines(Number(event.target.value))}
+              aria-label="Focus Bar height"
+            />
+          </div>
+          <div className="range-end-labels" aria-hidden="true">
+            <span>1 line</span>
+            <span>2.5 lines</span>
+          </div>
+          <div className="settings-subtle">
+            The target line stays centered while this changes how much surrounding text the bar frames.
+          </div>
         </div>
         <label className="toggle-row">
           <input
@@ -754,13 +862,77 @@ export function ControlPanel(props: Props) {
             <span>20</span>
           </div>
         </div>
+        <div className="movement-decision-panel">
+          <div className="reading-zone-label">
+            <span>Movement decision</span>
+            <strong>{movementDecision?.classification ?? 'waiting'}</strong>
+          </div>
+          {movementDecision ? (
+            <>
+              <dl className="movement-decision-grid">
+                <dt>Last confirmed</dt>
+                <dd>{formatTokenWithSnippet(movementDecision.confirmedTokenIndex, movementDecision.confirmedSnippet)}</dd>
+                <dt>Proposed target</dt>
+                <dd>{formatTokenWithSnippet(movementDecision.proposedTargetTokenIndex, movementDecision.proposedTargetSnippet)}</dd>
+                {movementDecision.visibleAnchorTokenIndex !== undefined && (
+                  <>
+                    <dt>Visible anchor</dt>
+                    <dd>#{movementDecision.visibleAnchorTokenIndex}</dd>
+                  </>
+                )}
+                <dt>Prior anchor</dt>
+                <dd>{formatTokenWithSnippet(movementDecision.previousAnchorTokenIndex, movementDecision.previousAnchorSnippet)}</dd>
+                <dt>Delta</dt>
+                <dd>
+                  {formatSignedInteger(movementDecision.movementDeltaTokens)} tokens / {formatSignedLines(movementDecision.movementDeltaLines)} lines
+                </dd>
+                <dt>Lookahead</dt>
+                <dd>{movementDecision.readingLookaheadTokens} tokens</dd>
+                <dt>Anchor age</dt>
+                <dd>{formatElapsed(movementDecision.elapsedSinceAnchorMs)}</dd>
+                <dt>Pace prior</dt>
+                <dd>{movementDecision.baselineWpm} WPM diagnostics only</dd>
+                <dt>Expected</dt>
+                <dd>{formatExpectedTokens(movementDecision.expectedTokenProgress)}</dd>
+                <dt>Corridor</dt>
+                <dd>{movementDecision.expectedProgressCorridor}</dd>
+                <dt>Confidence</dt>
+                <dd>{movementDecision.confidence.toFixed(2)}</dd>
+                <dt>Penalties</dt>
+                <dd>{movementDecision.penaltySummary}</dd>
+                <dt>Final</dt>
+                <dd>{movementDecision.finalMovement}</dd>
+                <dt>Context</dt>
+                <dd>{movementDecision.alignmentContext}</dd>
+              </dl>
+              <div className="movement-decision-reason">
+                <strong>Reason:</strong> {movementDecision.reason}
+              </div>
+              <div className="movement-decision-engine">
+                <strong>Engine:</strong> {movementDecision.engineReason}
+              </div>
+              {(movementDecisionHistory ?? []).length > 0 && (
+                <ol className="movement-decision-history">
+                  {(movementDecisionHistory ?? []).map((item) => (
+                    <li key={item.id}>
+                      <strong>{item.finalMovement}</strong> {item.classification} | d={formatSignedInteger(item.movementDeltaTokens)}t | conf={item.confidence.toFixed(2)} | {item.reason}
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </>
+          ) : (
+            <div className="settings-subtle">Waiting for Mock, Manual, OpenAI, Local Whisper, or Assist movement events.</div>
+          )}
+        </div>
         {/* Live visible anchor diagnostics (updated from prompter scroll decisions) */}
         {anchorDebug && (
           <div style={{ fontSize: '0.75em', marginTop: '6px', padding: '3px 4px', background: '#1a1f24', border: '1px solid #333', borderRadius: '2px' }}>
             <div style={{ fontWeight: 'bold', marginBottom: '2px' }}>Anchor status (live)</div>
             <div>Confirmed: {anchorDebug.confirmedToken} | Target: {anchorDebug.targetToken} (la={anchorDebug.lookahead})</div>
             <div>Dist: {anchorDebug.distLines?.toFixed(2)} lines | Decision: {anchorDebug.decision}</div>
-            <div>Band: {anchorDebug.bandH?.toFixed(1)}px / {(anchorDebug.bandH / anchorDebug.fontSize)?.toFixed(2)}fs | Line: {anchorDebug.lineH?.toFixed(1)}px | Tol zone: {anchorDebug.toleranceZoneH?.toFixed(1)}px</div>
+            <div>Band: {anchorDebug.bandH?.toFixed(1)}px / {anchorDebug.bandHeightLines?.toFixed(1)} lines | Line: {anchorDebug.lineH?.toFixed(1)}px</div>
+            <div>Target Y: {anchorDebug.targetY?.toFixed(1)}px | Center offset: {anchorDebug.targetOffsetPx?.toFixed(1)}px / {anchorDebug.targetOffsetLines?.toFixed(2)} lines | Tol zone: {anchorDebug.toleranceZoneH?.toFixed(1)}px</div>
           </div>
         )}
         <div className="inline-actions">

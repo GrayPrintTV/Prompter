@@ -35,6 +35,18 @@ function sendPreloadDiagnostics() {
   }
 }
 
+function safeSdpDiagnostics(value: unknown) {
+  const sdp = typeof value === 'string' ? value : '';
+  const firstLine = sdp.split(/\r?\n/, 1)[0] ?? '';
+  return {
+    receivedType: value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value,
+    characterLength: sdp.length,
+    startsWithV0: sdp.startsWith('v=0'),
+    firstLine: firstLine === 'v=0' ? 'v=0' : firstLine ? '[unexpected]' : '[empty]',
+    endsWithLineBreak: /(?:\r\n|\n)$/.test(sdp)
+  };
+}
+
 console.log('[preload] preload starting');
 sendPreloadDiagnostics();
 
@@ -54,7 +66,10 @@ try {
     toggleFullScreen: () => ipcRenderer.invoke('window:toggleFullScreen'),
     toggleAlwaysOnTop: () => ipcRenderer.invoke('window:toggleAlwaysOnTop'),
     getOpenAiRealtimeConfigStatus: () => ipcRenderer.invoke('openai-realtime:getConfigStatus'),
-    createOpenAiRealtimeClientSession: () => ipcRenderer.invoke('openai-realtime:createClientSession'),
+    exchangeOpenAiRealtimeSdp: (offerSdp: string) => {
+      console.info('[preload] OpenAI Realtime SDP forwarding over IPC', safeSdpDiagnostics(offerSdp));
+      return ipcRenderer.invoke('openai-realtime:exchangeSdp', offerSdp);
+    },
     getBridgeDiagnostics: () => ipcRenderer.invoke('bridge:getDiagnostics'),
     getLocalWhisperStatus: () => ipcRenderer.invoke('local-whisper:getStatus'),
     startLocalWhisper: (settings: unknown) => ipcRenderer.invoke('local-whisper:start', settings),

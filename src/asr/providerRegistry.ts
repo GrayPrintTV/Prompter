@@ -16,7 +16,7 @@ export function getAsrProviderOptions(
   localWhisperSettings?: LocalWhisperSettings
 ): AsrProviderOption[] {
   const localConfigured = localWhisperSettings ? isLocalWhisperConfigured(localWhisperSettings) : true;
-  return [
+  const options: AsrProviderOption[] = [
     { id: 'manual', label: 'Manual', enabled: true },
     { id: 'mock', label: 'Mock', enabled: true },
     {
@@ -24,14 +24,19 @@ export function getAsrProviderOptions(
       label: 'Local Whisper',
       enabled: localConfigured,
       reason: localConfigured ? undefined : 'Set Python executable and Whisper model'
-    },
-    {
-      id: 'openai-realtime',
-      label: 'Live OpenAI Realtime',
-      enabled: liveConfig.configured,
-      reason: liveConfig.configured ? undefined : 'Set OPENAI_API_KEY in .env.local or the environment'
     }
   ];
+
+  if (liveConfig.enabled) {
+    options.push({
+      id: 'openai-realtime',
+      label: 'Live OpenAI Realtime (Experimental)',
+      enabled: liveConfig.configured,
+      reason: liveConfig.configured ? undefined : 'Set OPENAI_API_KEY in .env.local or the environment'
+    });
+  }
+
+  return options;
 }
 
 export function coerceSelectedProvider(

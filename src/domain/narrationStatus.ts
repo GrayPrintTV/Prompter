@@ -17,6 +17,7 @@ export type NarrationStatusInput = {
   confidence: number;
   expectsMic: boolean;
   micActive: boolean;
+  micStartupGraceActive?: boolean;
   inputLevel: number;
   isLagging: boolean;
   errorMessage?: string | null;
@@ -29,6 +30,19 @@ export type NarrationStatus = {
   warning: string | null;
 };
 
+export type StartDiagnostic = {
+  timestampMs: number;
+  source: string;
+  level: 'warning' | 'error';
+  message: string;
+  blocking: boolean;
+  recovered: boolean;
+};
+
+export function isBenignStartDiagnosticMessage(message: string) {
+  return /ScriptProcessorNode|createScriptProcessor.*deprecated/i.test(message);
+}
+
 export function deriveNarrationStatus({
   isRunning,
   isStarting,
@@ -36,6 +50,7 @@ export function deriveNarrationStatus({
   confidence,
   expectsMic,
   micActive,
+  micStartupGraceActive = false,
   inputLevel,
   isLagging,
   errorMessage,
@@ -52,8 +67,8 @@ export function deriveNarrationStatus({
   if (isStarting) {
     return {
       label: 'Starting',
-      tone: 'warning',
-      warning: warningMessage ?? null
+      tone: 'idle',
+      warning: null
     };
   }
 
@@ -65,7 +80,7 @@ export function deriveNarrationStatus({
     };
   }
 
-  if (expectsMic && !micActive) {
+  if (expectsMic && !micActive && !micStartupGraceActive) {
     return {
       label: 'Error',
       tone: 'error',
@@ -73,7 +88,8 @@ export function deriveNarrationStatus({
     };
   }
 
-  const micWarning = expectsMic && inputLevel <= 0.005 ? 'Mic level is quiet.' : null;
+  const micWarning =
+    expectsMic && !micStartupGraceActive && inputLevel <= 0.005 ? 'Mic level is quiet.' : null;
   const warning = warningMessage ?? micWarning;
 
   if (isLagging) {

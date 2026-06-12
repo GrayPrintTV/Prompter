@@ -22,7 +22,26 @@ import {
   tokenIndexForSentence
 } from './domain/manuscript';
 import { shouldRecoverControlsFromHiddenLayout } from './domain/layoutRecovery';
-import { deriveNarrationStatus } from './domain/narrationStatus';
+import {
+  MANUAL_REACQUIRE_BACKWARD_WINDOW,
+  MANUAL_REACQUIRE_FORWARD_WINDOW,
+  isNearManualVisibleAnchor,
+  shouldHoldAutomaticBackwardCandidate,
+  visibleReacquireAllowsBackward,
+  type VisibleReacquireSource
+} from './domain/manualFollow';
+import {
+  buildMovementDecisionMetrics,
+  estimateTokensPerLine,
+  proposedTargetFromLookahead,
+  type MovementDecisionInfo,
+  type MovementDecisionOutcome
+} from './domain/movementDiagnostics';
+import {
+  deriveNarrationStatus,
+  isBenignStartDiagnosticMessage,
+  type StartDiagnostic
+} from './domain/narrationStatus';
 import { HIGH_CONFIDENCE, stateFromAlignment } from './domain/scrollModel';
 import { transcriptToTokens } from './domain/normalize';
 import type {
@@ -68,9 +87,10 @@ function clamp(value: number, min: number, max: number) {
 }
 
 const DEFAULT_LIVE_CONFIG: LiveAsrConfigStatus = {
+  enabled: false,
   configured: false,
   providerId: 'openai-realtime',
-  model: 'gpt-4o-transcribe',
+  model: 'gpt-realtime-whisper',
   language: 'en',
   promptConfigured: false
 };
@@ -102,6 +122,15 @@ const EMPTY_ALIGNMENT_BUFFER_DEBUG: AlignmentBufferDebug = {
 };
 
 const DISPLAY_SETTINGS_MIGRATION_KEY = 'narration-prompter.display-settings-v3-reading-band-migrated';
+const MIC_STARTUP_GRACE_MS = 2000;
+
+type VisibleReacquireAnchor = {
+  source: VisibleReacquireSource;
+  visibleTokenIndex: number;
+  detectedAtMs: number;
+  direction: 'backward' | 'forward' | 'stationary';
+  hadFreshConfirmedAnchor: boolean;
+};
 
 function hasDisplaySettingsMigrationRun() {
   try {
@@ -127,6 +156,18 @@ function localWhisperSettingsEqual(a: LocalWhisperSettings, b: LocalWhisperSetti
     a.computeType === b.computeType &&
     a.chunkDurationSeconds === b.chunkDurationSeconds
   );
+}
+
+function manuscriptTokenSnippet(model: ManuscriptModel, tokenIndex: number, radius = 5) {
+  if (model.tokens.length === 0) return 'No manuscript tokens.';
+  const center = clamp(Math.round(tokenIndex), 0, model.tokens.length - 1);
+  const from = clamp(center - radius, 0, model.tokens.length);
+  const to = clamp(center + radius + 1, 0, model.tokens.length);
+  return model.tokens
+    .slice(from, to)
+    .map((token) => token.originalText || token.text)
+    .join(' ')
+    .slice(0, 110);
 }
 
 export default function App() {
@@ -156,7 +197,11 @@ export default function App() {
     useState<LocalWhisperSettings>(initialLocalWhisperSettings);
   const [localWhisperStatus, setLocalWhisperStatus] = useState<LocalWhisperStatus>(DEFAULT_LOCAL_WHISPER_STATUS);
   const [selectedAsrProviderId, setSelectedAsrProviderId] = useState<AsrProviderId>(
-    (stored?.selectedAsrProviderId as AsrProviderId | undefined) ?? 'manual'
+    coerceSelectedProvider(
+      stored?.selectedAsrProviderId as AsrProviderId | undefined,
+      DEFAULT_LIVE_CONFIG,
+      initialLocalWhisperSettings
+    )
   );
   const [isListening, setIsListening] = useState(false);
   const [isMockPlaying, setIsMockPlaying] = useState(false);
@@ -177,6 +222,13 @@ export default function App() {
   const [anchorDebug, setAnchorDebug] = useState(null);
   const [scrollTestRequest, setScrollTestRequest] = useState<ScrollTestRequest | null>(null);
   const [scrollAnimationStatus, setScrollAnimationStatus] = useState<ScrollAnimationStatusInfo | null>(null);
+  const [movementDecision, setMovementDecision] = useState<MovementDecisionInfo | null>(null);
+  const [movementDecisionHistory, setMovementDecisionHistory] = useState<MovementDecisionInfo[]>([]);
+  const [lastStartDiagnostic, setLastStartDiagnostic] = useState<StartDiagnostic | null>(null);
+  const [micStartupGraceActive, setMicStartupGraceActive] = useState(false);
+  const [manualReacquireAnchor, setManualReacquireAnchor] =
+    useState<VisibleReacquireAnchor | null>(null);
+  const [startupVisibleAnchorRequestId, setStartupVisibleAnchorRequestId] = useState(0);
   const [alignmentBufferDebug, setAlignmentBufferDebug] = useState<AlignmentBufferDebug>(
     EMPTY_ALIGNMENT_BUFFER_DEBUG
   );
@@ -194,14 +246,27 @@ export default function App() {
   const lowConfidenceCountRef = useRef(0);
   const localAlignmentBufferRef = useRef(createAlignmentBufferState());
   const scrollTestIdRef = useRef(0);
+  const startupVisibleAnchorRequestIdRef = useRef(0);
+  const movementDecisionIdRef = useRef(0);
+  const lastFreshAnchorRef = useRef<{ tokenIndex: number; timestampMs: number } | null>(null);
+  const lastAssistMovementKeyRef = useRef<string | null>(null);
   const manuscript = useMemo(() => buildManuscript(manuscriptText), [manuscriptText]);
   const manuscriptRef = useRef(manuscript);
   const currentTokenRef = useRef(currentTokenIndex);
   const followStateRef = useRef(followState);
   const [alignment, setAlignment] = useState<AlignmentResult>(() => emptyAlignment(manuscript, currentTokenIndex));
+  const alignmentRef = useRef(alignment);
   const selectedAsrProviderRef = useRef(selectedAsrProviderId);
   const slowMockRef = useRef(false);
   const displaySettingsRef = useRef<DisplaySettings | null>(null);
+  const anchorDebugRef = useRef<any>(null);
+  const activeStartAttemptRef = useRef<{
+    providerId: AsrProviderId;
+    source: string;
+    lastIssue: StartDiagnostic | null;
+  } | null>(null);
+  const manualReacquireAnchorRef = useRef<VisibleReacquireAnchor | null>(null);
+  const micStartupGraceTimeoutRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (shouldRunDisplaySettingsMigration) {
@@ -212,6 +277,10 @@ export default function App() {
   useEffect(() => {
     displaySettingsRef.current = displaySettings;
   }, [displaySettings]);
+
+  useEffect(() => {
+    alignmentRef.current = alignment;
+  }, [alignment]);
 
   useEffect(() => {
     slowMockRef.current = slowMock;
@@ -228,6 +297,9 @@ export default function App() {
     setAlignment(emptyAlignment(manuscript, clamped));
     localAlignmentBufferRef.current = createAlignmentBufferState();
     setAlignmentBufferDebug(EMPTY_ALIGNMENT_BUFFER_DEBUG);
+    lastFreshAnchorRef.current = null;
+    setMovementDecision(null);
+    setMovementDecisionHistory([]);
   }, [manuscript]);
 
   useEffect(() => {
@@ -241,6 +313,38 @@ export default function App() {
   useEffect(() => {
     selectedAsrProviderRef.current = selectedAsrProviderId;
   }, [selectedAsrProviderId]);
+
+  useEffect(() => () => {
+    if (micStartupGraceTimeoutRef.current !== null) {
+      window.clearTimeout(micStartupGraceTimeoutRef.current);
+    }
+  }, []);
+
+  const clearMicStartupGrace = useCallback(() => {
+    if (micStartupGraceTimeoutRef.current !== null) {
+      window.clearTimeout(micStartupGraceTimeoutRef.current);
+      micStartupGraceTimeoutRef.current = null;
+    }
+    setMicStartupGraceActive(false);
+  }, []);
+
+  const beginMicStartupGrace = useCallback(() => {
+    if (micStartupGraceTimeoutRef.current !== null) {
+      window.clearTimeout(micStartupGraceTimeoutRef.current);
+      micStartupGraceTimeoutRef.current = null;
+    }
+    setMicStartupGraceActive(true);
+  }, []);
+
+  const settleMicStartupGrace = useCallback(() => {
+    if (micStartupGraceTimeoutRef.current !== null) {
+      window.clearTimeout(micStartupGraceTimeoutRef.current);
+    }
+    micStartupGraceTimeoutRef.current = window.setTimeout(() => {
+      micStartupGraceTimeoutRef.current = null;
+      setMicStartupGraceActive(false);
+    }, MIC_STARTUP_GRACE_MS);
+  }, []);
 
   const moveToToken = useCallback((tokenIndex: number, nextState: FollowState = 'manual') => {
     const model = manuscriptRef.current;
@@ -256,6 +360,95 @@ export default function App() {
   const appendTrace = useCallback((entry: string) => {
     setTraceLog((prev) => [...prev.slice(-39), entry]);
   }, []);
+
+  const publishMovementDecision = useCallback((decision: MovementDecisionInfo) => {
+    setMovementDecision(decision);
+    setMovementDecisionHistory((previous) => [decision, ...previous].slice(0, 10));
+  }, []);
+
+  const recordMovementDecision = useCallback((params: {
+    source: string;
+    previousTokenIndex?: number;
+    result?: AlignmentResult;
+    confirmedTokenIndex?: number;
+    proposedTargetTokenIndex?: number;
+    confidence?: number;
+    followState: FollowState;
+    finalMovement: MovementDecisionOutcome;
+    engineReason?: string;
+    alignmentContext?: string;
+    markFreshAnchor?: boolean;
+    visibleAnchorTokenIndex?: number;
+  }) => {
+    const model = manuscriptRef.current;
+    const settings = displaySettingsRef.current ?? displaySettings;
+    const tokenCount = model.tokens.length;
+    const now = Date.now();
+    const lookahead = Math.max(0, Math.min(20, Math.round(settings.readingLookaheadTokens ?? 0)));
+    const confirmedTokenIndex = clamp(
+      params.confirmedTokenIndex ?? params.result?.tokenIndex ?? currentTokenRef.current,
+      0,
+      Math.max(tokenCount - 1, 0)
+    );
+    const proposedTargetTokenIndex = clamp(
+      params.proposedTargetTokenIndex ??
+        proposedTargetFromLookahead(confirmedTokenIndex, lookahead, tokenCount),
+      0,
+      Math.max(tokenCount - 1, 0)
+    );
+    const previousAnchor = lastFreshAnchorRef.current;
+    const previousAnchorTokenIndex = clamp(
+      previousAnchor?.tokenIndex ?? params.previousTokenIndex ?? currentTokenRef.current,
+      0,
+      Math.max(tokenCount - 1, 0)
+    );
+    const elapsedSinceAnchorMs = previousAnchor
+      ? Math.max(0, now - previousAnchor.timestampMs)
+      : null;
+    const confidence = params.confidence ?? params.result?.confidence ?? alignmentRef.current.confidence;
+    const engineReason = params.engineReason ?? params.result?.reason ?? alignmentRef.current.reason;
+    const metrics = buildMovementDecisionMetrics({
+      previousAnchorTokenIndex,
+      confirmedTokenIndex,
+      proposedTargetTokenIndex,
+      readingLookaheadTokens: lookahead,
+      elapsedSinceAnchorMs,
+      confidence,
+      followState: params.followState,
+      finalMovement: params.finalMovement,
+      resultDiagnostics: params.result?.diagnostics ?? alignmentRef.current.diagnostics,
+      engineReason,
+      alignmentContext: params.alignmentContext,
+      tokensPerLine: estimateTokensPerLine(settings.textWidthCh)
+    });
+
+    movementDecisionIdRef.current += 1;
+    publishMovementDecision({
+      id: movementDecisionIdRef.current,
+      timestampMs: now,
+      source: params.source,
+      visibleAnchorTokenIndex:
+        params.visibleAnchorTokenIndex ?? manualReacquireAnchorRef.current?.visibleTokenIndex,
+      previousAnchorTokenIndex,
+      previousAnchorSnippet: manuscriptTokenSnippet(model, previousAnchorTokenIndex),
+      confirmedTokenIndex,
+      confirmedSnippet: manuscriptTokenSnippet(model, confirmedTokenIndex),
+      proposedTargetTokenIndex,
+      proposedTargetSnippet: manuscriptTokenSnippet(model, proposedTargetTokenIndex),
+      readingLookaheadTokens: lookahead,
+      elapsedSinceAnchorMs,
+      confidence,
+      finalMovement: params.finalMovement,
+      ...metrics
+    });
+
+    if (params.markFreshAnchor) {
+      lastFreshAnchorRef.current = {
+        tokenIndex: confirmedTokenIndex,
+        timestampMs: now
+      };
+    }
+  }, [displaySettings, publishMovementDecision]);
 
   const requestSmoothScrollTest = useCallback((lineCount: number) => {
     scrollTestIdRef.current += 1;
@@ -277,11 +470,32 @@ export default function App() {
     });
   }, [appendTrace]);
 
+  const clearManualReacquireAnchor = useCallback(() => {
+    manualReacquireAnchorRef.current = null;
+    setManualReacquireAnchor(null);
+  }, []);
+
+  const requestStartupVisibleAnchor = useCallback(async () => {
+    clearManualReacquireAnchor();
+    startupVisibleAnchorRequestIdRef.current += 1;
+    setStartupVisibleAnchorRequestId(startupVisibleAnchorRequestIdRef.current);
+    await new Promise<void>((resolve) => {
+      window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve()));
+    });
+  }, [clearManualReacquireAnchor]);
+
+  const enterFollowing = useCallback(() => {
+    followStateRef.current = 'following';
+    setFollowState('following');
+  }, []);
+
   const resetAlignmentContext = useCallback(() => {
     localAlignmentBufferRef.current = createAlignmentBufferState();
+    lastFreshAnchorRef.current = null;
+    clearManualReacquireAnchor();
     setTranscriptBuffer([]);
     setAlignmentBufferDebug(EMPTY_ALIGNMENT_BUFFER_DEBUG);
-  }, []);
+  }, [clearManualReacquireAnchor]);
 
   const onTraceScroll = useCallback((info: { sentenceIndex: number; didScroll: boolean; reason: string }) => {
     const r = info.reason || '';
@@ -292,7 +506,23 @@ export default function App() {
     } else {
       appendTrace(`scroll s${info.sentenceIndex} ${info.didScroll ? 'SCROLLED' : 'NO-SCROLL'} (${info.reason})`);
     }
-  }, [appendTrace]);
+    const isLiveCorrectionEvent =
+      r.includes('animation started source=live') ||
+      r.includes('animation retargeted source=live') ||
+      r.includes('correction completed; animation completed source=live') ||
+      r.includes('already in reading band');
+    if (isLiveCorrectionEvent) {
+      recordMovementDecision({
+        source: 'scroll',
+        confirmedTokenIndex: anchorDebugRef.current?.confirmedToken ?? currentTokenRef.current,
+        proposedTargetTokenIndex: anchorDebugRef.current?.targetToken,
+        followState: followStateRef.current,
+        finalMovement: r.includes('already in reading band') ? 'held' : 'corrected',
+        engineReason: r,
+        alignmentContext: 'scroll correction event'
+      });
+    }
+  }, [appendTrace, recordMovementDecision]);
 
   const onAssistStatus = useCallback((info: AssistStatusInfo) => {
     setAssistStatus(info);
@@ -300,15 +530,118 @@ export default function App() {
     if (info.state && info.state !== 'OFF') {
       appendTrace(`assist status: ${info.state}${info.cruiseVelocityPxPerSec != null ? ` vel=${Math.round(info.cruiseVelocityPxPerSec)}px/s` : ''}${info.estimatedPaceLinesPerMin != null ? ` pace=${info.estimatedPaceLinesPerMin}lpm` : ''}`);
     }
-  }, [appendTrace]);
+    const movementKey = `${info.enabled ? 1 : 0}|${info.state}|${info.reason ?? ''}`;
+    if (info.state && info.state !== 'OFF' && movementKey !== lastAssistMovementKeyRef.current) {
+      lastAssistMovementKeyRef.current = movementKey;
+      const state = info.state.toLowerCase();
+      const isCruising = state.includes('cruising') || state.includes('slowed');
+      recordMovementDecision({
+        source: 'assist',
+        confirmedTokenIndex: lastFreshAnchorRef.current?.tokenIndex ?? currentTokenRef.current,
+        followState: followStateRef.current,
+        finalMovement: isCruising ? 'only Assist-cruised' : 'held',
+        confidence: isCruising ? alignmentRef.current.confidence : 0,
+        engineReason: info.reason ?? info.state,
+        alignmentContext: `assist ${info.state}`
+      });
+    }
+  }, [appendTrace, recordMovementDecision]);
 
   const onAnchorDebug = useCallback((info: any) => {
+    anchorDebugRef.current = info;
     setAnchorDebug(info);
   }, []);
 
   const onScrollAnimationStatus = useCallback((info: ScrollAnimationStatusInfo) => {
     setScrollAnimationStatus(info);
   }, []);
+
+  const onStartupVisibleAnchor = useCallback((info: {
+    requestId: number;
+    visibleTokenIndex: number;
+    scrollTop: number;
+  }) => {
+    if (info.requestId !== startupVisibleAnchorRequestIdRef.current) return;
+    const hadFreshConfirmedAnchor = Boolean(lastFreshAnchorRef.current);
+    const anchor: VisibleReacquireAnchor = {
+      source: 'startup',
+      visibleTokenIndex: info.visibleTokenIndex,
+      detectedAtMs: Date.now(),
+      direction: 'stationary',
+      hadFreshConfirmedAnchor
+    };
+    manualReacquireAnchorRef.current = anchor;
+    setManualReacquireAnchor(anchor);
+    localAlignmentBufferRef.current = createAlignmentBufferState();
+    lowConfidenceCountRef.current = 0;
+    resyncArmedRef.current = false;
+    setTranscriptBuffer([]);
+    setAlignmentBufferDebug({
+      ...EMPTY_ALIGNMENT_BUFFER_DEBUG,
+      moveDecision: `startup visible anchor set at token ${info.visibleTokenIndex}`,
+      retentionDecision: 'reset',
+      retentionReason: 'waiting for fresh transcript near the startup visible area'
+    });
+    appendTrace(
+      `startup visible anchor set token=${info.visibleTokenIndex} scrollTop=${info.scrollTop.toFixed(1)} freshAnchor=${hadFreshConfirmedAnchor ? 'yes' : 'no'}`
+    );
+    recordMovementDecision({
+      source: 'startup-visible-anchor',
+      previousTokenIndex: currentTokenRef.current,
+      confirmedTokenIndex: currentTokenRef.current,
+      proposedTargetTokenIndex: info.visibleTokenIndex,
+      confidence: 0,
+      followState: 'holding',
+      finalMovement: 'held',
+      engineReason: `startup visible anchor set; token=${info.visibleTokenIndex}`,
+      alignmentContext: `startup visible anchor set; visible anchor token=${info.visibleTokenIndex}; fresh confirmed anchor=${hadFreshConfirmedAnchor ? 'yes' : 'no'}`,
+      visibleAnchorTokenIndex: info.visibleTokenIndex
+    });
+  }, [appendTrace, recordMovementDecision]);
+
+  const onManualScroll = useCallback((info: {
+    visibleTokenIndex: number;
+    scrollTop: number;
+    direction: 'backward' | 'forward' | 'stationary';
+  }) => {
+    const anchor: VisibleReacquireAnchor = {
+      source: 'manual-scroll',
+      visibleTokenIndex: info.visibleTokenIndex,
+      detectedAtMs: Date.now(),
+      direction: info.direction,
+      hadFreshConfirmedAnchor: Boolean(lastFreshAnchorRef.current)
+    };
+    manualReacquireAnchorRef.current = anchor;
+    setManualReacquireAnchor(anchor);
+    localAlignmentBufferRef.current = createAlignmentBufferState();
+    lowConfidenceCountRef.current = 0;
+    resyncArmedRef.current = false;
+    setTranscriptBuffer([]);
+    setAlignmentBufferDebug({
+      ...EMPTY_ALIGNMENT_BUFFER_DEBUG,
+      moveDecision: `manual scroll detected; visible anchor token ${info.visibleTokenIndex}`,
+      retentionDecision: 'reset',
+      retentionReason: 'waiting for fresh transcript near the visible manuscript area'
+    });
+    if (followStateRef.current !== 'manual' && followStateRef.current !== 'paused') {
+      setFollowState('holding');
+    }
+    appendTrace(
+      `manual scroll detected direction=${info.direction} visible anchor token=${info.visibleTokenIndex} scrollTop=${info.scrollTop.toFixed(1)}`
+    );
+    recordMovementDecision({
+      source: 'manual-scroll',
+      previousTokenIndex: currentTokenRef.current,
+      confirmedTokenIndex: currentTokenRef.current,
+      proposedTargetTokenIndex: info.visibleTokenIndex,
+      confidence: 0,
+      followState: 'holding',
+      finalMovement: 'held',
+      engineReason: `manual scroll detected; visible anchor token=${info.visibleTokenIndex}`,
+      alignmentContext: `manual scroll detected; visible anchor token=${info.visibleTokenIndex}; direction=${info.direction}`,
+      visibleAnchorTokenIndex: info.visibleTokenIndex
+    });
+  }, [appendTrace, recordMovementDecision]);
 
   // Trace assist param changes (enabled/speed/feel) when user adjusts Display controls. Runs after appendTrace exists.
   useEffect(() => {
@@ -325,6 +658,7 @@ export default function App() {
 
     if (words.length === 0) {
       appendTrace('empty transcript -> holding');
+      const nextState = followStateRef.current === 'manual' ? 'manual' : 'holding';
       setAlignmentBufferDebug({
         ...EMPTY_ALIGNMENT_BUFFER_DEBUG,
         source: delta.source,
@@ -333,7 +667,17 @@ export default function App() {
         retentionDecision: 'discarded',
         retentionReason: 'empty transcript'
       });
-      setFollowState((previous) => (previous === 'manual' ? 'manual' : 'holding'));
+      recordMovementDecision({
+        source: delta.source,
+        previousTokenIndex: currentTokenRef.current,
+        confirmedTokenIndex: currentTokenRef.current,
+        followState: nextState,
+        finalMovement: 'held',
+        confidence: 0,
+        engineReason: 'empty transcript',
+        alignmentContext: 'discarded empty transcript'
+      });
+      setFollowState(nextState);
       return;
     }
 
@@ -341,13 +685,17 @@ export default function App() {
       const model = manuscriptRef.current;
       const previousToken = currentTokenRef.current;
       const wasResyncing = resyncArmedRef.current;
+      const manualAnchor = manualReacquireAnchorRef.current;
+      const searchAnchorToken = manualAnchor?.visibleTokenIndex ?? previousToken;
       const decision = evaluateProvisionalAlignmentBuffer(
         model,
         localAlignmentBufferRef.current,
         words,
-        previousToken,
+        searchAnchorToken,
         {
-          widenWindow: wasResyncing || followStateRef.current === 'lost'
+          widenWindow: !manualAnchor && (wasResyncing || followStateRef.current === 'lost'),
+          backwardWindow: manualAnchor ? MANUAL_REACQUIRE_BACKWARD_WINDOW : undefined,
+          forwardWindow: manualAnchor ? MANUAL_REACQUIRE_FORWARD_WINDOW : undefined
         }
       );
       localAlignmentBufferRef.current = decision.state;
@@ -357,6 +705,33 @@ export default function App() {
 
       let moveToTokenCalled = false;
       let moveDecision = 'held';
+      let movementFollowState: FollowState = followStateRef.current;
+      let finalMovement: MovementDecisionOutcome = 'held';
+      let movementContext = '';
+      const freshHighConfidenceMatch =
+        decision.moveRecommended && decision.result.confidence >= HIGH_CONFIDENCE;
+      const nearManualAnchor = Boolean(
+        manualAnchor &&
+        isNearManualVisibleAnchor(decision.result.tokenIndex, manualAnchor.visibleTokenIndex)
+      );
+      const visibleReacquireAllowsCandidateBackward = Boolean(
+        manualAnchor &&
+        visibleReacquireAllowsBackward(
+          manualAnchor.source,
+          manualAnchor.hadFreshConfirmedAnchor
+        )
+      );
+      const startupBackwardBlocked = Boolean(
+        manualAnchor?.source === 'startup' &&
+        !visibleReacquireAllowsCandidateBackward &&
+        decision.result.tokenIndex < previousToken
+      );
+      const autoBackwardCandidate = shouldHoldAutomaticBackwardCandidate({
+        candidateTokenIndex: decision.result.tokenIndex,
+        confirmedAnchorTokenIndex: previousToken,
+        explicitBackwardAllowed: wasResyncing,
+        visibleReacquireAllowsBackward: visibleReacquireAllowsCandidateBackward
+      });
       appendTrace(
         `local eval buffer=[${decision.evaluationTokens.join(' ')}] provisional=[${decision.state.provisionalTokens.join(' ')}]`
       );
@@ -369,13 +744,67 @@ export default function App() {
 
       if (followStateRef.current === 'manual' || followStateRef.current === 'paused') {
         moveDecision = 'manual/paused: no follow update';
+        finalMovement = 'ignored';
+        movementContext = 'manual/paused: no follow update';
         appendTrace('manual/paused: moveToToken not called');
-      } else if (decision.moveRecommended && decision.result.confidence >= HIGH_CONFIDENCE) {
+      } else if (manualAnchor) {
+        if (freshHighConfidenceMatch && nearManualAnchor && !startupBackwardBlocked) {
+          lowConfidenceCountRef.current = 0;
+          movementFollowState = 'following';
+          moveToToken(decision.result.tokenIndex, 'following');
+          moveToTokenCalled = true;
+          finalMovement = 'accepted';
+          if (manualAnchor.source === 'startup') {
+            moveDecision = `cold-start reacquired from visible text at token ${decision.result.tokenIndex}`;
+            movementContext = `cold-start reacquired from visible text; startup visible anchor token=${manualAnchor.visibleTokenIndex}`;
+            appendTrace(
+              `cold-start reacquired from visible text visibleT=${manualAnchor.visibleTokenIndex} matchedT=${decision.result.tokenIndex}`
+            );
+          } else {
+            moveDecision = `reacquired after manual scroll at token ${decision.result.tokenIndex}`;
+            movementContext = `reacquired after manual scroll; visible anchor token=${manualAnchor.visibleTokenIndex}`;
+            appendTrace(
+              `reacquired after manual scroll visibleT=${manualAnchor.visibleTokenIndex} matchedT=${decision.result.tokenIndex}`
+            );
+          }
+          manualReacquireAnchorRef.current = null;
+          setManualReacquireAnchor(null);
+        } else {
+          movementFollowState = 'holding';
+          setFollowState('holding');
+          if (startupBackwardBlocked) {
+            moveDecision = `auto-backward candidate held: ${decision.result.tokenIndex} < confirmed ${previousToken}`;
+            movementContext = 'auto-backward candidate held after startup; possible rollback/reread';
+          } else if (manualAnchor.source === 'startup') {
+            moveDecision = freshHighConfidenceMatch
+              ? `held because startup match was outside visible neighborhood ${manualAnchor.visibleTokenIndex}`
+              : `held: waiting for cold-start match near visible anchor ${manualAnchor.visibleTokenIndex}`;
+            movementContext = freshHighConfidenceMatch
+              ? `held because startup match was outside visible neighborhood; startup visible anchor token=${manualAnchor.visibleTokenIndex}`
+              : `startup visible anchor reacquire pending; visible anchor token=${manualAnchor.visibleTokenIndex}`;
+          } else {
+            moveDecision = freshHighConfidenceMatch
+              ? `held: high-confidence match not near visible anchor ${manualAnchor.visibleTokenIndex}`
+              : `held: waiting to reacquire near visible anchor ${manualAnchor.visibleTokenIndex}`;
+            movementContext = `manual scroll reacquire pending; visible anchor token=${manualAnchor.visibleTokenIndex}`;
+          }
+          appendTrace(`moveToToken called: NO (${moveDecision})`);
+        }
+      } else if (freshHighConfidenceMatch && autoBackwardCandidate) {
+        movementFollowState = 'holding';
+        setFollowState('holding');
+        moveDecision = `auto-backward candidate held: ${decision.result.tokenIndex} < confirmed ${previousToken}`;
+        movementContext = 'auto-backward candidate held; possible rollback/reread';
+        appendTrace(`moveToToken called: NO (${moveDecision})`);
+      } else if (freshHighConfidenceMatch) {
         lowConfidenceCountRef.current = 0;
         const nextState = stateFromAlignment(decision.result, previousToken, wasResyncing, 0);
+        movementFollowState = nextState;
         moveToToken(decision.result.tokenIndex, nextState);
         moveToTokenCalled = true;
+        finalMovement = 'accepted';
         moveDecision = `moved to token ${decision.result.tokenIndex} state=${nextState}`;
+        movementContext = `accepted automatic movement state=${nextState}`;
         appendTrace(`moveToToken called: YES s${decision.result.sentenceIndex} state=${nextState}`);
       } else {
         lowConfidenceCountRef.current += 1;
@@ -389,16 +818,30 @@ export default function App() {
               wasResyncing,
               lowConfidenceCountRef.current
             );
+        movementFollowState = nextState;
         setFollowState(nextState);
         moveDecision = heldHighConfidenceStaleContext
           ? 'held: current delta did not contribute a manuscript anchor'
           : `held state=${nextState} confidence below threshold`;
+        movementContext = moveDecision;
         appendTrace(
           heldHighConfidenceStaleContext
             ? `moveToToken called: NO state=${nextState} (stale context)`
             : `moveToToken called: NO state=${nextState} (low-conf)`
         );
       }
+
+      recordMovementDecision({
+        source: delta.source,
+        previousTokenIndex: previousToken,
+        result: decision.result,
+        followState: movementFollowState,
+        finalMovement,
+        engineReason: decision.result.reason,
+        alignmentContext: `${movementContext || moveDecision}; ${decision.retainedDelta ? 'retained' : 'discarded'}: ${decision.retentionReason}`,
+        markFreshAnchor: moveToTokenCalled,
+        visibleAnchorTokenIndex: manualAnchor?.visibleTokenIndex
+      });
 
       setAlignmentBufferDebug({
         source: delta.source,
@@ -423,8 +866,12 @@ export default function App() {
       const model = manuscriptRef.current;
       const previousToken = currentTokenRef.current;
       const wasResyncing = resyncArmedRef.current;
-      const result = alignTranscript(model, next, previousToken, {
-        widenWindow: wasResyncing || followStateRef.current === 'lost'
+      const manualAnchor = manualReacquireAnchorRef.current;
+      const searchAnchorToken = manualAnchor?.visibleTokenIndex ?? previousToken;
+      const result = alignTranscript(model, next, searchAnchorToken, {
+        widenWindow: !manualAnchor && (wasResyncing || followStateRef.current === 'lost'),
+        backwardWindow: manualAnchor ? MANUAL_REACQUIRE_BACKWARD_WINDOW : undefined,
+        forwardWindow: manualAnchor ? MANUAL_REACQUIRE_FORWARD_WINDOW : undefined
       });
 
       setAlignment(result);
@@ -433,6 +880,15 @@ export default function App() {
 
       if (followStateRef.current === 'manual' || followStateRef.current === 'paused') {
         appendTrace('manual/paused: no follow update');
+        recordMovementDecision({
+          source: delta.source,
+          previousTokenIndex: previousToken,
+          result,
+          followState: followStateRef.current,
+          finalMovement: 'ignored',
+          engineReason: result.reason,
+          alignmentContext: 'standard rolling buffer provider; manual/paused'
+        });
         setAlignmentBufferDebug({
           source: delta.source,
           rawTranscript: raw,
@@ -451,11 +907,163 @@ export default function App() {
         return next;
       }
 
-      if (result.confidence >= HIGH_CONFIDENCE) {
+      const highConfidenceMatch = result.confidence >= HIGH_CONFIDENCE;
+      const nearManualAnchor = Boolean(
+        manualAnchor && isNearManualVisibleAnchor(result.tokenIndex, manualAnchor.visibleTokenIndex)
+      );
+      const visibleReacquireAllowsCandidateBackward = Boolean(
+        manualAnchor &&
+        visibleReacquireAllowsBackward(
+          manualAnchor.source,
+          manualAnchor.hadFreshConfirmedAnchor
+        )
+      );
+      const startupBackwardBlocked = Boolean(
+        manualAnchor?.source === 'startup' &&
+        !visibleReacquireAllowsCandidateBackward &&
+        result.tokenIndex < previousToken
+      );
+      const autoBackwardCandidate = shouldHoldAutomaticBackwardCandidate({
+        candidateTokenIndex: result.tokenIndex,
+        confirmedAnchorTokenIndex: previousToken,
+        explicitBackwardAllowed: wasResyncing,
+        visibleReacquireAllowsBackward: visibleReacquireAllowsCandidateBackward
+      });
+
+      if (manualAnchor) {
+        if (highConfidenceMatch && nearManualAnchor && !startupBackwardBlocked) {
+          lowConfidenceCountRef.current = 0;
+          moveToToken(result.tokenIndex, 'following');
+          const startupReacquire = manualAnchor.source === 'startup';
+          appendTrace(
+            startupReacquire
+              ? `cold-start reacquired from visible text visibleT=${manualAnchor.visibleTokenIndex} matchedT=${result.tokenIndex}`
+              : `reacquired after manual scroll visibleT=${manualAnchor.visibleTokenIndex} matchedT=${result.tokenIndex}`
+          );
+          recordMovementDecision({
+            source: delta.source,
+            previousTokenIndex: previousToken,
+            result,
+            followState: 'following',
+            finalMovement: 'accepted',
+            engineReason: result.reason,
+            alignmentContext: startupReacquire
+              ? `cold-start reacquired from visible text; startup visible anchor token=${manualAnchor.visibleTokenIndex}`
+              : `reacquired after manual scroll; visible anchor token=${manualAnchor.visibleTokenIndex}`,
+            markFreshAnchor: true,
+            visibleAnchorTokenIndex: manualAnchor.visibleTokenIndex
+          });
+          setAlignmentBufferDebug({
+            source: delta.source,
+            rawTranscript: raw,
+            normalizedTokens: words,
+            retainedTokens: words,
+            rollingBufferTokens: next,
+            provisionalBufferTokens: [],
+            evaluationBufferTokens: next,
+            matchedText: result.matchedText,
+            confidence: result.confidence,
+            moveDecision: startupReacquire
+              ? `cold-start reacquired from visible text at token ${result.tokenIndex}`
+              : `reacquired after manual scroll at token ${result.tokenIndex}`,
+            moveToTokenCalled: true,
+            retentionDecision: 'retained',
+            retentionReason: startupReacquire
+              ? 'fresh high-confidence match near startup visible anchor'
+              : 'fresh high-confidence match near visible manual anchor'
+          });
+          manualReacquireAnchorRef.current = null;
+          setManualReacquireAnchor(null);
+        } else {
+          setFollowState('holding');
+          const moveDecision = startupBackwardBlocked
+            ? `auto-backward candidate held: ${result.tokenIndex} < confirmed ${previousToken}`
+            : manualAnchor.source === 'startup'
+              ? highConfidenceMatch
+                ? `held because startup match was outside visible neighborhood ${manualAnchor.visibleTokenIndex}`
+                : `held: waiting for cold-start match near visible anchor ${manualAnchor.visibleTokenIndex}`
+              : highConfidenceMatch
+                ? `held: high-confidence match not near visible anchor ${manualAnchor.visibleTokenIndex}`
+                : `held: waiting to reacquire near visible anchor ${manualAnchor.visibleTokenIndex}`;
+          appendTrace(`action: HELD (${moveDecision})`);
+          recordMovementDecision({
+            source: delta.source,
+            previousTokenIndex: previousToken,
+            result,
+            followState: 'holding',
+            finalMovement: 'held',
+            engineReason: result.reason,
+            alignmentContext: startupBackwardBlocked
+              ? 'auto-backward candidate held after startup; possible rollback/reread'
+              : manualAnchor.source === 'startup'
+                ? highConfidenceMatch
+                  ? `held because startup match was outside visible neighborhood; startup visible anchor token=${manualAnchor.visibleTokenIndex}`
+                  : `startup visible anchor reacquire pending; visible anchor token=${manualAnchor.visibleTokenIndex}`
+                : `manual scroll reacquire pending; visible anchor token=${manualAnchor.visibleTokenIndex}`,
+            visibleAnchorTokenIndex: manualAnchor.visibleTokenIndex
+          });
+          setAlignmentBufferDebug({
+            source: delta.source,
+            rawTranscript: raw,
+            normalizedTokens: words,
+            retainedTokens: words,
+            rollingBufferTokens: next,
+            provisionalBufferTokens: [],
+            evaluationBufferTokens: next,
+            matchedText: result.matchedText,
+            confidence: result.confidence,
+            moveDecision,
+            moveToTokenCalled: false,
+            retentionDecision: 'retained',
+            retentionReason:
+              manualAnchor.source === 'startup'
+                ? 'waiting for fresh high-confidence match near startup visible anchor'
+                : 'waiting for fresh high-confidence match near visible manual anchor'
+          });
+        }
+      } else if (highConfidenceMatch && autoBackwardCandidate) {
+        setFollowState('holding');
+        const moveDecision = `auto-backward candidate held: ${result.tokenIndex} < confirmed ${previousToken}`;
+        appendTrace(`action: HELD (${moveDecision})`);
+        recordMovementDecision({
+          source: delta.source,
+          previousTokenIndex: previousToken,
+          result,
+          followState: 'holding',
+          finalMovement: 'held',
+          engineReason: result.reason,
+          alignmentContext: 'auto-backward candidate held; possible rollback/reread'
+        });
+        setAlignmentBufferDebug({
+          source: delta.source,
+          rawTranscript: raw,
+          normalizedTokens: words,
+          retainedTokens: words,
+          rollingBufferTokens: next,
+          provisionalBufferTokens: [],
+          evaluationBufferTokens: next,
+          matchedText: result.matchedText,
+          confidence: result.confidence,
+          moveDecision,
+          moveToTokenCalled: false,
+          retentionDecision: 'retained',
+          retentionReason: 'automatic backward movement disabled during live following'
+        });
+      } else if (highConfidenceMatch) {
         lowConfidenceCountRef.current = 0;
         const nextState = stateFromAlignment(result, previousToken, wasResyncing, 0);
         moveToToken(result.tokenIndex, nextState);
         appendTrace(`action: MOVED s${result.sentenceIndex} state=${nextState} (high-conf)`);
+        recordMovementDecision({
+          source: delta.source,
+          previousTokenIndex: previousToken,
+          result,
+          followState: nextState,
+          finalMovement: 'accepted',
+          engineReason: result.reason,
+          alignmentContext: 'standard rolling buffer provider',
+          markFreshAnchor: true
+        });
         setAlignmentBufferDebug({
           source: delta.source,
           rawTranscript: raw,
@@ -476,6 +1084,15 @@ export default function App() {
         const nextState = stateFromAlignment(result, previousToken, wasResyncing, lowConfidenceCountRef.current);
         setFollowState(nextState);
         appendTrace(`action: HELD state=${nextState} (low-conf)`);
+        recordMovementDecision({
+          source: delta.source,
+          previousTokenIndex: previousToken,
+          result,
+          followState: nextState,
+          finalMovement: 'held',
+          engineReason: result.reason,
+          alignmentContext: 'standard rolling buffer provider'
+        });
         setAlignmentBufferDebug({
           source: delta.source,
           rawTranscript: raw,
@@ -495,7 +1112,7 @@ export default function App() {
 
       return next;
     });
-  }, [moveToToken, appendTrace]);
+  }, [moveToToken, appendTrace, recordMovementDecision]);
 
   useEffect(() => {
     const manualOff = manualProviderRef.current.onDelta(processDelta);
@@ -503,7 +1120,30 @@ export default function App() {
     const liveOff = liveProviderRef.current.onDelta(processDelta);
     const liveStatusOff = liveProviderRef.current.onConnectionStatus(setLiveStatus);
     const localWhisperOff = localWhisperProviderRef.current.onDelta(processDelta);
-    const localWhisperStatusOff = localWhisperProviderRef.current.onConnectionStatus(setLocalWhisperStatus);
+    const localWhisperStatusOff = localWhisperProviderRef.current.onConnectionStatus((status) => {
+      setLocalWhisperStatus(status);
+      const attempt = activeStartAttemptRef.current;
+      if (!attempt || attempt.providerId !== 'local-whisper') return;
+
+      const errorMessage = status.errorMessage ?? status.mic.errorMessage;
+      const warningMessage = status.chunk.warningMessage;
+      const message = errorMessage ?? warningMessage;
+      if (!message || isBenignStartDiagnosticMessage(message)) return;
+
+      const level = errorMessage ? 'error' : 'warning';
+      if (attempt.lastIssue?.message === message && attempt.lastIssue.level === level) return;
+
+      const diagnostic: StartDiagnostic = {
+        timestampMs: Date.now(),
+        source: attempt.source,
+        level,
+        message,
+        blocking: false,
+        recovered: false
+      };
+      attempt.lastIssue = diagnostic;
+      setLastStartDiagnostic(diagnostic);
+    });
     const doneOff = mockProviderRef.current.onDone(() => {
       setIsMockPlaying(false);
       if (selectedAsrProviderRef.current === 'mock') setFollowState('manual');
@@ -657,13 +1297,24 @@ export default function App() {
     localWhisperSettings
   ]);
 
-  const toggleFollow = useCallback(() => {
-    setFollowState((previous) => (previous === 'manual' ? 'following' : 'manual'));
-  }, []);
+  const toggleFollow = useCallback(async () => {
+    if (followStateRef.current === 'manual') {
+      await requestStartupVisibleAnchor();
+      enterFollowing();
+      return;
+    }
+    clearManualReacquireAnchor();
+    setFollowState('manual');
+  }, [clearManualReacquireAnchor, enterFollowing, requestStartupVisibleAnchor]);
 
-  const togglePause = useCallback(() => {
-    setFollowState((previous) => (previous === 'paused' ? 'following' : 'paused'));
-  }, []);
+  const togglePause = useCallback(async () => {
+    if (followStateRef.current === 'paused') {
+      await requestStartupVisibleAnchor();
+      enterFollowing();
+      return;
+    }
+    setFollowState('paused');
+  }, [enterFollowing, requestStartupVisibleAnchor]);
 
   const stepSentence = useCallback((direction: -1 | 1) => {
     const model = manuscriptRef.current;
@@ -680,10 +1331,11 @@ export default function App() {
   }, [currentParagraphIndex, moveToToken, resetAlignmentContext]);
 
   const resync = useCallback(() => {
+    clearManualReacquireAnchor();
     resyncArmedRef.current = true;
     lowConfidenceCountRef.current = 0;
     setFollowState('resyncing');
-  }, []);
+  }, [clearManualReacquireAnchor]);
 
   const injectManual = useCallback(async () => {
     await manualProviderRef.current.start();
@@ -696,19 +1348,19 @@ export default function App() {
     const lines = mockScript.split(/\r?\n/);
     const intervalMs = slowMockRef.current ? 2800 : 950;
     mockProviderRef.current.setScript(lines, intervalMs);
-    setIsMockPlaying(true);
-    if (followStateRef.current === 'manual' || followStateRef.current === 'paused') {
-      setFollowState('following');
-    }
     setControlsVisible(false);
+    await requestStartupVisibleAnchor();
+    setIsMockPlaying(true);
+    enterFollowing();
     await mockProviderRef.current.start();
-  }, [mockScript]);
+  }, [enterFollowing, mockScript, requestStartupVisibleAnchor]);
 
   const stopMock = useCallback(async () => {
     await mockProviderRef.current.stop();
+    clearManualReacquireAnchor();
     setIsMockPlaying(false);
     setFollowState('manual');
-  }, []);
+  }, [clearManualReacquireAnchor]);
 
   const startMicMonitor = useCallback(async () => {
     if (selectedAsrProviderRef.current !== 'local-whisper') return;
@@ -734,18 +1386,23 @@ export default function App() {
     }
 
     if (selectedAsrProviderRef.current === 'openai-realtime') {
+      if (!liveConfig.enabled) {
+        setSelectedAsrProviderId('manual');
+        setFollowState('manual');
+        return;
+      }
       if (liveStatus.listening) {
         await liveProviderRef.current.stop();
+        clearManualReacquireAnchor();
         setFollowState('manual');
       } else {
         try {
           await liveProviderRef.current.start();
-          if (followStateRef.current === 'paused' || followStateRef.current === 'manual') {
-            setFollowState('following');
-          }
           if (displaySettings.autoHideControlsOnStart) {
             setControlsVisible(false);
           }
+          await requestStartupVisibleAnchor();
+          enterFollowing();
         } catch {
           // Provider status already carries the sanitized error; manual and mock remain usable.
         }
@@ -755,7 +1412,9 @@ export default function App() {
 
     if (selectedAsrProviderRef.current === 'local-whisper') {
       if (localWhisperStatus.listening) {
+        clearMicStartupGrace();
         await localWhisperProviderRef.current.stop();
+        clearManualReacquireAnchor();
         setFollowState('manual');
       } else {
         if (!localWhisperStatus.bridge.localWhisperBridgeAvailable) {
@@ -764,16 +1423,55 @@ export default function App() {
             return;
           }
         }
+        activeStartAttemptRef.current = {
+          providerId: 'local-whisper',
+          source: 'Local Whisper provider startup',
+          lastIssue: null
+        };
+        beginMicStartupGrace();
         try {
           await localWhisperProviderRef.current.start();
-          if (followStateRef.current === 'paused' || followStateRef.current === 'manual') {
-            setFollowState('following');
+          settleMicStartupGrace();
+          const attempt = activeStartAttemptRef.current;
+          if (attempt?.providerId === 'local-whisper') {
+            if (attempt.lastIssue) {
+              setLastStartDiagnostic({
+                ...attempt.lastIssue,
+                blocking: false,
+                recovered: true
+              });
+            } else {
+              setLastStartDiagnostic((previous) =>
+                previous?.source === attempt.source && previous.blocking && !previous.recovered
+                  ? { ...previous, blocking: false, recovered: true }
+                  : previous
+              );
+            }
           }
           if (displaySettings.autoHideControlsOnStart) {
             setControlsVisible(false);
           }
-        } catch {
-          // Provider status already carries the error; manual, mock, and OpenAI remain usable.
+          await requestStartupVisibleAnchor();
+          enterFollowing();
+        } catch (error) {
+          clearMicStartupGrace();
+          const attempt = activeStartAttemptRef.current;
+          const message = error instanceof Error ? error.message : 'Local Whisper failed to start.';
+          if (!isBenignStartDiagnosticMessage(message)) {
+            setLastStartDiagnostic({
+              timestampMs: Date.now(),
+              source: attempt?.source ?? 'Local Whisper provider startup',
+              level: 'error',
+              message,
+              blocking: true,
+              recovered: false
+            });
+          }
+          // Provider status already carries the error; Manual and Mock remain usable.
+        } finally {
+          if (activeStartAttemptRef.current?.providerId === 'local-whisper') {
+            activeStartAttemptRef.current = null;
+          }
         }
       }
       return;
@@ -781,23 +1479,30 @@ export default function App() {
 
     if (isListening) {
       await manualProviderRef.current.stop();
+      clearManualReacquireAnchor();
       setIsListening(false);
       setFollowState('manual');
     } else {
+      setControlsVisible(false);
+      await requestStartupVisibleAnchor();
       await manualProviderRef.current.start();
       setIsListening(true);
-      if (followStateRef.current === 'paused' || followStateRef.current === 'manual') {
-        setFollowState('following');
-      }
-      setControlsVisible(false);
+      enterFollowing();
     }
   }, [
     isListening,
     isMockPlaying,
+    liveConfig.enabled,
     liveStatus.listening,
+    beginMicStartupGrace,
+    clearManualReacquireAnchor,
+    clearMicStartupGrace,
+    enterFollowing,
     localWhisperStatus.bridge.localWhisperBridgeAvailable,
     localWhisperStatus.listening,
     playMock,
+    requestStartupVisibleAnchor,
+    settleMicStartupGrace,
     stopMock
   ]);
 
@@ -853,8 +1558,9 @@ export default function App() {
   }, []);
 
   const selectAsrProvider = useCallback((providerId: AsrProviderId) => {
+    clearManualReacquireAnchor();
     setSelectedAsrProviderId(coerceSelectedProvider(providerId, liveConfig, localWhisperSettings));
-  }, [liveConfig, localWhisperSettings]);
+  }, [clearManualReacquireAnchor, liveConfig, localWhisperSettings]);
 
   const localWhisperSettingsDirty = !localWhisperSettingsEqual(
     localWhisperSettings,
@@ -877,14 +1583,13 @@ export default function App() {
       setLocalWhisperSettings(nextSettings);
       localWhisperProviderRef.current.setSettings(nextSettings);
       await localWhisperProviderRef.current.start();
-      if (followStateRef.current === 'paused' || followStateRef.current === 'manual') {
-        setFollowState('following');
-      }
       setControlsVisible(false);
+      await requestStartupVisibleAnchor();
+      enterFollowing();
     } catch {
       // Provider status already carries the user-facing restart error.
     }
-  }, [localWhisperDraftSettings, localWhisperStatus.listening]);
+  }, [enterFollowing, localWhisperDraftSettings, localWhisperStatus.listening, requestStartupVisibleAnchor]);
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
@@ -1038,6 +1743,7 @@ export default function App() {
     confidence: alignment.confidence,
     expectsMic: selectedProviderExpectsMic,
     micActive: selectedProviderMicActive,
+    micStartupGraceActive: selectedProviderStarting || micStartupGraceActive,
     inputLevel: selectedInputLevel,
     isLagging: localQueueLagging,
     errorMessage: selectedProviderError,
@@ -1114,6 +1820,9 @@ export default function App() {
         assistStatus={assistStatus}
         anchorDebug={anchorDebug}
         scrollAnimationStatus={scrollAnimationStatus}
+        movementDecision={movementDecision}
+        movementDecisionHistory={movementDecisionHistory}
+        lastStartDiagnostic={lastStartDiagnostic}
       />
       <div className="prompter-stage" ref={prompterStageRef}>
         <NarrationBar
@@ -1135,10 +1844,18 @@ export default function App() {
           settings={displaySettings}
           layoutMode={controlsVisible ? 'with-controls' : 'prompter-only'}
           assistScrollLagging={localQueueLagging}
+          manualScrollTrackingEnabled={
+            selectedProviderListening && followState !== 'manual' && followState !== 'paused'
+          }
+          visibleReacquireActive={Boolean(manualReacquireAnchor)}
+          visibleReacquireSource={manualReacquireAnchor?.source}
+          startupVisibleAnchorRequestId={startupVisibleAnchorRequestId}
           scrollTestRequest={scrollTestRequest}
           onTraceScroll={onTraceScroll}
           onAssistStatus={onAssistStatus}
           onScrollAnimationStatus={onScrollAnimationStatus}
+          onStartupVisibleAnchor={onStartupVisibleAnchor}
+          onManualScroll={onManualScroll}
           onAnchorDebug={onAnchorDebug}
         />
       </div>

@@ -1,28 +1,35 @@
-import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, screen } from 'electron';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  buildOpenAiRealtimeTranscriptionSession,
+  inspectOpenAiRealtimeSdpOffer,
+  isOpenAiRealtimeFlagEnabled,
+  validateOpenAiRealtimeSdpOffer
+} from './openAiRealtimeSession.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
 
 let mainWindow: BrowserWindow | null = null;
+let lastKnownWindowMaximized = false;
 
 type OpenAiRealtimeConfig = {
   apiKey: string;
   transcriptionModel: string;
   language: string;
-  prompt: string;
-  webRtcUrl: string;
+  prompt?: string;
 };
 
-const DEFAULT_TRANSCRIPTION_MODEL = 'gpt-4o-transcribe';
+const DEFAULT_TRANSCRIPTION_MODEL = 'gpt-realtime-whisper';
 const DEFAULT_WEBRTC_URL = 'https://api.openai.com/v1/realtime/calls';
 const LOCAL_WHISPER_SIDECAR = path.join(__dirname, '..', 'python', 'local_whisper_sidecar.py');
 const DEFAULT_PROCESS_READY_TIMEOUT_MS = 30000;
 const DEFAULT_MODEL_READY_TIMEOUT_MS = 180000;
+const WINDOW_STATE_FILE = 'window-state.json';
 const PROVIDER_STATUS_TEXT = new Set([
   'sidecar is running',
   'local whisper sidecar is running',
@@ -179,6 +186,8 @@ let localWhisperSettings: LocalWhisperSettings | null = null;
 let localWhisperProcessReady = false;
 let localWhisperModelReady = false;
 let localWhisperModelConfigKey = '';
+let sidecarGeneration = 0;
+let intentionallyStoppingGeneration: number | null = null;
 const pendingWhisperRequests = new Map<string, PendingWhisperRequest>();
 const processReadyWaiters = new Set<SidecarReadyWaiter>();
 const modelReadyWaiters = new Set<SidecarReadyWaiter>();
@@ -380,24 +389,43 @@ function loadLocalEnv() {
   }
 }
 
+function isOpenAiRealtimeEnabled() {
+  loadLocalEnv();
+  return isOpenAiRealtimeFlagEnabled(process.env.OPENAI_REALTIME_ENABLED);
+}
+
 function getOpenAiRealtimeConfig(): OpenAiRealtimeConfig | null {
   loadLocalEnv();
   const apiKey = process.env.OPENAI_API_KEY?.trim();
   if (!apiKey) return null;
+
+  const prompt = process.env.OPENAI_REALTIME_TRANSCRIPTION_PROMPT?.trim();
 
   return {
     apiKey,
     transcriptionModel:
       process.env.OPENAI_REALTIME_TRANSCRIPTION_MODEL?.trim() || DEFAULT_TRANSCRIPTION_MODEL,
     language: process.env.OPENAI_REALTIME_LANGUAGE?.trim() || 'en',
-    prompt: process.env.OPENAI_REALTIME_TRANSCRIPTION_PROMPT?.trim() || '',
-    webRtcUrl: process.env.OPENAI_REALTIME_WEBRTC_URL?.trim() || DEFAULT_WEBRTC_URL
+    ...(prompt ? { prompt } : {})
   };
 }
 
 function configuredRealtimeStatus() {
+  const enabled = isOpenAiRealtimeEnabled();
+  if (!enabled) {
+    return {
+      enabled: false,
+      configured: false,
+      providerId: 'openai-realtime' as const,
+      model: DEFAULT_TRANSCRIPTION_MODEL,
+      language: 'en',
+      promptConfigured: false
+    };
+  }
+
   const config = getOpenAiRealtimeConfig();
   return {
+    enabled: true,
     configured: Boolean(config),
     providerId: 'openai-realtime' as const,
     model: config?.transcriptionModel ?? DEFAULT_TRANSCRIPTION_MODEL,
@@ -414,8 +442,27 @@ function sanitizeOpenAiError(status: number, body: string) {
     const parsed = JSON.parse(body) as { error?: { message?: string } };
     return parsed.error?.message || `OpenAI Realtime request failed with status ${status}.`;
   } catch {
-    return `OpenAI Realtime request failed with status ${status}.`;
+    return body || `OpenAI Realtime request failed with status ${status}.`;
   }
+}
+
+function sanitizeOpenAiDiagnosticText(value: string, prompt?: string) {
+  let sanitized = value
+    .replace(/Bearer\s+[^\s"']+/gi, 'Bearer [redacted]')
+    .replace(/\bsk-[A-Za-z0-9_-]+\b/g, '[redacted-key]')
+    .replace(/"(api_key|client_secret|value)"\s*:\s*"[^"]+"/gi, '"$1":"[redacted]"');
+  if (prompt) sanitized = sanitized.split(prompt).join('[redacted-prompt]');
+  return sanitized.replace(/\s+/g, ' ').trim().slice(0, 1200);
+}
+
+function openAiFetchErrorDetails(error: unknown, prompt?: string) {
+  if (error instanceof Error) {
+    const cause = 'cause' in error && error.cause
+      ? `; cause=${error.cause instanceof Error ? `${error.cause.name}: ${error.cause.message}` : String(error.cause)}`
+      : '';
+    return sanitizeOpenAiDiagnosticText(`${error.name}: ${error.message}${cause}`, prompt);
+  }
+  return sanitizeOpenAiDiagnosticText(String(error), prompt);
 }
 
 function localWhisperConfigured(settings: LocalWhisperSettings) {
@@ -544,6 +591,16 @@ function rejectPendingWhisperRequests(error: Error) {
   pendingWhisperRequests.clear();
 }
 
+function resolvePendingWhisperRequestsAsStopped() {
+  // For normal user Stop / intentional shutdown: resolve in-flight transcribe promises as empty (no error, no delta emit).
+  // This prevents post-Stop rejects from setting "sidecar stopped" error or "Sidecar failed".
+  for (const request of pendingWhisperRequests.values()) {
+    request.resolve({ text: '' });
+    void unlink(request.audioPath).catch(() => undefined);
+  }
+  pendingWhisperRequests.clear();
+}
+
 function handleLocalWhisperMessage(message: Record<string, unknown>) {
   const messageType = message.type;
   if (messageType === 'ready') {
@@ -626,6 +683,28 @@ function handleLocalWhisperMessage(message: Record<string, unknown>) {
     return;
   }
   if (messageType === 'error') {
+    const isIntentionalShutdown = intentionallyStoppingGeneration != null;
+    if (isIntentionalShutdown) {
+      // Normal shutdown: ignore sidecar error msgs from in-flight during stop; do not set Error state.
+      const requestId = String(message.requestId ?? '');
+      const pending = requestId ? pendingWhisperRequests.get(requestId) : undefined;
+      if (pending) {
+        pendingWhisperRequests.delete(requestId);
+        pending.resolve({ text: '' });
+        void unlink(pending.audioPath).catch(() => undefined);
+      }
+      patchLocalWhisperStatus({
+        modelPhase: 'stopped',
+        status: 'stopped',
+        errorMessage: null,
+        chunk: {
+          ...localWhisperStatus.chunk,
+          pendingResponses: Math.max(0, localWhisperStatus.chunk.pendingResponses - 1)
+        }
+      });
+      // Exit handler for the matching generation will clear intentionallyStoppingGeneration.
+      return;
+    }
     const error = new Error(String(message.message ?? 'Local Whisper sidecar error.'));
     const requestId = String(message.requestId ?? '');
     const pending = requestId ? pendingWhisperRequests.get(requestId) : undefined;
@@ -645,6 +724,7 @@ function handleLocalWhisperMessage(message: Record<string, unknown>) {
           pendingResponses: Math.max(0, localWhisperStatus.chunk.pendingResponses - 1)
         }
       });
+      intentionallyStoppingGeneration = null;
       return;
     }
     patchLocalWhisperStatus({
@@ -658,6 +738,7 @@ function handleLocalWhisperMessage(message: Record<string, unknown>) {
         pendingResponses: 0
       }
     });
+    intentionallyStoppingGeneration = null;
     rejectProcessReadyWaiters(error);
     rejectModelReadyWaiters(error);
     rejectPendingWhisperRequests(error);
@@ -728,8 +809,12 @@ async function startLocalWhisperSidecar(settings: LocalWhisperSettings) {
       cwd: process.cwd(),
       windowsHide: true
     });
-    localWhisperProcess.stdout.on('data', handleLocalWhisperStdout);
-    localWhisperProcess.stderr.on('data', (chunk) => {
+    const thisProc = localWhisperProcess;
+    const thisGen = ++sidecarGeneration;
+    (thisProc as any)._generation = thisGen;
+
+    thisProc.stdout.on('data', handleLocalWhisperStdout);
+    thisProc.stderr.on('data', (chunk) => {
       const message = String(chunk).trim();
       if (message) {
         const errorMessage = message.slice(0, 500);
@@ -742,8 +827,11 @@ async function startLocalWhisperSidecar(settings: LocalWhisperSettings) {
         });
       }
     });
-    localWhisperProcess.on('error', (error) => {
-      localWhisperProcess = null;
+    thisProc.on('error', (error) => {
+      if (localWhisperProcess === thisProc) {
+        localWhisperProcess = null;
+      }
+      intentionallyStoppingGeneration = null; // real error, not intentional stop
       patchLocalWhisperStatus({
         sidecarRunning: false,
         modelPhase: 'error',
@@ -755,25 +843,35 @@ async function startLocalWhisperSidecar(settings: LocalWhisperSettings) {
       rejectModelReadyWaiters(error);
       rejectPendingWhisperRequests(error);
     });
-    localWhisperProcess.on('exit', () => {
-      localWhisperProcess = null;
+    thisProc.on('exit', () => {
+      if (localWhisperProcess === thisProc) {
+        localWhisperProcess = null;
+      }
       localWhisperProcessReady = false;
       localWhisperModelReady = false;
       localWhisperModelConfigKey = '';
+      const intentional = intentionallyStoppingGeneration === thisGen;
+      intentionallyStoppingGeneration = null; // consumed by this proc's exit handler
       patchLocalWhisperStatus({
         sidecarRunning: false,
         modelPhase: 'stopped',
         listening: false,
         status: 'stopped',
+        errorMessage: intentional ? null : 'Local Whisper sidecar stopped unexpectedly.',
         chunk: {
           ...localWhisperStatus.chunk,
           pendingResponses: 0
         }
       });
-      const stoppedError = new Error('Local Whisper sidecar stopped.');
-      rejectProcessReadyWaiters(stoppedError);
-      rejectModelReadyWaiters(stoppedError);
-      rejectPendingWhisperRequests(stoppedError);
+      if (intentional) {
+        // Normal user Stop: resolve pendings cleanly (no error state, in-flight treated as normal stop)
+        resolvePendingWhisperRequestsAsStopped();
+      } else {
+        const stoppedError = new Error('Local Whisper sidecar stopped.');
+        rejectProcessReadyWaiters(stoppedError);
+        rejectModelReadyWaiters(stoppedError);
+        rejectPendingWhisperRequests(stoppedError);
+      }
     });
     await processReady;
   } else if (!localWhisperProcessReady) {
@@ -800,11 +898,102 @@ async function startLocalWhisperSidecar(settings: LocalWhisperSettings) {
   return localWhisperStatusForRenderer();
 }
 
+function getWindowStatePath(): string {
+  return path.join(app.getPath('userData'), WINDOW_STATE_FILE);
+}
+
+type WindowBounds = {
+  x?: number;
+  y?: number;
+  width: number;
+  height: number;
+};
+
+type PersistedWindowState = {
+  normalBounds: WindowBounds;
+  isMaximized: boolean;
+};
+
+function rectsIntersect(r1: { x: number; y: number; width: number; height: number }, r2: { x: number; y: number; width: number; height: number }): boolean {
+  return !(r1.x + r1.width < r2.x ||
+           r1.x > r2.x + r2.width ||
+           r1.y + r1.height < r2.y ||
+           r1.y > r2.y + r2.height);
+}
+
+function persistedBoundsCandidate(saved: any): any {
+  return saved && typeof saved.normalBounds === 'object' ? saved.normalBounds : saved;
+}
+
+function getValidatedWindowBounds(saved: any): WindowBounds {
+  const defaults = { width: 1440, height: 920 };
+  const bounds = persistedBoundsCandidate(saved);
+  if (!bounds || typeof bounds.width !== 'number' || typeof bounds.height !== 'number') {
+    return defaults;
+  }
+  const candidate = {
+    x: typeof bounds.x === 'number' ? bounds.x : 0,
+    y: typeof bounds.y === 'number' ? bounds.y : 0,
+    width: Math.max(1080, Math.round(bounds.width)),
+    height: Math.max(720, Math.round(bounds.height))
+  };
+  const displays = screen.getAllDisplays();
+  const visible = displays.some(d => rectsIntersect(candidate, d.bounds));
+  if (visible) {
+    return candidate;
+  }
+  // saved monitor missing or off-screen: center on primary
+  const primary = screen.getPrimaryDisplay().bounds;
+  return {
+    width: candidate.width,
+    height: candidate.height,
+    x: Math.round(primary.x + (primary.width - candidate.width) / 2),
+    y: Math.round(primary.y + (primary.height - candidate.height) / 2)
+  };
+}
+
+function loadWindowStateSync(): PersistedWindowState | null {
+  const statePath = getWindowStatePath();
+  if (!existsSync(statePath)) return null;
+
+  try {
+    const raw = readFileSync(statePath, 'utf8');
+    const saved = JSON.parse(raw);
+    return {
+      normalBounds: getValidatedWindowBounds(saved),
+      isMaximized: Boolean(saved?.isMaximized)
+    };
+  } catch (err) {
+    console.warn('[main] failed to load/validate window state, using defaults', err);
+    return null;
+  }
+}
+
+function saveWindowStateSync(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  try {
+    const normalBounds = mainWindow.getNormalBounds();
+    const isMaximized =
+      !mainWindow.isFullScreen() &&
+      (mainWindow.isMaximized() || (mainWindow.isMinimized() && lastKnownWindowMaximized));
+    const state: PersistedWindowState = {
+      normalBounds,
+      isMaximized
+    };
+    const statePath = getWindowStatePath();
+    mkdirSync(path.dirname(statePath), { recursive: true });
+    writeFileSync(statePath, JSON.stringify(state), 'utf8');
+  } catch (err) {
+    console.warn('[main] failed to save window state', err);
+  }
+}
+
 function createMainWindow() {
   const preloadPath = currentPreloadPath();
   logRuntimeDiagnostics(preloadPath);
 
-  mainWindow = new BrowserWindow({
+  // Restore persisted bounds if valid against current displays.
+  let windowOptions: Electron.BrowserWindowConstructorOptions = {
     width: 1440,
     height: 920,
     minWidth: 1080,
@@ -818,7 +1007,42 @@ function createMainWindow() {
       nodeIntegration: false,
       sandbox: false
     }
+  };
+
+  const savedWindowState = loadWindowStateSync();
+  if (savedWindowState) {
+    windowOptions = {
+      ...windowOptions,
+      x: savedWindowState.normalBounds.x,
+      y: savedWindowState.normalBounds.y,
+      width: savedWindowState.normalBounds.width,
+      height: savedWindowState.normalBounds.height
+    };
+  }
+
+  lastKnownWindowMaximized = Boolean(savedWindowState?.isMaximized);
+  mainWindow = new BrowserWindow(windowOptions);
+
+  mainWindow.on('maximize', () => {
+    lastKnownWindowMaximized = true;
   });
+
+  mainWindow.on('unmaximize', () => {
+    lastKnownWindowMaximized = false;
+  });
+
+  mainWindow.on('close', () => {
+    saveWindowStateSync();
+  });
+
+  // Ensure bounds are persisted on app quit paths (File → Exit, etc.)
+  app.on('before-quit', () => {
+    saveWindowStateSync();
+  });
+
+  if (savedWindowState?.isMaximized) {
+    mainWindow.maximize();
+  }
 
   mainWindow.webContents.on('preload-error', (_event, failedPreloadPath, error) => {
     latestPreloadError = {
@@ -907,65 +1131,115 @@ ipcMain.handle('window:toggleAlwaysOnTop', (event) => {
 
 ipcMain.handle('openai-realtime:getConfigStatus', () => configuredRealtimeStatus());
 
-ipcMain.handle('openai-realtime:createClientSession', async () => {
+ipcMain.handle('openai-realtime:exchangeSdp', async (_event, offerSdp: unknown) => {
+  if (!isOpenAiRealtimeEnabled()) {
+    throw new Error(
+      'OpenAI Realtime is experimental and disabled. Set OPENAI_REALTIME_ENABLED=true to enable it.'
+    );
+  }
+
   const config = getOpenAiRealtimeConfig();
   if (!config) {
     throw new Error('Live OpenAI Realtime is not configured. Set OPENAI_API_KEY outside the renderer.');
   }
 
-  const session = {
-    type: 'transcription',
-    audio: {
-      input: {
-        noise_reduction: { type: 'near_field' },
-        transcription: {
-          model: config.transcriptionModel,
-          language: config.language,
-          prompt: config.prompt
-        },
-        turn_detection: {
-          type: 'server_vad',
-          threshold: 0.5,
-          prefix_padding_ms: 300,
-          silence_duration_ms: 500
-        }
-      }
-    }
-  };
+  const receivedSdpDiagnostics = inspectOpenAiRealtimeSdpOffer(offerSdp);
+  console.info('[main] OpenAI Realtime SDP received over IPC', receivedSdpDiagnostics);
 
-  const response = await fetch('https://api.openai.com/v1/realtime/client_secrets', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${config.apiKey}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({ session })
+  let validatedOffer: ReturnType<typeof validateOpenAiRealtimeSdpOffer>;
+  try {
+    validatedOffer = validateOpenAiRealtimeSdpOffer(offerSdp);
+  } catch (error) {
+    throw new Error(openAiFetchErrorDetails(error, config.prompt));
+  }
+  if (validatedOffer.sdp.length > 1_000_000) {
+    throw new Error('OpenAI Realtime calls POST was not attempted because the SDP offer was unexpectedly large.');
+  }
+
+  let sessionBuild: ReturnType<typeof buildOpenAiRealtimeTranscriptionSession>;
+  try {
+    sessionBuild = buildOpenAiRealtimeTranscriptionSession(config);
+  } catch (error) {
+    throw new Error(
+      `OpenAI Realtime session config build failed: ${openAiFetchErrorDetails(error, config.prompt)}`
+    );
+  }
+
+  const { session, diagnostics } = sessionBuild;
+  const endpointLabel = 'OpenAI /v1/realtime/calls';
+  console.info('[main] OpenAI Realtime SDP exchange starting', {
+    operation: 'OpenAI calls POST',
+    endpointLabel,
+    authentication: 'standard API key held in Electron main',
+    ephemeralKeyUsed: false,
+    offerSdpLength: validatedOffer.sdp.length,
+    offerSdpStartsWithV0: validatedOffer.diagnostics.startsWithV0,
+    offerSdpFirstLine: validatedOffer.diagnostics.firstLine,
+    offerSdpEndsWithLineBreak: validatedOffer.diagnostics.endsWithLineBreak,
+    formDataFieldNames: ['sdp', 'session'],
+    ...diagnostics
   });
 
-  const bodyText = await response.text();
+  const formData = new FormData();
+  formData.set('sdp', validatedOffer.sdp);
+  formData.set('session', JSON.stringify(session));
+
+  let response: Response;
+  try {
+    response = await fetch(DEFAULT_WEBRTC_URL, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${config.apiKey}`
+      },
+      body: formData
+    });
+  } catch (error) {
+    const details = openAiFetchErrorDetails(error, config.prompt);
+    console.error('[main] OpenAI Realtime calls POST transport failure', {
+      endpointLabel,
+      error: details
+    });
+    throw new Error(`OpenAI Realtime calls POST failed before an HTTP response: ${details}`);
+  }
+
+  let bodyText: string;
+  try {
+    bodyText = await response.text();
+  } catch (error) {
+    throw new Error(
+      `OpenAI Realtime calls POST returned ${response.status} ${response.statusText || '(no status text)'}, but reading the SDP response failed: ${openAiFetchErrorDetails(error, config.prompt)}`
+    );
+  }
   if (!response.ok) {
-    throw new Error(sanitizeOpenAiError(response.status, bodyText));
+    const safeBody = sanitizeOpenAiDiagnosticText(bodyText, config.prompt);
+    console.error('[main] OpenAI Realtime calls POST rejected', {
+      endpointLabel,
+      status: response.status,
+      statusText: response.statusText,
+      body: safeBody
+    });
+    throw new Error(
+      `OpenAI Realtime calls POST failed: ${response.status} ${response.statusText || '(no status text)'}. ${sanitizeOpenAiError(response.status, safeBody)}`
+    );
   }
 
-  const data = JSON.parse(bodyText) as {
-    value?: string;
-    expires_at?: number;
-    client_secret?: {
-      value?: string;
-      expires_at?: number;
-    };
-  };
-  const clientSecret = data.client_secret?.value ?? data.value;
-  const expiresAt = data.client_secret?.expires_at ?? data.expires_at;
-
-  if (!clientSecret) {
-    throw new Error('OpenAI Realtime did not return an ephemeral client secret.');
+  if (!bodyText.trim()) {
+    throw new Error(
+      `OpenAI Realtime calls POST returned ${response.status} ${response.statusText || '(no status text)'} with an empty SDP answer.`
+    );
   }
+
+  console.info('[main] OpenAI Realtime SDP exchange completed', {
+    endpointLabel,
+    status: response.status,
+    statusText: response.statusText,
+    answerSdpLength: bodyText.length,
+    model: config.transcriptionModel
+  });
 
   return {
-    clientSecret,
-    expiresAt,
-    webRtcUrl: config.webRtcUrl,
+    answerSdp: bodyText,
+    endpointLabel,
     model: config.transcriptionModel
   };
 });
@@ -991,25 +1265,55 @@ ipcMain.handle('local-whisper:start', async (_event, settings: LocalWhisperSetti
 });
 
 ipcMain.handle('local-whisper:stop', () => {
-  if (localWhisperProcess?.stdin.writable) {
-    sendLocalWhisperCommand({ type: 'shutdown' });
-  }
-  localWhisperProcess?.kill();
-  localWhisperProcess = null;
-  localWhisperProcessReady = false;
-  localWhisperModelReady = false;
-  localWhisperModelConfigKey = '';
-  patchLocalWhisperStatus({
-    sidecarRunning: false,
-    modelPhase: 'stopped',
-    listening: false,
-    status: 'stopped',
-    errorMessage: null,
-    chunk: {
-      ...localWhisperStatus.chunk,
-      pendingResponses: 0
+  const proc = localWhisperProcess;
+  if (proc) {
+    // Tie the intentional stop to this specific process instance/generation (req 5).
+    // Do not clear before the matching exit handler consumes it (req 4).
+    const gen = (proc as any)._generation || 0;
+    intentionallyStoppingGeneration = gen;
+
+    if (proc.stdin && proc.stdin.writable) {
+      sendLocalWhisperCommand({ type: 'shutdown' });
     }
-  });
+    proc.kill();
+
+    // Null ref immediately so a Start can spawn a fresh sidecar without waiting for async exit.
+    // The 'exit' listener closed over 'thisProc' / thisGen will still match for the old instance.
+    localWhisperProcess = null;
+    localWhisperProcessReady = false;
+    localWhisperModelReady = false;
+    localWhisperModelConfigKey = '';
+
+    patchLocalWhisperStatus({
+      sidecarRunning: false,
+      modelPhase: 'stopped',
+      listening: false,
+      status: 'stopped',
+      errorMessage: null,
+      chunk: {
+        ...localWhisperStatus.chunk,
+        pendingResponses: 0
+      }
+    });
+
+    // Resolve in-flight cleanly for this intentional stop (in-flight treated as normal, no error).
+    resolvePendingWhisperRequestsAsStopped();
+    // Do NOT clear intentionallyStoppingGeneration here; the exit handler for thisGen will consume + null it.
+  } else {
+    // Stop called with no sidecar process: ensure clean stopped state.
+    // Do not set any stopping generation (prevents stale flag for future processes, req 6).
+    patchLocalWhisperStatus({
+      sidecarRunning: false,
+      modelPhase: 'stopped',
+      listening: false,
+      status: 'stopped',
+      errorMessage: null,
+      chunk: {
+        ...localWhisperStatus.chunk,
+        pendingResponses: 0
+      }
+    });
+  }
   return localWhisperStatusForRenderer();
 });
 

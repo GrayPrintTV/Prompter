@@ -7,7 +7,7 @@ import type {
   LocalWhisperStatus,
   LocalWhisperTranscriptResult,
   MainPreloadError,
-  OpenAiRealtimeClientSession
+  OpenAiRealtimeSdpAnswer
 } from './domain/types';
 
 type ImportedTextFile = {
@@ -33,7 +33,7 @@ declare global {
       toggleFullScreen(): Promise<boolean>;
       toggleAlwaysOnTop(): Promise<boolean>;
       getOpenAiRealtimeConfigStatus(): Promise<LiveAsrConfigStatus>;
-      createOpenAiRealtimeClientSession(): Promise<OpenAiRealtimeClientSession>;
+      exchangeOpenAiRealtimeSdp(offerSdp: string): Promise<OpenAiRealtimeSdpAnswer>;
       getBridgeDiagnostics(): Promise<ElectronBridgeDiagnostics>;
       getLocalWhisperStatus(): Promise<LocalWhisperStatus>;
       startLocalWhisper(settings: LocalWhisperSettings): Promise<LocalWhisperStatus>;

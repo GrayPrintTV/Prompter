@@ -33,10 +33,10 @@ export function DebugPanel({
         <dd>{lastDelta ? `${lastDelta.source}: ${lastDelta.text || '[pause]'}` : 'None'}</dd>
         <dt>Rolling buffer</dt>
         <dd>{transcriptBuffer.join(' ') || 'Empty'}</dd>
-        <dt>Current token</dt>
-        <dd>{currentTokenIndex}</dd>
-        <dt>Best match</dt>
-        <dd>{alignment.matchedText || 'None'}</dd>
+        <dt>Current token (precise anchor)</dt>
+        <dd>{currentTokenIndex} (sentence {alignment.sentenceIndex})</dd>
+        <dt>Anchor / Best match</dt>
+        <dd>{alignment.matchedText || 'None'} (use for band target + pace)</dd>
         <dt>Confidence</dt>
         <dd>{alignment.confidence.toFixed(3)}</dd>
         <dt>Follow state</dt>

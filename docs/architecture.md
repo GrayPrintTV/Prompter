@@ -2,7 +2,9 @@
 
 ## Electron Main, Preload, and Renderer
 
-Electron main lives in `electron/main.ts`. It creates the BrowserWindow, registers IPC handlers, owns file dialogs and window controls, reads local environment config, owns OpenAI Realtime secret-bearing setup, and owns the Local Whisper Python sidecar process.
+Electron main lives in `electron/main.ts`. It creates the BrowserWindow, registers IPC handlers, owns file dialogs and window controls, and owns the Local Whisper Python sidecar process. It also contains the default-off experimental OpenAI Realtime network boundary.
+
+Electron main also persists desktop window state under Electron `userData`: validated normal bounds are stored separately from the maximized flag, then startup creates the window at the saved normal bounds and maximizes it after creation when requested. Full-screen state is not persisted.
 
 Preload lives in `electron/preload.cts`. It is intentionally CommonJS-compatible and builds to `dist-electron/preload.cjs`, because Electron loads preload scripts through `require()`. It exposes `window.prompterApi` through `contextBridge` and provides `ping() -> "pong"` plus bridge diagnostics. Keep `contextIsolation: true`, `nodeIntegration: false`, and the current sandbox setting stable unless a task explicitly changes the preload strategy.
 
@@ -17,7 +19,7 @@ ASR providers implement the common provider shape in `src/asr/`. Providers emit 
 - `OpenAiRealtimeAsrProvider`.
 - `LocalWhisperAsrProvider`.
 
-Provider selection is handled through `src/asr/providerRegistry.ts`. Manual and Mock must remain available even when live providers fail.
+Provider selection is handled through `src/asr/providerRegistry.ts`. Normal options are Manual, Mock, and Local Whisper. OpenAI Realtime is added only when Electron reports `OPENAI_REALTIME_ENABLED=true`. Manual and Mock must remain available even when live providers fail.
 
 ## TranscriptDelta Flow
 
@@ -49,14 +51,11 @@ The sidecar is chunk-based and may be delayed. Word-level realtime behavior is n
 
 Sidecar readiness has two separate stages. `ready` from the Python process means the process is alive and accepting JSONL. `model-loaded` means faster-whisper has loaded the requested model and transcription can begin.
 
-## OpenAI Realtime Flow
+## Experimental OpenAI Realtime Flow
 
-1. Electron main reads `.env.local`, `.env`, or process environment.
-2. Renderer asks main for configuration status.
-3. If configured, renderer asks main for an ephemeral OpenAI Realtime client secret.
-4. Main uses the real `OPENAI_API_KEY`; renderer never receives it.
-5. Renderer opens the WebRTC session using the ephemeral client secret.
-6. Realtime transcript events are converted into normal `TranscriptDelta` objects.
+The provider is parked and disabled by default. When disabled, it is omitted from the provider registry, saved selections fall back to Manual, and Electron rejects Realtime SDP IPC before reading `OPENAI_API_KEY` or making a network request.
+
+When a developer explicitly sets `OPENAI_REALTIME_ENABLED=true`, the renderer may create a WebRTC offer and pass its SDP through preload IPC. Electron main builds the transcription session, posts multipart `sdp` and `session` fields to OpenAI with the permanent API key, and returns only the SDP answer. Realtime transcript events still enter the common `TranscriptDelta` boundary. Keys, authorization headers, prompts, and full SDP are not logged or stored in renderer state.
 
 ## Alignment Engine Flow
 
@@ -73,6 +72,8 @@ The alignment engine lives in `src/domain/alignment.ts` and related domain modul
 `src/components/PrompterView.tsx` renders the manuscript pane. It owns the fixed reading-band overlay and scroll animation refs. Reading-zone geometry and scroll-step math live in `src/domain/prompterScroll.ts` so the component can keep animation state out of React state while still being testable. The scroll controller has two motion paths: correction scroll, which moves confirmed ASR/alignment anchors into the band, and optional Assist Scroll cruise, which predicts near-future reading position between recent high-confidence anchors. Correction scroll uses a deterministic cubic ease-in-out animation plan; Assist cruise remains a separate velocity-based continuous motion layer.
 
 The Display panel can issue scroll-test requests for 1, 5, and 15-line moves plus reset. `App.tsx` stores a small request object, `ControlPanel` emits it, and `PrompterView` runs the 1/5/15-line requests through the same correction-scroll helper used by live following. Reset uses a traceable direct `scrollTop` write. `PrompterView` also reports a compact animation status object back through `App.tsx` so the panel can show reduced-motion state, distance, duration, easing, Correction feel, and completion frame count. This isolates physical scroll feel from ASR, alignment confidence, token lookahead, and Assist Scroll cruise.
+
+Movement-decision diagnostics live in `src/domain/movementDiagnostics.ts` and are surfaced by `App.tsx` into `ControlPanel`. They consume existing data from `AlignmentResult`, Local Whisper provisional-buffer decisions, PrompterView anchor debug, Assist status, and scroll trace events. The diagnostics classify decisions as on-track, local correction, plausible forward movement, suspicious jump, rollback/retake, suspicious rollback, or held/stale/uncertain. They also show a 160 WPM expected-progress corridor for observability only; the classifier does not change alignment scoring, confidence thresholds, or scroll acceptance.
 
 Narration status labels are derived in `src/domain/narrationStatus.ts` from provider/follow/mic/lag/error inputs. This keeps UI labels such as Idle, Starting, Following, Holding, Lagging, and Error separate from ASR provider internals.
 

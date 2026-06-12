@@ -3,16 +3,19 @@ export type ReadingZoneGeometryInput = {
   fontSizePx: number;
   lineHeight: number;
   readingZonePercent: number;
+  readingZoneHeightLines: number;
 };
 
 export type ReadingZoneGeometry = {
   viewportHeight: number;
   lineHeightPx: number;
   readingZonePercent: number;
+  readingZoneHeightLines: number;
   bandTop: number;
   bandHeight: number;
   bandBottom: number;
   targetY: number;
+  targetOffsetPx: number;
   topSpacerPx: number;
   bottomSpacerPx: number;
 };
@@ -120,42 +123,47 @@ export function computeReadingZoneGeometry({
   viewportHeight,
   fontSizePx,
   lineHeight,
-  readingZonePercent
+  readingZonePercent,
+  readingZoneHeightLines
 }: ReadingZoneGeometryInput): ReadingZoneGeometry {
   const safeViewportHeight = Math.max(1, viewportHeight);
   const safeLineHeightPx = Math.max(1, fontSizePx * lineHeight);
-  const safeFontPx = Math.max(1, fontSizePx);
   const safePercent = clamp(readingZonePercent, 5, 95);
-  // Visual band height is based primarily on font size — thin, only slightly taller than the glyph row (ascenders/descenders).
-  // ~1.06x font size. This keeps the visible indicator as one line, while line-height is used for math/spacers/deadband.
-  // The tolerance zone for "no scroll" decision is handled separately via deadband around target.
-  const bandHeight = safeFontPx * 1.06;
+  // Scale the visible band in rendered line heights so it frames whole reading lines consistently.
+  const safeHeightLines = clamp(readingZoneHeightLines, 1, 2.5);
+  const bandHeight = Math.min(safeViewportHeight, safeLineHeightPx * safeHeightLines);
   const bandTop = clamp(
     (safeViewportHeight * safePercent) / 100 - bandHeight / 2,
     0,
     Math.max(0, safeViewportHeight - bandHeight)
   );
   const bandBottom = bandTop + bandHeight;
-  // For thin visual band, center the target near the middle of the small band.
-  const targetY = clamp(
-    bandTop + bandHeight * 0.5,
-    bandTop,
-    bandBottom
-  );
+  // The active line center always targets the visual center of the band.
+  const targetY = bandTop + bandHeight * 0.5;
+  const lineCenterOffsetPx = safeLineHeightPx * 0.5;
 
   return {
     viewportHeight: safeViewportHeight,
     lineHeightPx: safeLineHeightPx,
     readingZonePercent: safePercent,
+    readingZoneHeightLines: safeHeightLines,
     bandTop,
     bandHeight,
     bandBottom,
     targetY,
-    // Top spacer brings first lines into the (now font-based thin) band.
-    topSpacerPx: targetY,
-    // Bottom spacer ensures last lines can reach the band.
-    bottomSpacerPx: Math.max(safeLineHeightPx * 1.5, safeViewportHeight - targetY + safeLineHeightPx * 0.5)
+    targetOffsetPx: targetY - bandTop,
+    // The scroll anchor is the rendered line center, so the first line needs half a line less top space.
+    topSpacerPx: Math.max(0, targetY - lineCenterOffsetPx),
+    // Keep enough trailing room for the final rendered line center to reach the target.
+    bottomSpacerPx: Math.max(
+      safeLineHeightPx * 1.5,
+      safeViewportHeight - targetY + lineCenterOffsetPx
+    )
   };
+}
+
+export function computeRenderedLineCenterY(elementTopInViewport: number, elementHeight: number) {
+  return elementTopInViewport + Math.max(0, elementHeight) * 0.5;
 }
 
 export function computePrompterScrollTarget({
@@ -175,6 +183,14 @@ export function isAnchorInReadingBand(
   tolerancePx = DEFAULT_SCROLL_DEADBAND_PX
 ) {
   return anchorY >= geometry.bandTop - tolerancePx && anchorY <= geometry.bandBottom + tolerancePx;
+}
+
+export function isAnchorNearReadingTarget(
+  anchorY: number,
+  geometry: ReadingZoneGeometry,
+  tolerancePx = DEFAULT_SCROLL_DEADBAND_PX
+) {
+  return Math.abs(anchorY - geometry.targetY) <= Math.max(0, tolerancePx);
 }
 
 /**

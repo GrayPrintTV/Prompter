@@ -102,4 +102,47 @@ describe('alignment engine', () => {
     expect(result.matchedText).toContain('Room 214');
     expect(result.matchedText).toContain('p.m.');
   });
+
+  it('preserves original manuscript text (punctuation, quotes, semicolons, apostrophes, spacing) via token char offsets for anchoring (render regression)', () => {
+    const punctuated = 'Hello, "world"! It\'s fine; yes—really. Death and mayhem, there. Close all doors.';
+    const model = buildManuscript(punctuated);
+    for (const sent of model.sentences) {
+      const sText = sent.text;
+      const toks = model.tokens.slice(sent.tokenStart, sent.tokenEnd);
+      let recon = '';
+      let pos = 0;
+      for (const t of toks) {
+        const rS = t.charStart - sent.charStart;
+        const rE = t.charEnd - sent.charStart;
+        if (rS > pos) recon += sText.slice(pos, rS);
+        recon += sText.slice(rS, rE);
+        pos = rE;
+      }
+      if (pos < sText.length) recon += sText.slice(pos);
+      expect(recon).toBe(sText); // exact original including all punct/spacing; tokens only provide anchor ranges
+    }
+  });
+
+  it('preserves spaces after sentence-ending punctuation (inter-sentence gaps from paragraph offsets)', () => {
+    const input = "Death. And it's not close. This list goes on. My name is Atticus.";
+    const model = buildManuscript(input);
+    // Simulate the paragraph-offset render logic (gaps between sentence char ranges + sent slices)
+    // This must produce the exact original including " . " after periods.
+    let fullRecon = '';
+    for (const para of model.paragraphs) {
+      const pText = para.text;
+      const pStart = para.charStart;
+      const sents = model.sentences.slice(para.sentenceStart, para.sentenceEnd);
+      let pos = 0;
+      for (const sent of sents) {
+        const relS = sent.charStart - pStart;
+        const relE = sent.charEnd - pStart;
+        if (relS > pos) fullRecon += pText.slice(pos, relS);
+        fullRecon += pText.slice(relS, relE);
+        pos = relE;
+      }
+      if (pos < pText.length) fullRecon += pText.slice(pos);
+    }
+    expect(fullRecon).toBe(input);
+  });
 });

@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-Phase 1 is in progress. The app has Phase 0/0.5 manuscript alignment, torture-test harnesses, Manual and Mock ASR, optional OpenAI Realtime ASR, and Local Whisper ASR working end-to-end through the Python sidecar. The current focus is real narration usability: keeping live following reliable while refining the prompter-first narration view.
+Phase 1 is in progress. The app has Phase 0/0.5 manuscript alignment, torture-test harnesses, Manual and Mock ASR, and Local Whisper ASR working end-to-end through the Python sidecar. Local Whisper is the intended live narration provider. OpenAI Realtime is retained only as a default-off experimental comparison path.
 
 ## What Works
 
@@ -12,7 +12,7 @@ Phase 1 is in progress. The app has Phase 0/0.5 manuscript alignment, torture-te
 - Mock transcript playback.
 - Alignment torture-test panel and Vitest fixture coverage.
 - Conservative fuzzy manuscript alignment with confidence states.
-- OpenAI Realtime provider behind the ASR boundary, disabled until configured.
+- OpenAI Realtime code remains behind the ASR boundary but is parked and hidden unless `OPENAI_REALTIME_ENABLED=true`.
 - Local Whisper provider behind the ASR boundary, including microphone capture, WAV chunks, sidecar transcription, Heard transcript display, and manuscript following.
 - Mic Monitor for Local Whisper with input level meter and microphone state diagnostics.
 - Local Whisper sidecar launch path and chunk counters.
@@ -20,10 +20,12 @@ Phase 1 is in progress. The app has Phase 0/0.5 manuscript alignment, torture-te
 - Bridge diagnostics for Electron preload, Local Whisper IPC, ping, preload path, preload existence, preload status, and preload errors.
 - Prompter reading zone uses a fixed higher-on-screen band, dynamic top/bottom manuscript spacers, visible Display tuning controls, and a custom `requestAnimationFrame` scroll controller instead of native smooth scrolling.
 - Correction scroll now uses a deterministic cubic ease-in-out plan with explicit from/target scrollTop, duration, easing curve, Correction feel, cancellation, reduced-motion, and frame-count diagnostics. The Display panel has scroll proof buttons for 1, 5, and 15-line tests plus reset so physical scroll feel can be tested without ASR or alignment.
+- The Display panel now has a compact Movement decision diagnostic area showing confirmed token, proposed lookahead target, prior fresh anchor, token/line delta, Reading Lookahead, high-confidence anchor age, a 160 WPM diagnostic expected-progress corridor, movement classification, confidence, penalty flags, final outcome, reason, and the last 10 decisions.
 - Fresh sessions default `readingZonePercent` to 38 and active sentence highlighting off. The Display controls show the value as percent down from top, include Move up / Move down buttons, and migrate older bottom-half saved band positions once to the narration default.
 - Optional Assist Scroll is now predictive: high-confidence following matches become correction anchors, estimated reading pace drives gentle cruise between ASR chunks, and Display controls expose Assist speed plus Correction feel.
 - Prompter-first narration mode can hide the left control panel and keeps a minimal Start/Stop/status/mic-level overlay visible.
 - Persisted hidden-controls mode is recoverable: the prompter-only view keeps the NarrationBar visible, and controls are restored automatically if the prompter pane reports an invalid size.
+- Electron window state persists the last normal window bounds plus maximized state. Maximized windows reopen maximized on the same validated monitor; full-screen state is intentionally not preserved.
 - Local Whisper settings use draft/apply semantics; changes made while following are labeled as applying after Restart Whisper.
 - Optional predictive Assist Scroll is implemented and off by default.
 
@@ -69,7 +71,7 @@ Sidecar readiness is now split:
 - Manual: local typed transcript chunks; always available.
 - Mock: scripted chunks; always available.
 - Local Whisper: mic PCM/WAV chunks from renderer to Electron main, then Python faster-whisper sidecar; local and optional.
-- OpenAI Realtime: WebRTC transcription provider using main-process config/ephemeral client-secret setup; optional and disabled until configured.
+- OpenAI Realtime: parked experimental comparison provider; absent from normal UI and blocked before key checks or network calls unless `OPENAI_REALTIME_ENABLED=true`.
 
 ## Known Fragile Areas
 
@@ -89,6 +91,7 @@ Sidecar readiness is now split:
 - Continue prompter reading-zone tuning after real narration sessions, especially band height and whether sentence top-edge targeting is enough for long wrapped sentences.
 - Evaluate predictive Assist Scroll in real narration; it is intentionally conservative and may need speed/correction tuning.
 - Use the Display panel scroll proof buttons to tune Correction feel before blaming ASR/alignment for motion feel.
+- Use Movement decision diagnostics during Mock and Local Whisper following to separate ASR timing, alignment confidence, lookahead target choice, Assist cruise, correction retargeting, and suspicious jump candidates before changing alignment or jump-governor behavior.
 
 ## Local Whisper Manual Smoke-Test Steps
 
