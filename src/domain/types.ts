@@ -124,6 +124,7 @@ export type DisplaySettings = {
   autoHideControlsOnStart?: boolean;
   // Conservative token lookahead for scroll target (confirmed + N). 0 = exact confirmed token (current behavior).
   readingLookaheadTokens?: number;
+  addExtraSpacingOnImport: boolean;
 };
 
 export type AssistStatusInfo = {

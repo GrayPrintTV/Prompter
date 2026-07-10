@@ -28,6 +28,10 @@ It verifies Python, faster-whisper import, model load, and WAV decode/transcribe
 
 The app currently relies on Chromium's default audio input. It shows the selected/default label after permission is granted, but it does not yet offer an input-device picker.
 
+## PDF Import Does Not Include OCR
+
+PDF import supports files with embedded/selectable text. Image-only scans are rejected with a clear copy/paste-or-OCR message. Text ordering and paragraph recovery are best-effort for complex columns, sidebars, or unusual PDF layout encodings.
+
 ## Number Normalization Is Narrow
 
 Number and abbreviation normalization intentionally covers only conservative common cases such as `two fourteen`, `twenty twenty-six`, `doctor`, and `p.m.`. It is not a general spoken-number parser.

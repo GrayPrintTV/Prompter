@@ -10,10 +10,11 @@ import type {
   OpenAiRealtimeSdpAnswer
 } from './domain/types';
 
-type ImportedTextFile = {
+type ImportedManuscriptFile = {
   filePath: string;
   name: string;
   text: string;
+  format: 'text' | 'docx' | 'pdf';
 };
 
 declare global {
@@ -29,7 +30,8 @@ declare global {
     };
     prompterApi?: {
       ping(): string;
-      openTextFile(): Promise<ImportedTextFile | null>;
+      openManuscriptFile(): Promise<ImportedManuscriptFile | null>;
+      openTextFile(): Promise<ImportedManuscriptFile | null>;
       toggleFullScreen(): Promise<boolean>;
       toggleAlwaysOnTop(): Promise<boolean>;
       getOpenAiRealtimeConfigStatus(): Promise<LiveAsrConfigStatus>;

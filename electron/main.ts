@@ -10,6 +10,7 @@ import {
   isOpenAiRealtimeFlagEnabled,
   validateOpenAiRealtimeSdpOffer
 } from './openAiRealtimeSession.js';
+import { importManuscriptFile } from './manuscriptImport.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
@@ -1088,13 +1089,16 @@ app.on('window-all-closed', () => {
   }
 });
 
-ipcMain.handle('dialog:openTextFile', async () => {
+async function openManuscriptFile() {
   const owner = BrowserWindow.getFocusedWindow() ?? mainWindow ?? undefined;
   const options = {
     title: 'Import manuscript',
     properties: ['openFile'],
     filters: [
+      { name: 'Supported manuscripts', extensions: ['txt', 'md', 'docx', 'pdf'] },
       { name: 'Text and Markdown', extensions: ['txt', 'md'] },
+      { name: 'Word documents', extensions: ['docx'] },
+      { name: 'PDF documents', extensions: ['pdf'] },
       { name: 'All Files', extensions: ['*'] }
     ]
   } satisfies Electron.OpenDialogOptions;
@@ -1106,14 +1110,11 @@ ipcMain.handle('dialog:openTextFile', async () => {
     return null;
   }
 
-  const filePath = result.filePaths[0];
-  const text = await readFile(filePath, 'utf8');
-  return {
-    filePath,
-    name: path.basename(filePath),
-    text
-  };
-});
+  return importManuscriptFile(result.filePaths[0]);
+}
+
+ipcMain.handle('dialog:openManuscriptFile', openManuscriptFile);
+ipcMain.handle('dialog:openTextFile', openManuscriptFile);
 
 ipcMain.handle('window:toggleFullScreen', (event) => {
   const win = BrowserWindow.fromWebContents(event.sender);

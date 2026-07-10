@@ -21,6 +21,7 @@ import {
   tokenIndexForParagraph,
   tokenIndexForSentence
 } from './domain/manuscript';
+import { cleanupImportedManuscriptText } from './domain/manuscriptImportCleanup';
 import { shouldRecoverControlsFromHiddenLayout } from './domain/layoutRecovery';
 import {
   MANUAL_REACQUIRE_BACKWARD_WINDOW,
@@ -61,8 +62,10 @@ import type {
   TranscriptDelta
 } from './domain/types';
 import {
+  DEFAULT_DEVELOPER_MODE,
   DEFAULT_LOCAL_WHISPER_SETTINGS,
   DEFAULT_MOCK_SCRIPT,
+  resolveInitialDeveloperMode,
   resolveInitialDisplaySettings,
   SAMPLE_MANUSCRIPT
 } from './state/appStore';
@@ -177,6 +180,13 @@ export default function App() {
     ...DEFAULT_LOCAL_WHISPER_SETTINGS,
     ...stored?.localWhisperSettings
   }), [stored]);
+  const initialDeveloperMode = useMemo(
+    () => resolveInitialDeveloperMode(stored?.developerMode ?? DEFAULT_DEVELOPER_MODE),
+    [stored]
+  );
+  const initialStoredProviderId = stored?.selectedAsrProviderId as AsrProviderId | undefined;
+  const initialProviderAllowedInNormalMode =
+    initialStoredProviderId === 'manual' || initialStoredProviderId === 'local-whisper';
   const [projectTitle, setProjectTitle] = useState(stored?.projectTitle ?? 'Narration Session');
   const [manuscriptText, setManuscriptText] = useState(stored?.manuscriptText ?? SAMPLE_MANUSCRIPT);
   const [displaySettings, setDisplaySettings] = useState<DisplaySettings>(() =>
@@ -196,16 +206,19 @@ export default function App() {
   const [localWhisperDraftSettings, setLocalWhisperDraftSettings] =
     useState<LocalWhisperSettings>(initialLocalWhisperSettings);
   const [localWhisperStatus, setLocalWhisperStatus] = useState<LocalWhisperStatus>(DEFAULT_LOCAL_WHISPER_STATUS);
+  const [developerMode, setDeveloperMode] = useState(initialDeveloperMode);
   const [selectedAsrProviderId, setSelectedAsrProviderId] = useState<AsrProviderId>(
     coerceSelectedProvider(
-      stored?.selectedAsrProviderId as AsrProviderId | undefined,
+      initialDeveloperMode || initialProviderAllowedInNormalMode
+        ? initialStoredProviderId
+        : undefined,
       DEFAULT_LIVE_CONFIG,
       initialLocalWhisperSettings
     )
   );
   const [isListening, setIsListening] = useState(false);
   const [isMockPlaying, setIsMockPlaying] = useState(false);
-  const [debugVisible, setDebugVisible] = useState(stored?.debugVisible ?? true);
+  const [debugVisible, setDebugVisible] = useState(stored?.debugVisible ?? false);
   const [controlsVisible, setControlsVisible] = useState(() => {
     try {
       return localStorage.getItem('narration-prompter.controls-visible') !== 'false';
@@ -214,6 +227,7 @@ export default function App() {
     }
   });
   const [searchQuery, setSearchQuery] = useState('');
+  const [manuscriptImportError, setManuscriptImportError] = useState<string | null>(null);
   const [transcriptBuffer, setTranscriptBuffer] = useState<string[]>([]);
   const [deltas, setDeltas] = useState<TranscriptDelta[]>([]);
   const [traceLog, setTraceLog] = useState<string[]>([]);
@@ -1279,7 +1293,8 @@ export default function App() {
         selectedAsrProviderId,
         localWhisperSettings,
         mockScript,
-        debugVisible
+        debugVisible,
+        developerMode
       });
     }, 300);
     return () => window.clearTimeout(timer);
@@ -1288,6 +1303,7 @@ export default function App() {
     currentSentenceIndex,
     currentTokenIndex,
     debugVisible,
+    developerMode,
     displaySettings,
     followState,
     manuscriptText,
@@ -1507,32 +1523,59 @@ export default function App() {
   ]);
 
   const importTxt = useCallback(async () => {
-    if (window.prompterApi?.openTextFile) {
-      const result = await window.prompterApi.openTextFile();
-      if (!result) return;
-      setProjectTitle(result.name.replace(/\.[^.]+$/, '') || result.name);
-      setManuscriptText(result.text);
-      resetAlignmentContext();
-      moveToToken(0, 'manual');
+    const openManuscriptFile =
+      window.prompterApi?.openManuscriptFile ?? window.prompterApi?.openTextFile;
+    if (openManuscriptFile) {
+      try {
+        const result = await openManuscriptFile();
+        if (!result) return;
+        setManuscriptImportError(null);
+        setProjectTitle(result.name.replace(/\.[^.]+$/, '') || result.name);
+        setManuscriptText(cleanupImportedManuscriptText(result.text, {
+          addExtraSpacingBetweenLines: displaySettings.addExtraSpacingOnImport
+        }));
+        resetAlignmentContext();
+        moveToToken(0, 'manual');
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setManuscriptImportError(
+          message.includes('No selectable text found in this PDF')
+            ? 'No selectable text found in this PDF. Try copy/paste or OCR first.'
+            : message.replace(/^Error invoking remote method '[^']+':\s*/i, '') ||
+                'Could not import the selected manuscript.'
+        );
+      }
       return;
     }
 
     fileInputRef.current?.click();
-  }, [moveToToken, resetAlignmentContext]);
+  }, [displaySettings.addExtraSpacingOnImport, moveToToken, resetAlignmentContext]);
 
   const localFileSelected = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
+    if (/\.(docx|pdf)$/i.test(file.name)) {
+      setManuscriptImportError('DOCX and PDF import require the Electron desktop app.');
+      event.target.value = '';
+      return;
+    }
     const reader = new FileReader();
     reader.onload = () => {
+      setManuscriptImportError(null);
       setProjectTitle(file.name.replace(/\.[^.]+$/, '') || file.name);
-      setManuscriptText(String(reader.result ?? ''));
+      setManuscriptText(cleanupImportedManuscriptText(String(reader.result ?? ''), {
+        addExtraSpacingBetweenLines: displaySettings.addExtraSpacingOnImport
+      }));
       resetAlignmentContext();
       moveToToken(0, 'manual');
       event.target.value = '';
     };
+    reader.onerror = () => {
+      setManuscriptImportError('Could not read the selected manuscript file.');
+      event.target.value = '';
+    };
     reader.readAsText(file);
-  }, [moveToToken, resetAlignmentContext]);
+  }, [displaySettings.addExtraSpacingOnImport, moveToToken, resetAlignmentContext]);
 
   const searchJump = useCallback(() => {
     const model = manuscriptRef.current;
@@ -1605,6 +1648,12 @@ export default function App() {
       if (event.ctrlKey && event.key === '`') {
         event.preventDefault();
         setDebugVisible((visible) => !visible);
+        return;
+      }
+
+      if (event.ctrlKey && event.shiftKey && key === 'd') {
+        event.preventDefault();
+        setDeveloperMode((enabled) => !enabled);
         return;
       }
 
@@ -1760,8 +1809,12 @@ export default function App() {
         projectTitle={projectTitle}
         onProjectTitleChange={setProjectTitle}
         manuscriptText={manuscriptText}
-        onManuscriptTextChange={setManuscriptText}
+        onManuscriptTextChange={(text) => {
+          setManuscriptImportError(null);
+          setManuscriptText(text);
+        }}
         onImportTxt={importTxt}
+        manuscriptImportError={manuscriptImportError}
         onLocalFileSelected={localFileSelected}
         fileInputRef={fileInputRef}
         model={manuscript}
@@ -1776,6 +1829,9 @@ export default function App() {
         onApplyLocalWhisperSettings={applyLocalWhisperSettings}
         onRestartLocalWhisper={restartLocalWhisper}
         localWhisperStatus={localWhisperStatus}
+        narrationStatus={narrationStatus}
+        developerMode={developerMode}
+        onToggleDeveloperMode={() => setDeveloperMode((enabled) => !enabled)}
         isListening={selectedProviderListening}
         isMockPlaying={isMockPlaying}
         inputLevel={selectedInputLevel}

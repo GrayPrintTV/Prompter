@@ -6,7 +6,7 @@ Future coding agents should start with `AGENTS.md` and `docs/current-state.md` b
 
 ## What works in Phase 0
 
-- Paste or import TXT/Markdown manuscript text.
+- Paste manuscript text or import TXT, Markdown, DOCX, and selectable-text PDF files.
 - Large prompter view with an optional current sentence highlight.
 - Manual transcript injection for alignment testing.
 - Mock ASR playback from scripted transcript chunks.
@@ -16,8 +16,8 @@ Future coding agents should start with `AGENTS.md` and `docs/current-state.md` b
 - Fixed reading band with custom smooth scrolling only on high-confidence alignment.
 - Manual sentence and paragraph recovery controls.
 - Keyboard shortcuts suitable for Stream Deck hotkey mapping.
-- Debug panel with transcript buffer, match, confidence, token position, search window, and reason.
-- Developer torture-test harness for stepping or autoplaying simulated transcript chunks against the current manuscript.
+- Developer-mode debug panel with transcript buffer, match, confidence, token position, search window, and reason.
+- Developer-mode torture-test harness for stepping or autoplaying simulated transcript chunks against the current manuscript.
 - Prompter-first narration mode with a minimal Start/Stop/status/mic-level overlay and hideable controls.
 - Unit tests for normalization and alignment edge cases.
 
@@ -48,6 +48,14 @@ npm run build
 npm start
 ```
 
+## Daily UI and Developer mode
+
+Fresh sessions open with Developer mode off. The normal Controls area is meant for narration work: project title, compact Listening status, Start Listening / Stop Listening, Local Whisper or Manual provider selection, manuscript import/editing, sentence/paragraph navigation, Resync, font size, text width, Focus Bar position/height, theme, always-on-top, and Assist Scroll on/off plus speed.
+
+Local Whisper is the intended live provider and is the default when its basic Python/model settings are present. Mock and OpenAI Realtime are hidden from the normal provider list. OpenAI Realtime remains parked and only appears when its experimental flag is enabled and Developer mode is on.
+
+Use the `Developer` button in the header or `Ctrl+Shift+D` to reveal troubleshooting controls. Developer mode contains Mock playback, Manual transcript injection, Local Whisper draft settings, bridge/sidecar/chunk counters, transcript history, raw confidence and penalty diagnostics, Movement decision history, scroll proof controls, Reading Lookahead, Correction feel, shortcuts, torture tests, and the Debug panel. `Ctrl+`` toggles the dense Debug panel after Developer mode is enabled.
+
 ## Experimental OpenAI Realtime
 
 OpenAI Realtime is parked as an experimental comparison path. It is disabled by default and absent from the normal provider list. Normal use does not require an OpenAI API key or network access; use Local Whisper for live narration.
@@ -62,7 +70,7 @@ OPENAI_REALTIME_LANGUAGE=en
 OPENAI_REALTIME_TRANSCRIPTION_PROMPT=
 ```
 
-When enabled, it appears as `Live OpenAI Realtime (Experimental)`. Electron main owns the permanent API key and OpenAI network exchange; keys, authorization headers, and prompts are not logged or stored in renderer state. Do not commit `.env.local`; it is ignored by git.
+When enabled, it appears in Developer mode as `Live OpenAI Realtime (Experimental)`. Electron main owns the permanent API key and OpenAI network exchange; keys, authorization headers, and prompts are not logged or stored in renderer state. Do not commit `.env.local`; it is ignored by git.
 
 ## Local Whisper transcription
 
@@ -84,13 +92,13 @@ Install sidecar dependencies in a Python environment:
 python -m pip install -r python/requirements.txt
 ```
 
-Then select `Local Whisper` in the ASR Provider dropdown. The settings panel lets you adjust the Python path, model, device, compute type, and chunk duration. A little chunk latency is expected; the aligner only needs enough recognized words every sentence or two.
+Fresh sessions default to `Local Whisper` in the provider dropdown when the Python path and model name are present. Developer mode contains the Local Whisper settings panel for adjusting the Python path, model, device, compute type, and chunk duration. A little chunk latency is expected; the aligner only needs enough recognized words every sentence or two.
 
-Use the always-visible top bar `Start` button for narration. It starts microphone monitoring and following as needed for the selected provider. `Stop` stops transcription/following and returns the narration state to Idle. The advanced Local Whisper panel still exposes separate Mic Monitor controls for diagnostics.
+Use the always-visible top bar `Start` button or the normal Controls `Start Listening` button for narration. It starts microphone monitoring and following as needed for the selected provider. `Stop` stops transcription/following and returns the narration state to Idle. Developer mode still exposes separate Mic Monitor controls for diagnostics.
 
-Local Whisper settings in the advanced panel are draft settings. Typing into Python/model/device/compute/chunk fields does not silently change a running sidecar. Use `Apply` while stopped, or `Restart Whisper` while following; when following is active, the UI labels draft edits as applying after restart.
+Local Whisper settings in Developer mode are draft settings. Typing into Python/model/device/compute/chunk fields does not silently change a running sidecar. Use `Apply` while stopped, or `Restart Whisper` while following; when following is active, the UI labels draft edits as applying after restart.
 
-The Local Whisper panel shows mic state, selected/default input label when Chromium exposes it, sidecar phase, chunk counters, chunk format, MIME type, extension, first-byte header signature such as `RIFF/WAVE`, sample rate, duration, last transcript text, recent ASR transcript history under `Heard`, and warnings for missing PCM/WAV chunks or sidecar response timeouts. Empty Whisper returns are shown as `[empty transcript]` so silence is visible instead of looking like nothing happened. Provider status messages such as `Sidecar is running` are diagnostics only and should not appear in `Heard`, `Last delta`, or feed the aligner.
+Normal mode shows compact Local Whisper status such as `Local Whisper ready`, `Starting`, `Listening`, `Mic not detected`, or `Needs resync`, plus the latest heard phrase. Developer mode shows mic state, selected/default input label when Chromium exposes it, sidecar phase, chunk counters, chunk format, MIME type, extension, first-byte header signature such as `RIFF/WAVE`, sample rate, duration, last transcript text, recent ASR transcript history under `Heard`, and warnings for missing PCM/WAV chunks or sidecar response timeouts. Empty Whisper returns are shown as `[empty transcript]` so silence is visible instead of looking like nothing happened. Provider status messages such as `Sidecar is running` are diagnostics only and should not appear in `Heard`, `Last delta`, or feed the aligner.
 
 The sidecar distinguishes process startup from model readiness. `Process started` means Python is running and answering JSONL. `Model loading` means faster-whisper is loading the requested model. `Ready` means the model is loaded and transcription chunks can be processed. The model-ready timeout defaults to 180 seconds and can be overridden with:
 
@@ -106,7 +114,7 @@ python python/local_whisper_sidecar.py --self-test --model base.en --device cpu 
 
 The self-test verifies Python starts, imports faster-whisper, loads the requested model, generates a small WAV file, and asks faster-whisper to decode/transcribe it. A silent or tone fixture may produce an empty transcript; `wavDecoded: true` is the important decode check.
 
-The bridge diagnostics show whether the renderer can see Electron preload IPC:
+In Developer mode, the bridge diagnostics show whether the renderer can see Electron preload IPC:
 
 - `Electron bridge`: `window.prompterApi` is available.
 - `Whisper bridge`: Local Whisper preload methods are available.
@@ -115,11 +123,11 @@ The bridge diagnostics show whether the renderer can see Electron preload IPC:
 - `App path`, `CWD`, `Main dir`, `Preload`, `Preload exists`, `Dev mode`, and `Dev URL`: Electron main runtime paths printed in the terminal and surfaced in the UI.
 - `Preload status` / `Preload error`: whether preload started, exposed the API, or threw while exposing it.
 
-If `Whisper bridge` is `No`, `Start Following` is disabled and the app shows `Local Whisper bridge unavailable. Are you running inside Electron?`. Mic Monitor can still work in a browser-like renderer because it only uses `getUserMedia`, but transcription needs the Electron preload/main bridge.
+If `Whisper bridge` is `No`, `Start Listening` is disabled and the app shows `Local Whisper bridge unavailable. Are you running inside Electron?`. Mic Monitor can still work in a browser-like renderer because it only uses `getUserMedia`, but transcription needs the Electron preload/main bridge.
 
 After changing `electron/main.ts`, `electron/preload.cts`, Electron build config, or the dev launcher, stop `npm run dev`, close the Electron window, and restart `npm run dev`. Renderer hot reload is not enough for preload/main-process changes.
 
-If `Start Following` fails before the app asks for microphone permission, check the Local Whisper error and mic diagnostics first. A Python path, missing `faster-whisper` install, or sidecar startup failure is reported as setup failure before `getUserMedia`.
+If `Start Listening` fails before the app asks for microphone permission, check the Local Whisper error and mic diagnostics first. A Python path, missing `faster-whisper` install, or sidecar startup failure is reported as setup failure before `getUserMedia`.
 
 ## Legacy Codex environment workaround
 
@@ -133,9 +141,19 @@ $env:PATH = 'C:\Users\fmgee\.cache\codex-runtimes\codex-primary-runtime\dependen
 
 ## Mock transcript system
 
-Use the Mock Playback box to enter one transcript chunk per line, then press `Play Mock`. Blank lines or `[pause]` simulate silence. Off-script chunks should hold the prompter instead of moving it.
+Turn on Developer mode to use the Mock Playback box. Enter one transcript chunk per line, then press `Play Mock`. Blank lines or `[pause]` simulate silence. Off-script chunks should hold the prompter instead of moving it.
 
-The Manual Transcript box emits a single transcript delta. Press `Ctrl+Enter` inside the box or click `Inject Transcript`.
+The Developer-mode Manual Transcript box emits a single transcript delta. Press `Ctrl+Enter` inside the box or click `Inject Transcript`.
+
+## Audition manuscript import
+
+The manuscript editor remains available for text copied from ACX or another audition page. `Import file` accepts TXT, Markdown, DOCX, and PDF files through the Electron file picker. DOCX paragraphs are extracted in document order. PDF import reads embedded/selectable text and joins obvious visual line wraps while retaining larger paragraph gaps where practical.
+
+`Add extra spacing between imported lines` is enabled by default in the Manuscript panel. It applies narrator-friendly blank-line spacing to pasted text and imported files without changing punctuation or the token sequence used for alignment. The cleanup is idempotent, so reprocessing text does not keep adding blank lines.
+
+PDF OCR is intentionally out of scope. Image-only or scanned PDFs show: `No selectable text found in this PDF. Try copy/paste or OCR first.` File reading and document parsing stay in Electron main; the renderer receives only the imported filename, format, and extracted text.
+
+The current manuscript, project title, display settings, and token/sentence/paragraph position continue to save in local session storage and restore on launch. This is last-session restoration, not a project library.
 
 ## Prompter reading zone
 
@@ -147,11 +165,11 @@ Active sentence highlighting is optional and defaults off for fresh sessions so 
 
 Scrolling is controlled by a `requestAnimationFrame` animation loop rather than browser native smooth scrolling. Correction scrolls move confirmed ASR/alignment anchors into the reading band with a deterministic cubic ease-in-out plan: from scrollTop, target scrollTop, duration, easing curve, and Correction feel are logged in the trace. Duration is derived from distance and the Correction feel slider, clamped to roughly 450-2200 ms, and in-flight updates retarget from the current physical scroll position.
 
-The Display panel includes proof buttons for the physical scroll engine: `Test smooth scroll: 1 line`, `5 lines`, `15 lines`, and `Reset test scroll position`. The 1/5/15-line buttons do not use ASR or alignment; they send measured scroll requests through the same correction-scroll engine live following uses, so you can tune the motion independently. Reset is a direct jump back to the top for setup. The panel also shows the latest motion status, including reduced-motion state, distance, duration, easing, Correction feel, and frame count. Systems with `prefers-reduced-motion` enabled use minimal motion and make that visible in the Display panel and trace log.
+Developer mode includes proof buttons for the physical scroll engine: `Test smooth scroll: 1 line`, `5 lines`, `15 lines`, and `Reset test scroll position`. The 1/5/15-line buttons do not use ASR or alignment; they send measured scroll requests through the same correction-scroll engine live following uses, so you can tune the motion independently. Reset is a direct jump back to the top for setup. Developer mode also shows the latest motion status, including reduced-motion state, distance, duration, easing, Correction feel, and frame count. Systems with `prefers-reduced-motion` enabled use minimal motion and make that visible in the trace log.
 
-Optional `Assist Scroll` is a predictive cruise layer and remains off by default. When enabled, recent high-confidence `following` matches become correction anchors; the prompter estimates reading pace from confirmed target movement and keeps the manuscript moving gently between ASR chunks. The Display panel includes Assist speed (`Slower` / `Faster`) and Correction feel (`Gentle` / `Firm`) sliders. Assist cruise slows when Local Whisper is lagging, decays when confidence becomes stale, and stops on holding, lost, paused, manual, retake, or low confidence. Active sentence highlighting can also be hidden from the Display controls.
+Optional `Assist Scroll` is a predictive cruise layer and remains off by default. When enabled, recent high-confidence `following` matches become correction anchors; the prompter estimates reading pace from confirmed target movement and keeps the manuscript moving gently between ASR chunks. The normal Display panel includes Assist Scroll on/off and Assist speed (`Slower` / `Faster`); Developer mode adds Correction feel (`Gentle` / `Firm`). Assist cruise slows when Local Whisper is lagging, decays when confidence becomes stale, and stops on holding, lost, paused, manual, retake, or low confidence. Active sentence highlighting can also be hidden from the Display controls.
 
-The Display panel also includes a compact `Movement decision` diagnostic area. It shows the latest confirmed manuscript token, proposed lookahead target, prior fresh anchor, token/line delta, current Reading Lookahead, time since the last high-confidence anchor, a 160 WPM diagnostic pace prior, expected progress corridor, confidence, retake/duplicate/jump penalty flags when available, final outcome, plain-English reason, and the last 10 movement decisions. The 160 WPM value is observability only; it does not force scrolling or change alignment acceptance.
+Developer mode includes a compact `Movement decision` diagnostic area. It shows the latest confirmed manuscript token, proposed lookahead target, prior fresh anchor, token/line delta, current Reading Lookahead, time since the last high-confidence anchor, a 160 WPM diagnostic pace prior, expected progress corridor, confidence, retake/duplicate/jump penalty flags when available, final outcome, plain-English reason, and the last 10 movement decisions. The 160 WPM value is observability only; it does not force scrolling or change alignment acceptance.
 
 ## Narration mode
 
@@ -161,9 +179,9 @@ During narration, the left control panel can be hidden with the top-bar `Hide Co
 - selected provider and narration state: Idle, Starting, Listening, Following, Holding, Lagging, or Error
 - mic level meter
 - key warning text when something needs attention
-- `Controls` to bring back the advanced panel
+- `Controls` to bring back the normal panel
 
-If the app starts with controls hidden from a saved preference, it should still open into the same prompter-only view. The top bar `Controls` button and `Ctrl+Alt+C` restore the advanced panel, and the app automatically restores controls if hidden mode ever produces an invalid prompter pane size.
+If the app starts with controls hidden from a saved preference, it should still open into the same prompter-only view. The top bar `Controls` button and `Ctrl+Alt+C` restore the normal panel, and the app automatically restores controls if hidden mode ever produces an invalid prompter pane size.
 
 ## Alignment torture-test harness
 
@@ -190,10 +208,11 @@ Phase 0.5 alignment hardening covers the repeated-sentence-after-flub fixture, d
 - `Alt+Up` / `Alt+Down`: back/forward one paragraph
 - `Ctrl+Alt+R`: resync using a wider search on the next transcript chunk
 - `Ctrl+Alt+C`: show/hide controls
+- `Ctrl+Shift+D`: toggle Developer mode
 - `Ctrl+F`: search
 - `Ctrl+=` / `Ctrl+-`: increase/decrease font size
 - `F11`: toggle full screen
-- `Ctrl+``: toggle debug panel
+- `Ctrl+``: toggle debug panel while Developer mode is enabled
 
 ## Architecture
 

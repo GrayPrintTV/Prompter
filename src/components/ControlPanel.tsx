@@ -1,11 +1,11 @@
-import { useState, useEffect, type ChangeEvent } from 'react';
+import { useState, useEffect, type ChangeEvent, type ClipboardEvent } from 'react';
 import { DebugPanel } from './DebugPanel';
 import { ShortcutHelp } from './ShortcutHelp';
 import { StatusIndicator } from './StatusIndicator';
 import { TortureTestPanel } from './TortureTestPanel';
-import { getAsrProviderOptions } from '../asr/providerRegistry';
+import { getAsrProviderOptions, type AsrProviderOption } from '../asr/providerRegistry';
 import type { MovementDecisionInfo } from '../domain/movementDiagnostics';
-import type { StartDiagnostic } from '../domain/narrationStatus';
+import type { NarrationStatus, StartDiagnostic } from '../domain/narrationStatus';
 import type {
   AlignmentBufferDebug,
   AlignmentResult,
@@ -24,6 +24,7 @@ import type {
   TranscriptDelta
 } from '../domain/types';
 import { DEFAULT_DISPLAY_SETTINGS } from '../state/appStore';
+import { cleanupImportedManuscriptText } from '../domain/manuscriptImportCleanup';
 
 type Props = {
   projectTitle: string;
@@ -31,6 +32,7 @@ type Props = {
   manuscriptText: string;
   onManuscriptTextChange(text: string): void;
   onImportTxt(): void;
+  manuscriptImportError?: string | null;
   onLocalFileSelected(event: ChangeEvent<HTMLInputElement>): void;
   fileInputRef: React.RefObject<HTMLInputElement>;
   model: ManuscriptModel;
@@ -45,6 +47,9 @@ type Props = {
   onApplyLocalWhisperSettings(): void;
   onRestartLocalWhisper(): void;
   localWhisperStatus: LocalWhisperStatus;
+  narrationStatus: NarrationStatus;
+  developerMode: boolean;
+  onToggleDeveloperMode(): void;
   isListening: boolean;
   isMockPlaying: boolean;
   inputLevel: number;
@@ -158,6 +163,14 @@ export function getActiveAsrTranscriptHistory(
     }));
 }
 
+export function getVisibleAsrProviderOptions(
+  options: AsrProviderOption[],
+  developerMode: boolean
+) {
+  if (developerMode) return options;
+  return options.filter((option) => option.id === 'local-whisper' || option.id === 'manual');
+}
+
 function formatSignedInteger(value: number) {
   const rounded = Math.round(value);
   return `${rounded > 0 ? '+' : ''}${rounded}`;
@@ -183,6 +196,44 @@ function formatTokenWithSnippet(index: number, snippet: string) {
   return `#${index} - ${snippet}`;
 }
 
+export function getNarratorStatusMessage(params: {
+  narrationStatus: NarrationStatus;
+  selectedAsrProviderId: AsrProviderId;
+  localWhisperStatus: LocalWhisperStatus;
+  followState: FollowState;
+  isListening: boolean;
+}) {
+  const { narrationStatus, selectedAsrProviderId, localWhisperStatus, followState, isListening } = params;
+  const warning = narrationStatus.warning?.toLowerCase() ?? '';
+  const localMicError = localWhisperStatus.mic.errorMessage?.toLowerCase() ?? '';
+
+  if (
+    warning.includes('microphone') ||
+    warning.includes('mic ') ||
+    localMicError.includes('microphone') ||
+    localMicError.includes('permission') ||
+    localMicError.includes('notfound')
+  ) {
+    return 'Mic not detected';
+  }
+
+  if (narrationStatus.label === 'Starting') return 'Starting';
+  if (followState === 'lost' || followState === 'uncertain' || followState === 'holding') {
+    return 'Needs resync';
+  }
+  if (isListening) return 'Listening';
+
+  if (
+    selectedAsrProviderId === 'local-whisper' &&
+    localWhisperStatus.bridge.localWhisperBridgeAvailable &&
+    (localWhisperStatus.modelPhase === 'ready' || localWhisperStatus.status === 'idle')
+  ) {
+    return 'Local Whisper ready';
+  }
+
+  return narrationStatus.label;
+}
+
 export function ControlPanel(props: Props) {
   const {
     projectTitle,
@@ -190,6 +241,7 @@ export function ControlPanel(props: Props) {
     manuscriptText,
     onManuscriptTextChange,
     onImportTxt,
+    manuscriptImportError,
     onLocalFileSelected,
     fileInputRef,
     model,
@@ -204,6 +256,9 @@ export function ControlPanel(props: Props) {
     onApplyLocalWhisperSettings,
     onRestartLocalWhisper,
     localWhisperStatus,
+    narrationStatus,
+    developerMode,
+    onToggleDeveloperMode,
     isListening,
     isMockPlaying,
     inputLevel,
@@ -252,9 +307,30 @@ export function ControlPanel(props: Props) {
     movementDecisionHistory,
     lastStartDiagnostic
   } = props;
-  const providerOptions = getAsrProviderOptions(liveConfig, localWhisperSettings);
+
+  const handleManuscriptPaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    const pastedText = event.clipboardData.getData('text/plain');
+    if (!pastedText) return;
+
+    event.preventDefault();
+    const textarea = event.currentTarget;
+    const selectionStart = textarea.selectionStart;
+    const selectionEnd = textarea.selectionEnd;
+    const cleanedText = cleanupImportedManuscriptText(pastedText, {
+      addExtraSpacingBetweenLines: settings.addExtraSpacingOnImport
+    });
+    const nextText = `${manuscriptText.slice(0, selectionStart)}${cleanedText}${manuscriptText.slice(selectionEnd)}`;
+    const nextCaret = selectionStart + cleanedText.length;
+    onManuscriptTextChange(nextText);
+    window.requestAnimationFrame(() => {
+      textarea.focus();
+      textarea.setSelectionRange(nextCaret, nextCaret);
+    });
+  };
+  const allProviderOptions = getAsrProviderOptions(liveConfig, localWhisperSettings);
+  const providerOptions = getVisibleAsrProviderOptions(allProviderOptions, developerMode);
   const selectedProviderLabel =
-    providerOptions.find((option) => option.id === selectedAsrProviderId)?.label ?? 'Manual';
+    allProviderOptions.find((option) => option.id === selectedAsrProviderId)?.label ?? 'Manual';
   const localMic = selectedAsrProviderId === 'local-whisper' ? localWhisperStatus.mic : null;
   const localBridgeUnavailable =
     selectedAsrProviderId === 'local-whisper' && !localWhisperStatus.bridge.localWhisperBridgeAvailable;
@@ -266,11 +342,16 @@ export function ControlPanel(props: Props) {
         ? localWhisperStatus.lastTranscriptDelta
         : '') ||
     'Nothing heard yet';
-  const startStopLabel = selectedAsrProviderId === 'local-whisper'
-    ? isListening ? 'Stop Following' : 'Start Following'
-    : isListening ? 'Stop' : 'Start';
+  const startStopLabel = isListening ? 'Stop Listening' : 'Start Listening';
   const startStopDisabled = localBridgeUnavailable && !isListening;
   const localWhisperRunning = selectedAsrProviderId === 'local-whisper' && localWhisperStatus.listening;
+  const narratorStatusMessage = getNarratorStatusMessage({
+    narrationStatus,
+    selectedAsrProviderId,
+    localWhisperStatus,
+    followState,
+    isListening
+  });
 
   // Derive LW lag for assist exposure (same conditions as App passes to PrompterView)
   const chunk = localWhisperStatus.chunk || {};
@@ -455,11 +536,31 @@ export function ControlPanel(props: Props) {
             onChange={(event) => onProjectTitleChange(event.target.value)}
           />
         </div>
+        <button
+          type="button"
+          className={developerMode ? 'developer-mode-toggle is-active' : 'developer-mode-toggle'}
+          onClick={onToggleDeveloperMode}
+          title="Toggle developer diagnostics (Ctrl+Shift+D)"
+        >
+          Developer
+        </button>
         <button type="button" onClick={onToggleFullScreen}>Full</button>
       </header>
 
       <section className="panel-section">
-        <StatusIndicator state={followState} confidence={confidence} isListening={isListening || isMockPlaying} />
+        {developerMode ? (
+          <StatusIndicator state={followState} confidence={confidence} isListening={isListening || isMockPlaying} />
+        ) : (
+          <div className={`narrator-status-card narration-${narrationStatus.tone}`}>
+            <div>
+              <span className="narrator-status-label">{narratorStatusMessage}</span>
+              <span className="status-subtle">{selectedProviderLabel}</span>
+            </div>
+            {narrationStatus.warning && (
+              <div className="narrator-status-warning">{narrationStatus.warning}</div>
+            )}
+          </div>
+        )}
         <div className="position-line">
           <span>Paragraph {Math.min(currentParagraphIndex + 1, model.paragraphs.length || 1)} / {model.paragraphs.length || 1}</span>
           <span>Sentence {Math.min(currentSentenceIndex + 1, model.sentences.length || 1)} / {model.sentences.length || 1}</span>
@@ -500,8 +601,21 @@ export function ControlPanel(props: Props) {
           <button type="button" onClick={onTogglePause}>{followState === 'paused' ? 'Resume' : 'Pause'}</button>
         </div>
 
+        {!developerMode && (
+          <div className="daily-listening-summary">
+            <div>
+              <strong>{narratorStatusMessage}</strong>
+              {narrationStatus.warning && <span>{narrationStatus.warning}</span>}
+            </div>
+            <div>
+              <span>Heard</span>
+              <strong>{latestHeard}</strong>
+            </div>
+          </div>
+        )}
+
         {/* Local Whisper Health indicator (exact states) + human readable RT + queue */}
-        {selectedAsrProviderId === 'local-whisper' && (
+        {developerMode && selectedAsrProviderId === 'local-whisper' && (
           <div style={{margin: '6px 0', fontSize: '0.95em'}}>
             <div>
               <strong>Local Whisper Health:</strong> <span style={{fontWeight: 'bold', color: lwHealth.type === 'error' ? 'red' : lwHealth.type === 'warning' ? 'orange' : 'green'}}>{lwHealth.label}</span>
@@ -516,14 +630,14 @@ export function ControlPanel(props: Props) {
         )}
 
         {/* Compact pipeline visualization (text badges, OK/Waiting/Warning/Error) */}
-        {selectedAsrProviderId === 'local-whisper' && (
+        {developerMode && selectedAsrProviderId === 'local-whisper' && (
           <div style={{fontFamily: 'monospace', fontSize: '0.85em', margin: '4px 0', whiteSpace: 'pre-wrap'}}>
             {pipelineViz}
           </div>
         )}
 
         {/* Basic asr status (high level only; deep bridge moved to Advanced) */}
-        <dl className="asr-status-grid" style={{fontSize: '0.9em'}}>
+        {developerMode && <dl className="asr-status-grid" style={{fontSize: '0.9em'}}>
           <dt>Provider</dt>
           <dd>{selectedProviderLabel}</dd>
           <dt>Listening</dt>
@@ -565,11 +679,11 @@ export function ControlPanel(props: Props) {
               </>
             ) : 'None recorded'}
           </dd>
-        </dl>
+        </dl>}
       </section>
 
       {/* Local Whisper Health - dedicated, with indicator */}
-      {selectedAsrProviderId === 'local-whisper' && (
+      {developerMode && selectedAsrProviderId === 'local-whisper' && (
         <section className="panel-section">
           <h2>Local Whisper Health</h2>
           <div>
@@ -584,7 +698,7 @@ export function ControlPanel(props: Props) {
       )}
 
       {/* Heard / Transcript - prominent, improved per req */}
-      <div className="asr-transcript-panel">
+      {developerMode && <div className="asr-transcript-panel">
         <div className="asr-transcript-header">
           <span>Heard / Transcript</span>
           <span>{transcriptHistory.length} recent</span>
@@ -617,12 +731,11 @@ export function ControlPanel(props: Props) {
             </li>
           ))}
         </ol>
-      </div>
+      </div>}
 
       {/* Navigation - basic nav buttons, default visible */}
       <section className="panel-section button-grid">
         <h2>Navigation</h2>
-        <button type="button" onClick={onStartStop} disabled={startStopDisabled}>{startStopLabel}</button>
         <button type="button" onClick={onToggleFollow}>{followState === 'manual' ? 'Follow' : 'Manual'}</button>
         <button type="button" onClick={onTogglePause}>{followState === 'paused' ? 'Resume' : 'Pause'}</button>
         <button type="button" onClick={onResync}>Resync</button>
@@ -772,7 +885,7 @@ export function ControlPanel(props: Props) {
             <span>Faster</span>
           </div>
         </div>
-        <div className="assist-scroll-control">
+        {developerMode && <div className="assist-scroll-control">
           <div className="reading-zone-label">
             <span>Correction feel</span>
             <strong>{settings.assistCorrectionFeel}%</strong>
@@ -800,8 +913,8 @@ export function ControlPanel(props: Props) {
             <span>Gentle</span>
             <span>Firm</span>
           </div>
-        </div>
-        <div className="scroll-test-control">
+        </div>}
+        {developerMode && <div className="scroll-test-control">
           <div className="reading-zone-label">
             <span>Scroll test</span>
             <strong>Same correction path</strong>
@@ -829,11 +942,11 @@ export function ControlPanel(props: Props) {
             )}
             {scrollAnimationStatus?.reason && <div>{scrollAnimationStatus.reason}</div>}
           </div>
-        </div>
+        </div>}
         {/* Conservative token lookahead for scroll target (confirmed + N). 0 = target last confirmed token exactly.
             Higher values move the reading band / Assist target earlier (reduces "one line late" feel).
             Clamped 0-20. */}
-        <div className="assist-scroll-control">
+        {developerMode && <div className="assist-scroll-control">
           <div className="reading-zone-label">
             <span>Reading lookahead</span>
             <strong>{settings.readingLookaheadTokens ?? 6} tokens</strong>
@@ -861,8 +974,8 @@ export function ControlPanel(props: Props) {
             <span>0 (exact)</span>
             <span>20</span>
           </div>
-        </div>
-        <div className="movement-decision-panel">
+        </div>}
+        {developerMode && <div className="movement-decision-panel">
           <div className="reading-zone-label">
             <span>Movement decision</span>
             <strong>{movementDecision?.classification ?? 'waiting'}</strong>
@@ -924,9 +1037,9 @@ export function ControlPanel(props: Props) {
           ) : (
             <div className="settings-subtle">Waiting for Mock, Manual, OpenAI, Local Whisper, or Assist movement events.</div>
           )}
-        </div>
+        </div>}
         {/* Live visible anchor diagnostics (updated from prompter scroll decisions) */}
-        {anchorDebug && (
+        {developerMode && anchorDebug && (
           <div style={{ fontSize: '0.75em', marginTop: '6px', padding: '3px 4px', background: '#1a1f24', border: '1px solid #333', borderRadius: '2px' }}>
             <div style={{ fontWeight: 'bold', marginBottom: '2px' }}>Anchor status (live)</div>
             <div>Confirmed: {anchorDebug.confirmedToken} | Target: {anchorDebug.targetToken} (la={anchorDebug.lookahead})</div>
@@ -941,18 +1054,18 @@ export function ControlPanel(props: Props) {
             {settings.continuousAssistScroll ? 'Turn off Assist' : 'Turn on Assist'}
           </button>
           <button type="button" onClick={onToggleAlwaysOnTop}>Top</button>
-          <button type="button" onClick={onToggleDebug}>{debugVisible ? 'Hide Debug' : 'Debug'}</button>
+          {developerMode && <button type="button" onClick={onToggleDebug}>{debugVisible ? 'Hide Debug' : 'Debug'}</button>}
         </div>
         {/* Unambiguous Assist status (req 7,8): always shows ON/OFF + runtime state/vel/pace from cruise controller. Visible near Display controls. */}
         <div style={{ fontSize: '0.85em', marginTop: '4px', padding: '2px 4px', border: '1px solid #555', borderRadius: '3px' }}>
           <strong>
             Assist: {settings.continuousAssistScroll ? 'ON' : 'OFF'}
           </strong>
-          {assistStatus && assistStatus.state !== 'OFF' && (
+          {developerMode && assistStatus && assistStatus.state !== 'OFF' && (
             <> — {assistStatus.state}{assistStatus.cruiseVelocityPxPerSec != null ? ` • ${assistStatus.cruiseVelocityPxPerSec} px/sec` : ''}{assistStatus.estimatedPaceLinesPerMin != null ? ` • ${assistStatus.estimatedPaceLinesPerMin} lines/min` : ''}</>
           )}
-          {!assistStatus && settings.continuousAssistScroll && <span> (waiting for update)</span>}
-          {settings.continuousAssistScroll && isLwLaggingForAssist && <span style={{ color: '#f90' }}> • LW lag: cruise slowed</span>}
+          {developerMode && !assistStatus && settings.continuousAssistScroll && <span> (waiting for update)</span>}
+          {developerMode && settings.continuousAssistScroll && isLwLaggingForAssist && <span style={{ color: '#f90' }}> • LW lag: cruise slowed</span>}
         </div>
       </section>
 
@@ -960,26 +1073,43 @@ export function ControlPanel(props: Props) {
       <section className="panel-section">
         <h2>Manuscript</h2>
         <div className="inline-actions">
-          <button type="button" onClick={onImportTxt}>Import TXT</button>
+          <button type="button" onClick={onImportTxt}>Import file</button>
           <input
             ref={fileInputRef}
             className="hidden-file-input"
             type="file"
-            accept=".txt,.md,text/plain,text/markdown"
+            accept=".txt,.md,.docx,.pdf,text/plain,text/markdown,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/pdf"
             onChange={onLocalFileSelected}
           />
           <span>{model.tokens.length.toLocaleString()} words</span>
         </div>
+        <label className="manuscript-import-spacing-option">
+          <input
+            type="checkbox"
+            checked={settings.addExtraSpacingOnImport}
+            onChange={(event) => onSettingsChange({
+              ...settings,
+              addExtraSpacingOnImport: event.target.checked
+            })}
+          />
+          Add extra spacing between imported lines
+        </label>
+        {manuscriptImportError && (
+          <div className="settings-warning manuscript-import-error" role="alert">
+            {manuscriptImportError}
+          </div>
+        )}
         <textarea
           className="manuscript-input"
           value={manuscriptText}
           onChange={(event) => onManuscriptTextChange(event.target.value)}
+          onPaste={handleManuscriptPaste}
           spellCheck={false}
         />
       </section>
 
       {/* Advanced Diagnostics - default collapsed (bridge, some status, detailed if any) */}
-      <section className="panel-section">
+      {developerMode && <section className="panel-section">
         <CollapsibleHeader title="Advanced Diagnostics" keyName="advanced" />
         {!sectionsCollapsed.advanced && (
           <div>
@@ -1001,10 +1131,10 @@ export function ControlPanel(props: Props) {
             {/* Any other advanced status can go here; detailed chunk counters moved to Developer */}
           </div>
         )}
-      </section>
+      </section>}
 
       {/* Developer Tools - default collapsed (mock, manual, torture, search, shortcuts, debug toggle, raw trace via DebugPanel, detailed counters) */}
-      <section className="panel-section">
+      {developerMode && <section className="panel-section">
         <CollapsibleHeader title="Developer Tools" keyName="developer" />
         {!sectionsCollapsed.developer && (
           <div>
@@ -1113,11 +1243,11 @@ export function ControlPanel(props: Props) {
             {/* Raw Trace / Debug area - moved here, Debug button already above; trace labeled Alignment Trace in DebugPanel */}
           </div>
         )}
-      </section>
+      </section>}
 
       {/* The DebugPanel (contains Alignment Trace etc) is rendered here; its visibility is controlled by the "Debug" button now inside Developer Tools above. Trace inside is the raw one. */}
       <DebugPanel
-        visible={debugVisible}
+        visible={developerMode && debugVisible}
         deltas={deltas}
         transcriptBuffer={transcriptBuffer}
         alignment={alignment}

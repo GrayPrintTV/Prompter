@@ -67,7 +67,8 @@ describe('ASR provider selection', () => {
   it('shows Manual, Mock, and Local Whisper while Realtime is disabled by default', () => {
     const options = getAsrProviderOptions(UNCONFIGURED_LIVE);
     expect(options.map((option) => option.id)).toEqual(['manual', 'mock', 'local-whisper']);
-    expect(coerceSelectedProvider('openai-realtime', UNCONFIGURED_LIVE)).toBe('manual');
+    expect(coerceSelectedProvider(undefined, UNCONFIGURED_LIVE)).toBe('local-whisper');
+    expect(coerceSelectedProvider('openai-realtime', UNCONFIGURED_LIVE)).toBe('local-whisper');
   });
 
   it('shows experimental Realtime only when explicitly enabled', () => {

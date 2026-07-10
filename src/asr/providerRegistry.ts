@@ -45,6 +45,11 @@ export function coerceSelectedProvider(
   localWhisperSettings?: LocalWhisperSettings
 ): AsrProviderId {
   const options = getAsrProviderOptions(liveConfig, localWhisperSettings);
+  const fallback = options.find((option) => option.id === 'local-whisper' && option.enabled)?.id ?? 'manual';
+  if (!requestedProviderId) {
+    return fallback;
+  }
+
   const requested = options.find((option) => option.id === requestedProviderId);
-  return requested?.enabled ? requested.id : 'manual';
+  return requested?.enabled ? requested.id : fallback;
 }

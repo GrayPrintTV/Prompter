@@ -12,6 +12,7 @@ export type StoredSession = {
   localWhisperSettings: LocalWhisperSettings;
   mockScript: string;
   debugVisible: boolean;
+  developerMode: boolean;
 };
 
 const STORAGE_KEY = 'narration-prompter.phase0.session';

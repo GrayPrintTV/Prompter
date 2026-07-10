@@ -1,8 +1,22 @@
 import { describe, expect, it } from 'vitest';
 import {
+  DEFAULT_DEVELOPER_MODE,
   DEFAULT_DISPLAY_SETTINGS,
+  resolveInitialDeveloperMode,
   resolveInitialDisplaySettings
 } from '../state/appStore';
+
+describe('developer mode startup defaults', () => {
+  it('defaults developer diagnostics off for fresh sessions', () => {
+    expect(DEFAULT_DEVELOPER_MODE).toBe(false);
+    expect(resolveInitialDeveloperMode()).toBe(false);
+  });
+
+  it('restores developer mode only when explicitly saved on', () => {
+    expect(resolveInitialDeveloperMode(true)).toBe(true);
+    expect(resolveInitialDeveloperMode(false)).toBe(false);
+  });
+});
 
 describe('display settings startup defaults', () => {
   it('uses the narration reading-band default for fresh sessions', () => {
@@ -15,6 +29,7 @@ describe('display settings startup defaults', () => {
     expect(settings.assistScrollSpeed).toBe(50);
     expect(settings.assistCorrectionFeel).toBe(45);
     expect(settings.readingLookaheadTokens).toBe(6);
+    expect(settings.addExtraSpacingOnImport).toBe(true);
   });
 
   it('preserves saved reading-zone settings after migration has already run', () => {

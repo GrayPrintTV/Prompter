@@ -230,7 +230,7 @@ textarea {
 
 .app-header {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 10px;
   align-items: end;
   background: var(--panel-strong);
@@ -248,6 +248,17 @@ textarea {
 
 .app-header input {
   width: 100%;
+}
+
+.developer-mode-toggle {
+  border-color: #40505b;
+  background: #202a31;
+}
+
+.developer-mode-toggle.is-active {
+  border-color: var(--warn);
+  background: #3b3220;
+  color: #f2d28a;
 }
 
 .panel-section h2 {
@@ -269,6 +280,41 @@ textarea {
   border-left: 5px solid var(--accent);
   border-radius: 7px;
   background: #12191e;
+}
+
+.narrator-status-card {
+  display: grid;
+  gap: 8px;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-left: 5px solid var(--accent);
+  border-radius: 7px;
+  background: #12191e;
+}
+
+.narrator-status-card.narration-warning {
+  border-left-color: var(--warn);
+}
+
+.narrator-status-card.narration-error {
+  border-left-color: var(--danger);
+}
+
+.narrator-status-label {
+  display: block;
+  font-size: 22px;
+  font-weight: 800;
+}
+
+.narrator-status-warning {
+  color: var(--warn);
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.narrator-status-card.narration-error .narrator-status-warning {
+  color: var(--danger);
 }
 
 .state-holding,
@@ -392,6 +438,31 @@ textarea {
 
 .provider-select {
   width: 100%;
+}
+
+.daily-listening-summary {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid #26343c;
+  border-radius: 6px;
+  background: #10171b;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.daily-listening-summary div {
+  display: grid;
+  gap: 2px;
+}
+
+.daily-listening-summary span {
+  color: var(--muted);
+}
+
+.daily-listening-summary strong {
+  overflow-wrap: anywhere;
 }
 
 .asr-status-grid {
@@ -763,6 +834,17 @@ textarea {
   color: var(--warn);
   font-size: 12px;
   line-height: 1.35;
+}
+
+.manuscript-import-error {
+  margin-top: 8px;
+}
+
+.manuscript-import-spacing-option {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  margin: 8px 0;
 }
 
 .toggle-row {

@@ -1,5 +1,11 @@
 import type { DisplaySettings, LocalWhisperSettings } from '../domain/types';
 
+export const DEFAULT_DEVELOPER_MODE = false;
+
+export function resolveInitialDeveloperMode(storedDeveloperMode?: boolean) {
+  return storedDeveloperMode === true;
+}
+
 export const DEFAULT_DISPLAY_SETTINGS: DisplaySettings = {
   fontFamily: 'Georgia, Cambria, "Times New Roman", serif',
   fontSizePx: 34,
@@ -14,7 +20,8 @@ export const DEFAULT_DISPLAY_SETTINGS: DisplaySettings = {
   assistCorrectionFeel: 45,
   theme: 'dark',
   autoHideControlsOnStart: false,
-  readingLookaheadTokens: 6
+  readingLookaheadTokens: 6,
+  addExtraSpacingOnImport: true
 };
 
 export const LEGACY_LOW_READING_ZONE_PERCENT = 55;
@@ -61,6 +68,10 @@ export function resolveInitialDisplaySettings(
     settings.readingLookaheadTokens = DEFAULT_DISPLAY_SETTINGS.readingLookaheadTokens;
   } else {
     settings.readingLookaheadTokens = Math.max(0, Math.min(20, Math.round(settings.readingLookaheadTokens)));
+  }
+
+  if (typeof settings.addExtraSpacingOnImport !== 'boolean') {
+    settings.addExtraSpacingOnImport = DEFAULT_DISPLAY_SETTINGS.addExtraSpacingOnImport;
   }
 
   if (options.migrateLegacyNarrationDefaults && storedDisplaySettings) {

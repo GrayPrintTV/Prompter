@@ -62,6 +62,7 @@ try {
 try {
   contextBridge.exposeInMainWorld('prompterApi', {
     ping: () => 'pong',
+    openManuscriptFile: () => ipcRenderer.invoke('dialog:openManuscriptFile'),
     openTextFile: () => ipcRenderer.invoke('dialog:openTextFile'),
     toggleFullScreen: () => ipcRenderer.invoke('window:toggleFullScreen'),
     toggleAlwaysOnTop: () => ipcRenderer.invoke('window:toggleAlwaysOnTop'),
