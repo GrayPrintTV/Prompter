@@ -1,0 +1,11 @@
+{
+  "protocolMajor": 1,
+  "protocolMinor": 0,
+  "type": "movement",
+  "serverId": "server-a",
+  "sessionId": "session-a",
+  "connectionId": "connection-a",
+  "sentAtMs": 1783750000740,
+  "payload": {}
+}
+

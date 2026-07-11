@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://prompter.local/schemas/common.schema.json",
+  "title": "Prompter protocol common definitions",
+  "$defs": {
+    "identifier": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "revision": { "type": "integer", "minimum": 0 },
+    "index": { "type": "integer", "minimum": 0 },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "followState": {
+      "type": "string",
+      "enum": ["manual", "paused", "following", "holding", "uncertain", "lost", "resyncing", "retake"]
+    },
+    "transcriptSource": {
+      "type": "string",
+      "enum": ["manual", "mock", "openai-realtime", "local", "local-whisper"]
+    },
+    "position": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tokenIndex", "character", "sentenceIndex", "paragraphIndex"],
+      "properties": {
+        "tokenIndex": { "$ref": "#/$defs/index" },
+        "character": { "$ref": "#/$defs/index" },
+        "sentenceIndex": { "$ref": "#/$defs/index" },
+        "paragraphIndex": { "$ref": "#/$defs/index" }
+      }
+    },
+    "textRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end"],
+      "properties": {
+        "start": { "$ref": "#/$defs/index" },
+        "end": { "$ref": "#/$defs/index" }
+      }
+    }
+  }
+}
+

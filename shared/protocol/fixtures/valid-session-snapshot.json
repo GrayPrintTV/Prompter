@@ -1,0 +1,29 @@
+{
+  "protocolMajor": 1,
+  "protocolMinor": 0,
+  "type": "sessionSnapshot",
+  "serverId": "server-a",
+  "sessionId": "session-a",
+  "connectionId": "connection-a",
+  "sequence": 7,
+  "sentAtMs": 1783750000000,
+  "payload": {
+    "sessionRevision": 12,
+    "manuscriptRevision": 3,
+    "manuscript": {
+      "manuscriptId": "manuscript-a",
+      "contentHash": "sha256:fixture",
+      "normalizedContent": "First sentence. Second sentence.",
+      "paragraphs": [{ "paragraphIndex": 0, "characterRange": { "start": 0, "end": 32 }, "sentenceStart": 0, "sentenceEnd": 2 }],
+      "sentences": [{ "sentenceIndex": 0, "paragraphIndex": 0, "characterRange": { "start": 0, "end": 15 }, "tokenStart": 0, "tokenEnd": 2 }],
+      "tokens": [{ "tokenIndex": 0, "sentenceIndex": 0, "paragraphIndex": 0, "characterRange": { "start": 0, "end": 5 } }]
+    },
+    "acceptedPosition": { "tokenIndex": 0, "character": 0, "sentenceIndex": 0, "paragraphIndex": 0 },
+    "followState": "holding",
+    "currentConfidence": 0,
+    "latestTranscript": null,
+    "controllerLease": null,
+    "displayHints": { "readingZonePercent": 38, "readingLookaheadTokens": 6, "theme": "dark" }
+  }
+}
+

@@ -8,6 +8,9 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const appExe = path.resolve(process.argv[2] || path.join(root, 'release', 'win-unpacked', 'Prompter.exe'));
 const remotePort = Number(process.env.PROMPTER_SMOKE_CDP_PORT || 9231);
+const localStorageSmokeKey = 'prompterInstallerSmokeLocalStorage';
+const localStorageSeed = process.env.PROMPTER_SMOKE_SET_LOCAL_STORAGE || '';
+const expectedLocalStorageValue = process.env.PROMPTER_SMOKE_EXPECT_LOCAL_STORAGE || '';
 const localWhisperSettings = {
   pythonExecutablePath: 'C:\\definitely-not-python\\python.exe',
   modelName: 'not-used-in-packaged-mode',
@@ -167,7 +170,7 @@ $desc | Select-Object ProcessId,ParentProcessId,Name,CommandLine | ConvertTo-Jso
 
 function namedProcesses() {
   const script = `
-Get-CimInstance Win32_Process -Filter "Name = 'whisper-sidecar.exe' OR Name = 'python.exe'" |
+Get-CimInstance Win32_Process -Filter "Name = 'whisper-sidecar.exe' OR Name = 'python.exe' OR Name = 'node.exe'" |
   Select-Object ProcessId,ParentProcessId,Name,CommandLine |
   ConvertTo-Json -Depth 4
 `;
@@ -181,7 +184,7 @@ Get-CimInstance Win32_Process -Filter "Name = 'whisper-sidecar.exe' OR Name = 'p
     const fallback = spawnSync(powershell, [
       '-NoProfile',
       '-Command',
-      "Get-Process -Name whisper-sidecar,python -ErrorAction SilentlyContinue | Select-Object @{Name='ProcessId';Expression={$_.Id}},@{Name='Name';Expression={$_.ProcessName + '.exe'}},Path | ConvertTo-Json -Depth 3"
+      "Get-Process -Name whisper-sidecar,python,node -ErrorAction SilentlyContinue | Select-Object @{Name='ProcessId';Expression={$_.Id}},@{Name='Name';Expression={$_.ProcessName + '.exe'}},Path | ConvertTo-Json -Depth 3"
     ], {
       encoding: 'utf8',
       windowsHide: true,
@@ -191,6 +194,30 @@ Get-CimInstance Win32_Process -Filter "Name = 'whisper-sidecar.exe' OR Name = 'p
     const fallbackParsed = JSON.parse(fallback.stdout);
     return Array.isArray(fallbackParsed) ? fallbackParsed : [fallbackParsed];
   }
+  const parsed = JSON.parse(result.stdout);
+  return Array.isArray(parsed) ? parsed : [parsed];
+}
+
+function visibleConsoleWindows(processes) {
+  const consoleProcessIds = processes
+    .filter((item) => /^(conhost|cmd|powershell|pwsh)\.exe$/i.test(String(item.Name)))
+    .map((item) => Number(item.ProcessId))
+    .filter(Number.isInteger);
+  if (consoleProcessIds.length === 0) return [];
+
+  const script = `
+Get-Process -Id ${consoleProcessIds.join(',')} -ErrorAction SilentlyContinue |
+  Where-Object { $_.MainWindowHandle -ne 0 } |
+  Select-Object Id,ProcessName,MainWindowTitle,MainWindowHandle |
+  ConvertTo-Json -Depth 4
+`;
+  const powershell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const result = spawnSync(powershell, ['-NoProfile', '-Command', script], {
+    encoding: 'utf8',
+    windowsHide: true,
+    timeout: 15000
+  });
+  if (result.status !== 0 || !result.stdout.trim()) return [];
   const parsed = JSON.parse(result.stdout);
   return Array.isArray(parsed) ? parsed : [parsed];
 }
@@ -248,6 +275,21 @@ try {
   firstLaunch = await launchApp(tempRoot, remotePort);
   const { proc, cdp, target, env } = firstLaunch;
   const readyState = await waitForRendererReady(cdp);
+  if (expectedLocalStorageValue) {
+    const observedValue = await evaluate(cdp, `localStorage.getItem(${JSON.stringify(localStorageSmokeKey)})`);
+    assert(
+      observedValue === expectedLocalStorageValue,
+      `localStorage marker was not preserved. Expected ${JSON.stringify(expectedLocalStorageValue)}, observed ${JSON.stringify(observedValue)}.`
+    );
+  }
+  if (localStorageSeed) {
+    const storedValue = await evaluate(
+      cdp,
+      `(() => { localStorage.setItem(${JSON.stringify(localStorageSmokeKey)}, ${JSON.stringify(localStorageSeed)}); return localStorage.getItem(${JSON.stringify(localStorageSmokeKey)}); })()`
+    );
+    assert(storedValue === localStorageSeed, 'localStorage marker could not be written.');
+  }
+  const expectedRestartStorageValue = localStorageSeed || expectedLocalStorageValue;
 
   const bridgeFunctions = await evaluate(cdp, `({
     openManuscriptFile: typeof window.prompterApi?.openManuscriptFile,
@@ -299,6 +341,15 @@ try {
     assert(
       !observedProcesses.some((item) => String(item.Name).toLowerCase() === 'python.exe'),
       `Packaged app spawned python.exe. Observed: ${JSON.stringify(observedProcesses)}`
+    );
+    assert(
+      !observedProcesses.some((item) => String(item.Name).toLowerCase() === 'node.exe'),
+      `Packaged app spawned node.exe. Observed: ${JSON.stringify(observedProcesses)}`
+    );
+    const visibleConsoleDescendants = visibleConsoleWindows(observedProcesses);
+    assert(
+      visibleConsoleDescendants.length === 0,
+      `Packaged app exposed a visible console window. Observed: ${JSON.stringify(visibleConsoleDescendants)}`
     );
   }
 
@@ -355,6 +406,13 @@ try {
 
   secondLaunch = await launchApp(tempRoot, remotePort + 1);
   await waitForRendererReady(secondLaunch.cdp);
+  if (expectedRestartStorageValue) {
+    const restoredValue = await evaluate(secondLaunch.cdp, `localStorage.getItem(${JSON.stringify(localStorageSmokeKey)})`);
+    assert(
+      restoredValue === expectedRestartStorageValue,
+      `localStorage marker was not restored after restart. Expected ${JSON.stringify(expectedRestartStorageValue)}, observed ${JSON.stringify(restoredValue)}.`
+    );
+  }
   const secondBounds = await evaluate(secondLaunch.cdp, '({ outerWidth: window.outerWidth, outerHeight: window.outerHeight })');
   await closeApp(secondLaunch.proc, secondLaunch.cdp);
 
@@ -373,6 +431,7 @@ try {
   console.log(`- requested launch bounds: ${JSON.stringify(firstBounds)}`);
   console.log(`- window state file: ${windowStatePath}`);
   console.log(`- restored launch bounds: ${JSON.stringify(secondBounds)}`);
+  if (expectedRestartStorageValue) console.log(`- localStorage marker preserved: ${localStorageSmokeKey}`);
   console.log(`- import bridge functions present: DOCX/PDF dialog path available`);
 } catch (error) {
   if (firstLaunch) await closeApp(firstLaunch.proc, firstLaunch.cdp).catch(() => undefined);

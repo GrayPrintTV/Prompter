@@ -1,5 +1,7 @@
 appId: com.narrationprompter.prompter
 productName: Prompter
+executableName: Prompter
+artifactName: ${productName}-Setup-${version}-${arch}.${ext}
 directories:
   output: release
 asar: true
@@ -63,3 +65,17 @@ win:
     - target: dir
       arch:
         - x64
+    - target: nsis
+      arch:
+        - x64
+nsis:
+  oneClick: false
+  perMachine: false
+  allowElevation: false
+  allowToChangeInstallationDirectory: true
+  createStartMenuShortcut: true
+  createDesktopShortcut: true
+  shortcutName: Prompter
+  uninstallDisplayName: Prompter
+  deleteAppDataOnUninstall: false
+  runAfterFinish: false

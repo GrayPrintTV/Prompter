@@ -1,0 +1,12 @@
+{
+  "protocolMajor": 2,
+  "protocolMinor": 0,
+  "type": "sessionSnapshot",
+  "serverId": "server-a",
+  "sessionId": "session-a",
+  "connectionId": "connection-a",
+  "sequence": 1,
+  "sentAtMs": 1783750000000,
+  "payload": {}
+}
+

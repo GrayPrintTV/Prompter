@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://prompter.local/schemas/movement-event.schema.json",
+  "title": "Semantic movement event payload",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["sessionRevision", "manuscriptRevision", "confirmedTokenIndex", "targetTokenIndex", "targetCharacter", "sentenceIndex", "paragraphIndex", "confidence", "durationHintMs", "classification", "reason"],
+  "properties": {
+    "sessionRevision": { "$ref": "common.schema.json#/$defs/revision" },
+    "manuscriptRevision": { "$ref": "common.schema.json#/$defs/revision" },
+    "confirmedTokenIndex": { "$ref": "common.schema.json#/$defs/index" },
+    "targetTokenIndex": { "$ref": "common.schema.json#/$defs/index" },
+    "targetCharacter": { "$ref": "common.schema.json#/$defs/index" },
+    "sentenceIndex": { "$ref": "common.schema.json#/$defs/index" },
+    "paragraphIndex": { "$ref": "common.schema.json#/$defs/index" },
+    "confidence": { "$ref": "common.schema.json#/$defs/confidence" },
+    "durationHintMs": { "type": "integer", "minimum": 0 },
+    "classification": { "type": "string", "minLength": 1, "maxLength": 120 },
+    "reason": { "type": "string", "minLength": 1, "maxLength": 1000 }
+  }
+}

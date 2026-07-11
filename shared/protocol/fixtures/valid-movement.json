@@ -1,0 +1,24 @@
+{
+  "protocolMajor": 1,
+  "protocolMinor": 2,
+  "type": "movement",
+  "serverId": "server-a",
+  "sessionId": "session-a",
+  "connectionId": "connection-a",
+  "sequence": 381,
+  "sentAtMs": 1783750000740,
+  "payload": {
+    "sessionRevision": 13,
+    "manuscriptRevision": 3,
+    "confirmedTokenIndex": 913,
+    "targetTokenIndex": 919,
+    "targetCharacter": 9270,
+    "sentenceIndex": 184,
+    "paragraphIndex": 37,
+    "confidence": 0.92,
+    "durationHintMs": 740,
+    "classification": "small local correction",
+    "reason": "high-confidence local correction"
+  }
+}
+

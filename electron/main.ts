@@ -1,7 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, screen } from 'electron';
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -12,19 +10,14 @@ import {
 } from './openAiRealtimeSession.js';
 import { importManuscriptFile } from './manuscriptImport.js';
 import {
-  REQUIRED_WHISPER_MODEL_FILES,
   devEnvFileRoots,
-  isPathLikeExecutable,
-  localWhisperSpawnErrorMessage,
-  missingBundledModelMessage,
-  missingBundledSidecarMessage,
-  missingPythonExecutableMessage,
-  missingSidecarMessage,
-  resolveLocalWhisperLaunchPlan,
   resolveRendererIndexPath,
-  type LocalWhisperLaunchPlan,
   type RuntimePathContext
 } from './runtimePaths.js';
+import {
+  WhisperTranscriptionService,
+  type LocalWhisperSettings
+} from './whisper/WhisperTranscriptionService.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const APP_ID = 'com.narrationprompter.prompter';
@@ -42,133 +35,10 @@ type OpenAiRealtimeConfig = {
 
 const DEFAULT_TRANSCRIPTION_MODEL = 'gpt-realtime-whisper';
 const DEFAULT_WEBRTC_URL = 'https://api.openai.com/v1/realtime/calls';
-const DEFAULT_PROCESS_READY_TIMEOUT_MS = 30000;
-const DEFAULT_MODEL_READY_TIMEOUT_MS = 180000;
 const WINDOW_STATE_FILE = 'window-state.json';
 const APP_LOG_FILE = 'prompter-main.log';
-const DEFAULT_LOCAL_WHISPER_SETTINGS: LocalWhisperSettings = {
-  pythonExecutablePath: 'python',
-  modelName: 'base.en',
-  device: 'cpu',
-  computeType: 'int8',
-  chunkDurationSeconds: 2
-};
-const PROVIDER_STATUS_TEXT = new Set([
-  'sidecar is running',
-  'local whisper sidecar is running',
-  'model loading',
-  'model loaded',
-  'process started',
-  'ready'
-]);
 
 app.setAppUserModelId(APP_ID);
-
-type LocalWhisperSettings = {
-  pythonExecutablePath: string;
-  modelName: string;
-  device: string;
-  computeType: string;
-  chunkDurationSeconds: number;
-};
-
-type LocalWhisperStatus = {
-  providerId: 'local-whisper';
-  configured: boolean;
-  sidecarRunning: boolean;
-  modelPhase: 'stopped' | 'starting' | 'process-started' | 'model-loading' | 'ready' | 'transcribing' | 'returned-empty-transcript' | 'error';
-  listening: boolean;
-  status: 'idle' | 'starting' | 'listening' | 'error' | 'stopped';
-  lastTranscriptDelta: string;
-  errorMessage: string | null;
-  mic: {
-    captureState:
-      | 'not-requested'
-      | 'requesting-permission'
-      | 'permission-granted'
-      | 'permission-denied'
-      | 'stream-active'
-      | 'stream-muted-ended'
-      | 'media-recorder-recording'
-      | 'chunk-sent'
-      | 'chunk-returned';
-    inputLevel: number;
-    deviceLabel: string;
-    monitorActive: boolean;
-    errorMessage: string | null;
-    log: string[];
-  };
-  chunk: {
-    chunksRecorded: number;
-    chunksQueued: number;
-    chunksSentToMain: number;
-    chunksDropped: number;
-    chunksReceivedBySidecar: number;
-    chunksReturnedFromSidecar: number;
-    chunksEmpty: number;
-    chunksFailed: number;
-    queueLength: number;
-    maxQueueLength: number;
-    estimatedQueueLatencyMs: number;
-    lastChunkSequence: number;
-    processingSequence: number;
-    lastTranscriptionDurationMs: number;
-    avgTranscriptionDurationMs: number;
-    lastRealtimeFactor: number;
-    avgRealtimeFactor: number;
-    droppedDueToOverflow: number;
-    droppedDueToSilence: number;
-    staleChunksDropped: number;
-    silenceChunksSuppressed: number;
-    lastChunkBytes: number;
-    lastChunkFormat: string;
-    lastMimeType: string;
-    lastFileExtension: string;
-    lastHeaderSignature: string;
-    lastSampleRate: number;
-    lastChunkDurationSeconds: number;
-    lastTranscriptText: string;
-    lastSidecarError: string | null;
-    warningMessage: string | null;
-    pendingResponses: number;
-  };
-  transcriptHistory: Array<{
-    text: string;
-    displayText: string;
-    isEmpty: boolean;
-    isFinal: boolean;
-    timestampMs: number;
-    source: 'local-whisper';
-  }>;
-  bridge: {
-    electronBridgeAvailable: boolean;
-    localWhisperBridgeAvailable: boolean;
-    ipcHandlersRegistered: boolean | null;
-    errorMessage: string | null;
-    prompterApiType: string;
-    pingType: string;
-    pingResult: string | null;
-    appPath: string | null;
-    cwd: string | null;
-    mainDirname: string | null;
-    preloadPath: string | null;
-    preloadExists: boolean | null;
-    isDev: boolean | null;
-    viteDevServerUrl: string | null;
-    preloadErrorMessage: string | null;
-    preloadErrorStack: string | null;
-    preloadDiagnosticStarted: boolean | null;
-    preloadDiagnosticExposed: boolean | null;
-    preloadDiagnosticErrorMessage: string | null;
-    preloadDiagnosticErrorStack: string | null;
-    localWhisperSidecarExecutablePath: string | null;
-    localWhisperSidecarScriptPath: string | null;
-    localWhisperModelPath: string | null;
-    localWhisperSidecarWorkingDirectory: string | null;
-    localWhisperUsesBundledSidecar: boolean | null;
-    localWhisperSidecarProcessId: number | null;
-  };
-};
 
 type PreloadExposeDiagnostics = {
   started: boolean;
@@ -205,113 +75,8 @@ type MainRuntimeDiagnostics = {
   localWhisperSidecarProcessId: number | null;
 };
 
-type PendingWhisperRequest = {
-  resolve(result: { text: string; durationSeconds?: number }): void;
-  reject(error: Error): void;
-  audioPath: string;
-};
-
-type SidecarReadyWaiter = {
-  resolve(): void;
-  reject(error: Error): void;
-  timeout: NodeJS.Timeout;
-};
-
-let localWhisperProcess: ChildProcessWithoutNullStreams | null = null;
-let localWhisperBuffer = '';
-let localWhisperSettings: LocalWhisperSettings | null = null;
-let localWhisperProcessReady = false;
-let localWhisperModelReady = false;
-let localWhisperModelConfigKey = '';
-let sidecarGeneration = 0;
-let intentionallyStoppingGeneration: number | null = null;
-const pendingWhisperRequests = new Map<string, PendingWhisperRequest>();
-const processReadyWaiters = new Set<SidecarReadyWaiter>();
-const modelReadyWaiters = new Set<SidecarReadyWaiter>();
-let nextWhisperRequestId = 1;
 let latestPreloadDiagnostics: PreloadExposeDiagnostics | null = null;
 let latestPreloadError: MainPreloadError | null = null;
-let localWhisperStatus: LocalWhisperStatus = {
-  providerId: 'local-whisper',
-  configured: true,
-  sidecarRunning: false,
-  modelPhase: 'stopped',
-  listening: false,
-  status: 'idle',
-  lastTranscriptDelta: '',
-  errorMessage: null,
-  mic: {
-    captureState: 'not-requested',
-    inputLevel: 0,
-    deviceLabel: '',
-    monitorActive: false,
-    errorMessage: null,
-    log: []
-  },
-  chunk: {
-    chunksRecorded: 0,
-    chunksQueued: 0,
-    chunksSentToMain: 0,
-    chunksDropped: 0,
-    chunksReceivedBySidecar: 0,
-    chunksReturnedFromSidecar: 0,
-    chunksEmpty: 0,
-    chunksFailed: 0,
-    queueLength: 0,
-    maxQueueLength: 4,
-    estimatedQueueLatencyMs: 0,
-    lastChunkSequence: 0,
-    processingSequence: 0,
-    lastTranscriptionDurationMs: 0,
-    avgTranscriptionDurationMs: 0,
-    lastRealtimeFactor: 0,
-    avgRealtimeFactor: 0,
-    droppedDueToOverflow: 0,
-    droppedDueToSilence: 0,
-    staleChunksDropped: 0,
-    silenceChunksSuppressed: 0,
-    lastChunkBytes: 0,
-    lastChunkFormat: '',
-    lastMimeType: '',
-    lastFileExtension: '',
-    lastHeaderSignature: '',
-    lastSampleRate: 0,
-    lastChunkDurationSeconds: 0,
-    lastTranscriptText: '',
-    lastSidecarError: null,
-    warningMessage: null,
-    pendingResponses: 0
-  },
-  transcriptHistory: [],
-  bridge: {
-    electronBridgeAvailable: true,
-    localWhisperBridgeAvailable: true,
-    ipcHandlersRegistered: true,
-    errorMessage: null,
-    prompterApiType: 'object',
-    pingType: 'function',
-    pingResult: 'pong',
-    appPath: null,
-    cwd: null,
-    mainDirname: null,
-    preloadPath: null,
-    preloadExists: null,
-    isDev: null,
-    viteDevServerUrl: null,
-    preloadErrorMessage: null,
-    preloadErrorStack: null,
-    preloadDiagnosticStarted: null,
-    preloadDiagnosticExposed: null,
-    preloadDiagnosticErrorMessage: null,
-    preloadDiagnosticErrorStack: null,
-    localWhisperSidecarExecutablePath: null,
-    localWhisperSidecarScriptPath: null,
-    localWhisperModelPath: null,
-    localWhisperSidecarWorkingDirectory: null,
-    localWhisperUsesBundledSidecar: null,
-    localWhisperSidecarProcessId: null
-  }
-};
 
 function safeString(value: () => string) {
   try {
@@ -319,31 +84,6 @@ function safeString(value: () => string) {
   } catch (error) {
     return error instanceof Error ? `Unavailable: ${error.message}` : 'Unavailable';
   }
-}
-
-function configuredTimeoutMs(name: string, fallback: number) {
-  const raw = process.env[name]?.trim();
-  if (!raw) return fallback;
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-function isProviderStatusText(text: string) {
-  return PROVIDER_STATUS_TEXT.has(text.trim().replace(/\.$/, '').toLowerCase());
-}
-
-function audioHeaderSignature(buffer: Buffer) {
-  if (buffer.length >= 12) {
-    const riff = buffer.subarray(0, 4).toString('ascii');
-    const wave = buffer.subarray(8, 12).toString('ascii');
-    if (riff === 'RIFF' && wave === 'WAVE') return 'RIFF/WAVE';
-  }
-  if (buffer.length >= 4 && buffer[0] === 0x1a && buffer[1] === 0x45 && buffer[2] === 0xdf && buffer[3] === 0xa3) {
-    return 'WebM';
-  }
-  return Array.from(buffer.subarray(0, 8))
-    .map((byte) => byte.toString(16).padStart(2, '0').toUpperCase())
-    .join(' ');
 }
 
 function runtimePathContext(): RuntimePathContext {
@@ -354,39 +94,6 @@ function runtimePathContext(): RuntimePathContext {
     resourcesPath: process.resourcesPath,
     env: process.env
   };
-}
-
-function localWhisperLaunchPlan(settings: LocalWhisperSettings = localWhisperSettings ?? DEFAULT_LOCAL_WHISPER_SETTINGS) {
-  return resolveLocalWhisperLaunchPlan(
-    runtimePathContext(),
-    settings.pythonExecutablePath,
-    settings.modelName,
-    app.getPath('userData'),
-    process.env
-  );
-}
-
-function localWhisperRuntimeDiagnostics() {
-  try {
-    const plan = localWhisperLaunchPlan();
-    return {
-      localWhisperSidecarExecutablePath: plan.executablePath,
-      localWhisperSidecarScriptPath: plan.scriptPath,
-      localWhisperModelPath: plan.modelPath,
-      localWhisperSidecarWorkingDirectory: plan.workingDirectory,
-      localWhisperUsesBundledSidecar: plan.bundled,
-      localWhisperSidecarProcessId: localWhisperProcess?.pid ?? null
-    };
-  } catch {
-    return {
-      localWhisperSidecarExecutablePath: null,
-      localWhisperSidecarScriptPath: null,
-      localWhisperModelPath: null,
-      localWhisperSidecarWorkingDirectory: null,
-      localWhisperUsesBundledSidecar: null,
-      localWhisperSidecarProcessId: null
-    };
-  }
 }
 
 function appendDiagnosticLog(event: string, data: Record<string, unknown>) {
@@ -403,33 +110,18 @@ function appendDiagnosticLog(event: string, data: Record<string, unknown>) {
   }
 }
 
-function missingRequiredWhisperModelFiles(modelPath: string) {
-  return REQUIRED_WHISPER_MODEL_FILES.filter((fileName) => !existsSync(path.join(modelPath, fileName)));
-}
-
-function validateLocalWhisperLaunchPlan(plan: LocalWhisperLaunchPlan) {
-  if (plan.bundled) {
-    if (!existsSync(plan.executablePath)) {
-      throw new Error(missingBundledSidecarMessage(plan.executablePath));
-    }
-    const modelPath = plan.modelPath ?? '';
-    const missingModelFiles = modelPath ? missingRequiredWhisperModelFiles(modelPath) : [...REQUIRED_WHISPER_MODEL_FILES];
-    if (!modelPath || missingModelFiles.length > 0) {
-      throw new Error(missingBundledModelMessage(modelPath || '(not resolved)', missingModelFiles));
-    }
-    return;
+const whisperService = new WhisperTranscriptionService({
+  runtimePathContext,
+  getUserDataPath: () => app.getPath('userData'),
+  getTempPath: () => app.getPath('temp'),
+  appendDiagnosticLog,
+  publishStatus: (status) => {
+    mainWindow?.webContents.send('local-whisper:status', {
+      ...status,
+      bridge: mainBridgeDiagnostics()
+    });
   }
-
-  if (!plan.executablePath || !plan.modelName.trim()) {
-    throw new Error('Local Whisper is not configured. Set Python executable and model name.');
-  }
-  if (!plan.scriptPath || !existsSync(plan.scriptPath)) {
-    throw new Error(missingSidecarMessage(plan.scriptPath ?? '(not resolved)'));
-  }
-  if (isPathLikeExecutable(plan.executablePath) && !existsSync(plan.executablePath)) {
-    throw new Error(missingPythonExecutableMessage(plan.executablePath));
-  }
-}
+});
 
 function runtimeDiagnostics(preloadPath: string): MainRuntimeDiagnostics {
   return {
@@ -446,7 +138,7 @@ function runtimeDiagnostics(preloadPath: string): MainRuntimeDiagnostics {
     preloadDiagnosticExposed: latestPreloadDiagnostics?.exposed ?? null,
     preloadDiagnosticErrorMessage: latestPreloadDiagnostics?.errorMessage ?? null,
     preloadDiagnosticErrorStack: latestPreloadDiagnostics?.errorStack ?? null,
-    ...localWhisperRuntimeDiagnostics()
+    ...whisperService.getRuntimeDiagnostics()
   };
 }
 
@@ -468,9 +160,9 @@ function mainBridgeDiagnostics() {
   };
 }
 
-function localWhisperStatusForRenderer(): LocalWhisperStatus {
+function localWhisperStatusForRenderer() {
   return {
-    ...localWhisperStatus,
+    ...whisperService.getStatus(),
     bridge: mainBridgeDiagnostics()
   };
 }
@@ -591,486 +283,6 @@ function openAiFetchErrorDetails(error: unknown, prompt?: string) {
     return sanitizeOpenAiDiagnosticText(`${error.name}: ${error.message}${cause}`, prompt);
   }
   return sanitizeOpenAiDiagnosticText(String(error), prompt);
-}
-
-function localWhisperConfigured(settings: LocalWhisperSettings) {
-  return app.isPackaged || Boolean(settings.pythonExecutablePath.trim() && settings.modelName.trim());
-}
-
-function localWhisperConfigKey(
-  modelName: string,
-  device: string,
-  computeType: string,
-  modelPath: string | null = null,
-  localFilesOnly = false
-) {
-  return [
-    modelName.trim(),
-    device.trim(),
-    computeType.trim(),
-    modelPath ?? '',
-    localFilesOnly ? 'true' : 'false'
-  ].join('\n');
-}
-
-function localWhisperSettingsKey(settings: LocalWhisperSettings, plan: LocalWhisperLaunchPlan) {
-  return localWhisperConfigKey(
-    plan.modelName || settings.modelName,
-    settings.device,
-    settings.computeType,
-    plan.modelPath,
-    plan.localFilesOnly
-  );
-}
-
-function patchLocalWhisperStatus(patch: Partial<LocalWhisperStatus>) {
-  localWhisperStatus = {
-    ...localWhisperStatus,
-    ...patch,
-    providerId: 'local-whisper',
-    configured: localWhisperSettings ? localWhisperConfigured(localWhisperSettings) : true,
-    mic: {
-      ...localWhisperStatus.mic,
-      ...patch.mic,
-      log: patch.mic?.log ?? localWhisperStatus.mic.log
-    },
-    chunk: {
-      ...localWhisperStatus.chunk,
-      ...patch.chunk
-    },
-    transcriptHistory: patch.transcriptHistory ?? localWhisperStatus.transcriptHistory
-  };
-  mainWindow?.webContents.send('local-whisper:status', localWhisperStatusForRenderer());
-}
-
-function localWhisperTranscriptHistoryItem(text: string) {
-  const trimmed = text.trim();
-  return {
-    text: trimmed,
-    displayText: trimmed || '[empty transcript]',
-    isEmpty: trimmed.length === 0,
-    isFinal: true,
-    timestampMs: Date.now(),
-    source: 'local-whisper' as const
-  };
-}
-
-function sendLocalWhisperCommand(command: Record<string, unknown>) {
-  if (!localWhisperProcess?.stdin.writable) {
-    throw new Error('Local Whisper sidecar is not running.');
-  }
-  localWhisperProcess.stdin.write(`${JSON.stringify(command)}\n`);
-}
-
-function resolveProcessReadyWaiters() {
-  localWhisperProcessReady = true;
-  for (const waiter of processReadyWaiters) {
-    clearTimeout(waiter.timeout);
-    waiter.resolve();
-  }
-  processReadyWaiters.clear();
-}
-
-function resolveModelReadyWaiters() {
-  localWhisperModelReady = true;
-  for (const waiter of modelReadyWaiters) {
-    clearTimeout(waiter.timeout);
-    waiter.resolve();
-  }
-  modelReadyWaiters.clear();
-}
-
-function rejectProcessReadyWaiters(error: Error) {
-  localWhisperProcessReady = false;
-  for (const waiter of processReadyWaiters) {
-    clearTimeout(waiter.timeout);
-    waiter.reject(error);
-  }
-  processReadyWaiters.clear();
-}
-
-function rejectModelReadyWaiters(error: Error) {
-  localWhisperModelReady = false;
-  for (const waiter of modelReadyWaiters) {
-    clearTimeout(waiter.timeout);
-    waiter.reject(error);
-  }
-  modelReadyWaiters.clear();
-}
-
-function waitForProcessReady(timeoutMs = DEFAULT_PROCESS_READY_TIMEOUT_MS) {
-  if (localWhisperProcessReady) return Promise.resolve();
-  return new Promise<void>((resolve, reject) => {
-    const waiter: SidecarReadyWaiter = {
-      resolve,
-      reject,
-      timeout: setTimeout(() => {
-        processReadyWaiters.delete(waiter);
-        reject(new Error('Local Whisper sidecar process did not become ready. Check Python setup.'));
-      }, timeoutMs)
-    };
-    processReadyWaiters.add(waiter);
-  });
-}
-
-function waitForModelReady(timeoutMs = configuredTimeoutMs('LOCAL_WHISPER_MODEL_READY_TIMEOUT_MS', DEFAULT_MODEL_READY_TIMEOUT_MS)) {
-  if (localWhisperModelReady) return Promise.resolve();
-  return new Promise<void>((resolve, reject) => {
-    const waiter: SidecarReadyWaiter = {
-      resolve,
-      reject,
-      timeout: setTimeout(() => {
-        modelReadyWaiters.delete(waiter);
-        reject(new Error('Local Whisper model did not finish loading. Check model name, device, compute type, and faster-whisper setup.'));
-      }, timeoutMs)
-    };
-    modelReadyWaiters.add(waiter);
-  });
-}
-
-function rejectPendingWhisperRequests(error: Error) {
-  for (const request of pendingWhisperRequests.values()) {
-    request.reject(error);
-    void unlink(request.audioPath).catch(() => undefined);
-  }
-  pendingWhisperRequests.clear();
-}
-
-function resolvePendingWhisperRequestsAsStopped() {
-  // For normal user Stop / intentional shutdown: resolve in-flight transcribe promises as empty (no error, no delta emit).
-  // This prevents post-Stop rejects from setting "sidecar stopped" error or "Sidecar failed".
-  for (const request of pendingWhisperRequests.values()) {
-    request.resolve({ text: '' });
-    void unlink(request.audioPath).catch(() => undefined);
-  }
-  pendingWhisperRequests.clear();
-}
-
-function handleLocalWhisperMessage(message: Record<string, unknown>) {
-  const messageType = message.type;
-  if (messageType === 'ready') {
-    patchLocalWhisperStatus({
-      sidecarRunning: true,
-      modelPhase: 'process-started',
-      status: 'starting',
-      errorMessage: null
-    });
-    resolveProcessReadyWaiters();
-    return;
-  }
-  if (messageType === 'model-loading') {
-    localWhisperModelReady = false;
-    patchLocalWhisperStatus({ sidecarRunning: true, modelPhase: 'model-loading', status: 'starting', errorMessage: null });
-    return;
-  }
-  if (messageType === 'model-loaded') {
-    const localFilesOnly =
-      message.localFilesOnly === true || String(message.localFilesOnly ?? '').toLowerCase() === 'true';
-    localWhisperModelConfigKey = localWhisperConfigKey(
-      String(message.modelName ?? localWhisperSettings?.modelName ?? ''),
-      String(message.device ?? localWhisperSettings?.device ?? ''),
-      String(message.computeType ?? localWhisperSettings?.computeType ?? ''),
-      String(message.modelPath ?? '') || null,
-      localFilesOnly
-    );
-    resolveModelReadyWaiters();
-    patchLocalWhisperStatus({ modelPhase: 'ready', status: 'listening', sidecarRunning: true });
-    return;
-  }
-  if (messageType === 'transcribe-start') {
-    patchLocalWhisperStatus({
-      modelPhase: 'transcribing',
-      chunk: {
-        ...localWhisperStatus.chunk,
-        lastChunkBytes: Number(message.fileSizeBytes ?? localWhisperStatus.chunk.lastChunkBytes) || localWhisperStatus.chunk.lastChunkBytes,
-        lastChunkFormat: String(message.audioFormat ?? localWhisperStatus.chunk.lastChunkFormat ?? ''),
-        lastMimeType: String(message.mimeType ?? localWhisperStatus.chunk.lastMimeType ?? ''),
-        lastHeaderSignature: String(message.headerSignature ?? localWhisperStatus.chunk.lastHeaderSignature ?? ''),
-        warningMessage: null
-      }
-    });
-    return;
-  }
-  if (messageType === 'transcript') {
-    const requestId = String(message.requestId ?? '');
-    const pending = pendingWhisperRequests.get(requestId);
-    if (!pending) return;
-    pendingWhisperRequests.delete(requestId);
-    const text = String(message.text ?? '');
-    if (isProviderStatusText(text)) {
-      patchLocalWhisperStatus({
-        modelPhase: 'ready',
-        chunk: {
-          ...localWhisperStatus.chunk,
-          pendingResponses: Math.max(0, localWhisperStatus.chunk.pendingResponses - 1),
-          warningMessage: null
-        }
-      });
-      pending.resolve({ text: '' });
-      void unlink(pending.audioPath).catch(() => undefined);
-      return;
-    }
-    const historyItem = localWhisperTranscriptHistoryItem(text);
-    patchLocalWhisperStatus({
-      modelPhase: historyItem.isEmpty ? 'returned-empty-transcript' : 'ready',
-      lastTranscriptDelta: historyItem.displayText,
-      chunk: {
-        ...localWhisperStatus.chunk,
-        chunksReturnedFromSidecar: localWhisperStatus.chunk.chunksReturnedFromSidecar + 1,
-        lastTranscriptText: historyItem.displayText,
-        lastSidecarError: null,
-        warningMessage: null,
-        pendingResponses: Math.max(0, localWhisperStatus.chunk.pendingResponses - 1)
-      },
-      transcriptHistory: [...localWhisperStatus.transcriptHistory, historyItem].slice(-25)
-    });
-    pending.resolve({
-      text,
-      durationSeconds: typeof message.durationSeconds === 'number' ? message.durationSeconds : undefined
-    });
-    void unlink(pending.audioPath).catch(() => undefined);
-    return;
-  }
-  if (messageType === 'error') {
-    const isIntentionalShutdown = intentionallyStoppingGeneration != null;
-    if (isIntentionalShutdown) {
-      // Normal shutdown: ignore sidecar error msgs from in-flight during stop; do not set Error state.
-      const requestId = String(message.requestId ?? '');
-      const pending = requestId ? pendingWhisperRequests.get(requestId) : undefined;
-      if (pending) {
-        pendingWhisperRequests.delete(requestId);
-        pending.resolve({ text: '' });
-        void unlink(pending.audioPath).catch(() => undefined);
-      }
-      patchLocalWhisperStatus({
-        modelPhase: 'stopped',
-        status: 'stopped',
-        errorMessage: null,
-        chunk: {
-          ...localWhisperStatus.chunk,
-          pendingResponses: Math.max(0, localWhisperStatus.chunk.pendingResponses - 1)
-        }
-      });
-      // Exit handler for the matching generation will clear intentionallyStoppingGeneration.
-      return;
-    }
-    const error = new Error(String(message.message ?? 'Local Whisper sidecar error.'));
-    const requestId = String(message.requestId ?? '');
-    const pending = requestId ? pendingWhisperRequests.get(requestId) : undefined;
-    if (pending) {
-      pendingWhisperRequests.delete(requestId);
-      pending.reject(error);
-      void unlink(pending.audioPath).catch(() => undefined);
-      patchLocalWhisperStatus({
-        modelPhase: 'error',
-        status: 'error',
-        errorMessage: error.message,
-        chunk: {
-          ...localWhisperStatus.chunk,
-          chunksReturnedFromSidecar: localWhisperStatus.chunk.chunksReturnedFromSidecar + 1,
-          lastSidecarError: error.message,
-          warningMessage: error.message,
-          pendingResponses: Math.max(0, localWhisperStatus.chunk.pendingResponses - 1)
-        }
-      });
-      intentionallyStoppingGeneration = null;
-      return;
-    }
-    patchLocalWhisperStatus({
-      modelPhase: 'error',
-      status: 'error',
-      errorMessage: error.message,
-      chunk: {
-        ...localWhisperStatus.chunk,
-        lastSidecarError: error.message,
-        warningMessage: error.message,
-        pendingResponses: 0
-      }
-    });
-    intentionallyStoppingGeneration = null;
-    rejectProcessReadyWaiters(error);
-    rejectModelReadyWaiters(error);
-    rejectPendingWhisperRequests(error);
-  }
-}
-
-function handleLocalWhisperStdout(chunk: Buffer) {
-  localWhisperBuffer += chunk.toString('utf8');
-  let newlineIndex = localWhisperBuffer.indexOf('\n');
-  while (newlineIndex >= 0) {
-    const line = localWhisperBuffer.slice(0, newlineIndex).trim();
-    localWhisperBuffer = localWhisperBuffer.slice(newlineIndex + 1);
-    if (line) {
-      try {
-        handleLocalWhisperMessage(JSON.parse(line) as Record<string, unknown>);
-      } catch {
-        patchLocalWhisperStatus({
-          modelPhase: 'error',
-          status: 'error',
-          errorMessage: 'Invalid Local Whisper sidecar response.',
-          chunk: {
-            ...localWhisperStatus.chunk,
-            lastSidecarError: 'Invalid Local Whisper sidecar response.',
-            warningMessage: 'Invalid Local Whisper sidecar response.'
-          }
-        });
-      }
-    }
-    newlineIndex = localWhisperBuffer.indexOf('\n');
-  }
-}
-
-async function startLocalWhisperSidecar(settings: LocalWhisperSettings) {
-  localWhisperSettings = settings;
-  const launchPlan = localWhisperLaunchPlan(settings);
-  const requestedModelKey = localWhisperSettingsKey(settings, launchPlan);
-  if (localWhisperModelConfigKey && localWhisperModelConfigKey !== requestedModelKey) {
-    localWhisperModelReady = false;
-  }
-  validateLocalWhisperLaunchPlan(launchPlan);
-
-  if (!localWhisperProcess) {
-    localWhisperBuffer = '';
-    localWhisperProcessReady = false;
-    localWhisperModelReady = false;
-    localWhisperModelConfigKey = '';
-    patchLocalWhisperStatus({
-      configured: true,
-      sidecarRunning: false,
-      modelPhase: 'starting',
-      listening: true,
-      status: 'starting',
-      errorMessage: null,
-      lastTranscriptDelta: '',
-      transcriptHistory: [],
-      chunk: {
-        ...localWhisperStatus.chunk,
-        lastTranscriptText: '',
-        lastSidecarError: null,
-        warningMessage: null,
-        pendingResponses: 0
-        // new latency/stale/silence/rt fields carried via spread
-      }
-    });
-    mkdirSync(launchPlan.workingDirectory, { recursive: true });
-    const processReady = waitForProcessReady();
-    appendDiagnosticLog('local-whisper-spawn', {
-      executablePath: launchPlan.executablePath,
-      args: launchPlan.args,
-      scriptPath: launchPlan.scriptPath,
-      modelName: launchPlan.modelName,
-      modelPath: launchPlan.modelPath,
-      localFilesOnly: launchPlan.localFilesOnly,
-      bundled: launchPlan.bundled,
-      workingDirectory: launchPlan.workingDirectory
-    });
-    localWhisperProcess = spawn(launchPlan.executablePath, launchPlan.args, {
-      cwd: launchPlan.workingDirectory,
-      stdio: 'pipe',
-      windowsHide: true
-    });
-    const thisProc = localWhisperProcess;
-    const thisGen = ++sidecarGeneration;
-    (thisProc as any)._generation = thisGen;
-
-    thisProc.stdout.on('data', handleLocalWhisperStdout);
-    thisProc.stderr.on('data', (chunk) => {
-      const message = String(chunk).trim();
-      if (message) {
-        const errorMessage = message.slice(0, 500);
-        appendDiagnosticLog('local-whisper-stderr', {
-          message: errorMessage,
-          bundled: launchPlan.bundled
-        });
-        patchLocalWhisperStatus({
-          errorMessage,
-          chunk: {
-            ...localWhisperStatus.chunk,
-            lastSidecarError: errorMessage
-          }
-        });
-      }
-    });
-    thisProc.on('error', (error: NodeJS.ErrnoException) => {
-      const spawnError = new Error(
-        localWhisperSpawnErrorMessage(error, launchPlan.executablePath, launchPlan.bundled)
-      );
-      if (localWhisperProcess === thisProc) {
-        localWhisperProcess = null;
-      }
-      intentionallyStoppingGeneration = null; // real error, not intentional stop
-      patchLocalWhisperStatus({
-        sidecarRunning: false,
-        modelPhase: 'error',
-        listening: false,
-        status: 'error',
-        errorMessage: spawnError.message
-      });
-      rejectProcessReadyWaiters(spawnError);
-      rejectModelReadyWaiters(spawnError);
-      rejectPendingWhisperRequests(spawnError);
-    });
-    thisProc.on('exit', (code, signal) => {
-      if (localWhisperProcess === thisProc) {
-        localWhisperProcess = null;
-      }
-      localWhisperProcessReady = false;
-      localWhisperModelReady = false;
-      localWhisperModelConfigKey = '';
-      const intentional = intentionallyStoppingGeneration === thisGen;
-      intentionallyStoppingGeneration = null; // consumed by this proc's exit handler
-      appendDiagnosticLog('local-whisper-exit', {
-        code,
-        signal,
-        intentional,
-        bundled: launchPlan.bundled
-      });
-      patchLocalWhisperStatus({
-        sidecarRunning: false,
-        modelPhase: 'stopped',
-        listening: false,
-        status: 'stopped',
-        errorMessage: intentional ? null : 'Local Whisper sidecar stopped unexpectedly.',
-        chunk: {
-          ...localWhisperStatus.chunk,
-          pendingResponses: 0
-        }
-      });
-      if (intentional) {
-        // Normal user Stop: resolve pendings cleanly (no error state, in-flight treated as normal stop)
-        resolvePendingWhisperRequestsAsStopped();
-      } else {
-        const stoppedError = new Error('Local Whisper sidecar stopped.');
-        rejectProcessReadyWaiters(stoppedError);
-        rejectModelReadyWaiters(stoppedError);
-        rejectPendingWhisperRequests(stoppedError);
-      }
-    });
-    await processReady;
-  } else if (!localWhisperProcessReady) {
-    await waitForProcessReady();
-  }
-
-  patchLocalWhisperStatus({ sidecarRunning: true, listening: true, status: 'starting' });
-  if (!localWhisperModelReady || localWhisperModelConfigKey !== requestedModelKey) {
-    const modelReady = waitForModelReady();
-    try {
-      sendLocalWhisperCommand({
-        type: 'configure',
-        modelName: launchPlan.modelName,
-        modelPath: launchPlan.modelPath ?? undefined,
-        localFilesOnly: launchPlan.localFilesOnly,
-        device: settings.device,
-        computeType: settings.computeType
-      });
-    } catch (error) {
-      rejectModelReadyWaiters(error instanceof Error ? error : new Error('Local Whisper configure command failed.'));
-      throw error;
-    }
-    await modelReady;
-  }
-  patchLocalWhisperStatus({ sidecarRunning: true, listening: true, status: 'listening', modelPhase: 'ready' });
-  return localWhisperStatusForRenderer();
 }
 
 function getWindowStatePath(): string {
@@ -1436,59 +648,12 @@ ipcMain.handle('bridge:getDiagnostics', () => {
 ipcMain.handle('local-whisper:getStatus', () => localWhisperStatusForRenderer());
 
 ipcMain.handle('local-whisper:start', async (_event, settings: LocalWhisperSettings) => {
-  return startLocalWhisperSidecar(settings);
+  await whisperService.start(settings);
+  return localWhisperStatusForRenderer();
 });
 
-ipcMain.handle('local-whisper:stop', () => {
-  const proc = localWhisperProcess;
-  if (proc) {
-    // Tie the intentional stop to this specific process instance/generation (req 5).
-    // Do not clear before the matching exit handler consumes it (req 4).
-    const gen = (proc as any)._generation || 0;
-    intentionallyStoppingGeneration = gen;
-
-    if (proc.stdin && proc.stdin.writable) {
-      sendLocalWhisperCommand({ type: 'shutdown' });
-    }
-    proc.kill();
-
-    // Null ref immediately so a Start can spawn a fresh sidecar without waiting for async exit.
-    // The 'exit' listener closed over 'thisProc' / thisGen will still match for the old instance.
-    localWhisperProcess = null;
-    localWhisperProcessReady = false;
-    localWhisperModelReady = false;
-    localWhisperModelConfigKey = '';
-
-    patchLocalWhisperStatus({
-      sidecarRunning: false,
-      modelPhase: 'stopped',
-      listening: false,
-      status: 'stopped',
-      errorMessage: null,
-      chunk: {
-        ...localWhisperStatus.chunk,
-        pendingResponses: 0
-      }
-    });
-
-    // Resolve in-flight cleanly for this intentional stop (in-flight treated as normal, no error).
-    resolvePendingWhisperRequestsAsStopped();
-    // Do NOT clear intentionallyStoppingGeneration here; the exit handler for thisGen will consume + null it.
-  } else {
-    // Stop called with no sidecar process: ensure clean stopped state.
-    // Do not set any stopping generation (prevents stale flag for future processes, req 6).
-    patchLocalWhisperStatus({
-      sidecarRunning: false,
-      modelPhase: 'stopped',
-      listening: false,
-      status: 'stopped',
-      errorMessage: null,
-      chunk: {
-        ...localWhisperStatus.chunk,
-        pendingResponses: 0
-      }
-    });
-  }
+ipcMain.handle('local-whisper:stop', async () => {
+  await whisperService.stop();
   return localWhisperStatusForRenderer();
 });
 
@@ -1503,61 +668,5 @@ ipcMain.handle(
     durationSeconds?: number;
     headerSignature?: string;
     settings: LocalWhisperSettings;
-  }) => {
-    await startLocalWhisperSidecar(payload.settings);
-    const launchPlan = localWhisperLaunchPlan(payload.settings);
-    const tempDir = path.join(app.getPath('temp'), 'narration-prompter-local-whisper');
-    await mkdir(tempDir, { recursive: true });
-    const audioBuffer = Buffer.from(payload.audioData);
-    const detectedHeaderSignature = audioHeaderSignature(audioBuffer);
-    const format = payload.format || (payload.mimeType.includes('wav') ? 'wav' : payload.mimeType.includes('ogg') ? 'ogg' : payload.mimeType.includes('webm') ? 'webm' : 'other');
-    const extension = payload.extension || (payload.mimeType.includes('wav')
-      ? 'wav'
-      : payload.mimeType.includes('ogg')
-        ? 'ogg'
-        : payload.mimeType.includes('webm')
-          ? 'webm'
-          : 'bin');
-    const headerSignature = payload.headerSignature || detectedHeaderSignature;
-    const requestId = String(nextWhisperRequestId++);
-    const audioPath = path.join(tempDir, `chunk-${Date.now()}-${requestId}.${extension}`);
-    await writeFile(audioPath, audioBuffer);
-
-    const result = await new Promise<{ text: string; durationSeconds?: number }>((resolve, reject) => {
-      pendingWhisperRequests.set(requestId, { resolve, reject, audioPath });
-      sendLocalWhisperCommand({
-        type: 'transcribe',
-        requestId,
-        audioPath,
-        audioFormat: format,
-        mimeType: payload.mimeType,
-        fileSizeBytes: audioBuffer.byteLength,
-        headerSignature,
-        sampleRate: payload.sampleRate,
-        chunkDurationSeconds: payload.durationSeconds,
-        modelName: launchPlan.modelName,
-        modelPath: launchPlan.modelPath ?? undefined,
-        localFilesOnly: launchPlan.localFilesOnly,
-        device: payload.settings.device,
-        computeType: payload.settings.computeType
-      });
-      patchLocalWhisperStatus({
-        modelPhase: 'transcribing',
-        chunk: {
-          ...localWhisperStatus.chunk,
-          chunksReceivedBySidecar: localWhisperStatus.chunk.chunksReceivedBySidecar + 1,
-          lastChunkBytes: audioBuffer.byteLength,
-          lastChunkFormat: format,
-          lastMimeType: payload.mimeType,
-          lastFileExtension: extension,
-          lastHeaderSignature: headerSignature,
-          lastSampleRate: payload.sampleRate ?? 0,
-          lastChunkDurationSeconds: payload.durationSeconds ?? 0,
-          pendingResponses: localWhisperStatus.chunk.pendingResponses + 1,
-          warningMessage: null
-        }
-      });
-    });
-    return result;
-  }
+  }) => whisperService.transcribe(payload)
 );

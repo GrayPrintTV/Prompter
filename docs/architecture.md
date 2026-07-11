@@ -2,7 +2,9 @@
 
 ## Electron Main, Preload, and Renderer
 
-Electron main lives in `electron/main.ts`. It creates the BrowserWindow, registers IPC handlers, owns file dialogs and window controls, and owns the Local Whisper Python sidecar process. It also contains the default-off experimental OpenAI Realtime network boundary.
+Electron main lives in `electron/main.ts`. It creates the BrowserWindow, registers IPC handlers, owns file dialogs and window controls, and owns the Local Whisper Python sidecar through a dedicated service. It also contains the default-off experimental OpenAI Realtime network boundary.
+
+The sidecar process implementation is isolated in `electron/whisper/WhisperTranscriptionService.ts`. Electron main supplies runtime paths, Electron `userData`/temp locations, diagnostics, and renderer status publication; the service exclusively owns spawn, JSONL parsing, readiness/model state, pending transcription requests, temporary audio cleanup, and shutdown. The service has no `BrowserWindow` dependency and can later be called by an Electron-hosted tablet server without exposing the Python JSONL protocol externally.
 
 Manuscript file import is also owned by Electron main. The picker accepts TXT, Markdown, DOCX, and PDF; `electron/manuscriptImport.ts` reads the selected path, uses Mammoth for DOCX paragraph text and PDF.js for embedded PDF text, normalizes the result, and returns only safe import metadata and text through preload IPC. The renderer applies the persisted narrator-spacing preference through the same character-preserving cleanup used for pasted text. The renderer never receives unrestricted filesystem access. PDF OCR is not part of this flow.
 
@@ -64,6 +66,12 @@ When a developer explicitly sets `OPENAI_REALTIME_ENABLED=true`, the renderer ma
 The alignment engine lives in `src/domain/alignment.ts` and related domain modules. It receives normalized transcript tokens and searches within a bounded manuscript window around the current token. It scores candidates conservatively, penalizes false jumps and duplicate traps, supports retake/backward matching, and returns an `AlignmentResult`.
 
 `src/domain/scrollModel.ts` maps alignment confidence and movement into follow states such as following, holding, uncertain, lost, paused, manual, resyncing, and retake.
+
+Stateful transcript-to-position behavior is owned by `src/session/SessionCoordinator.ts`. It combines the existing domain functions without changing their thresholds or scoring, and owns transcript buffers, accepted semantic position, reacquisition state, confidence/follow decisions, and movement diagnostics. `App.tsx` projects immutable coordinator state into React while retaining rendering, provider lifecycle, local persistence, and physical scroll animation. The coordinator can emit a JSON-serializable authoritative snapshot that validates against the shared protocol schema.
+
+## Shared Tablet Protocol Foundation
+
+Language-neutral JSON Schemas and compatibility rules live under `shared/protocol/`. They define envelopes, authoritative snapshots, transcript and semantic movement events, audio control metadata, and pairing/authentication placeholders. They do not implement a server, listener, authentication, binary transport, or Android client. Transport protocol versions are independent of session and manuscript revisions; visual lines and pixel positions are intentionally not authoritative cross-platform fields.
 
 ## UI and Debug Flow
 

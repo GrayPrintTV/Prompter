@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://prompter.local/schemas/envelope.schema.json",
+  "title": "Prompter message envelope",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["protocolMajor", "protocolMinor", "type", "serverId", "sessionId", "connectionId", "sequence", "sentAtMs", "payload"],
+  "properties": {
+    "protocolMajor": { "type": "integer", "minimum": 0 },
+    "protocolMinor": { "type": "integer", "minimum": 0 },
+    "type": { "type": "string", "minLength": 1, "maxLength": 80 },
+    "serverId": { "$ref": "common.schema.json#/$defs/identifier" },
+    "sessionId": { "$ref": "common.schema.json#/$defs/identifier" },
+    "connectionId": { "$ref": "common.schema.json#/$defs/identifier" },
+    "sequence": { "type": "integer", "minimum": 0 },
+    "sentAtMs": { "type": "integer", "minimum": 0 },
+    "payload": { "type": "object" }
+  }
+}

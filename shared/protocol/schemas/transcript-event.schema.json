@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://prompter.local/schemas/transcript-event.schema.json",
+  "title": "Provider-neutral transcript event payload",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["sessionRevision", "manuscriptRevision", "text", "isFinal", "source", "timestampMs"],
+  "properties": {
+    "sessionRevision": { "$ref": "common.schema.json#/$defs/revision" },
+    "manuscriptRevision": { "$ref": "common.schema.json#/$defs/revision" },
+    "text": { "type": "string" },
+    "isFinal": { "type": "boolean" },
+    "source": { "$ref": "common.schema.json#/$defs/transcriptSource" },
+    "confidence": { "$ref": "common.schema.json#/$defs/confidence" },
+    "audioSequence": { "type": "integer", "minimum": 0 },
+    "requestId": { "$ref": "common.schema.json#/$defs/identifier" },
+    "timestampMs": { "type": "integer", "minimum": 0 },
+    "acceptedPosition": { "$ref": "common.schema.json#/$defs/position" }
+  }
+}

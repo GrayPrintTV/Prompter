@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://prompter.local/schemas/session-snapshot.schema.json",
+  "title": "Authoritative Prompter session snapshot payload",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["sessionRevision", "manuscriptRevision", "manuscript", "acceptedPosition", "followState", "currentConfidence", "latestTranscript", "controllerLease", "displayHints"],
+  "properties": {
+    "sessionRevision": { "$ref": "common.schema.json#/$defs/revision" },
+    "manuscriptRevision": { "$ref": "common.schema.json#/$defs/revision" },
+    "manuscript": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["manuscriptId", "contentHash", "paragraphs", "sentences", "tokens"],
+      "properties": {
+        "manuscriptId": { "$ref": "common.schema.json#/$defs/identifier" },
+        "contentHash": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "normalizedContent": { "type": "string" },
+        "contentReference": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "paragraphs": { "type": "array", "items": { "$ref": "#/$defs/paragraph" } },
+        "sentences": { "type": "array", "items": { "$ref": "#/$defs/sentence" } },
+        "tokens": { "type": "array", "items": { "$ref": "#/$defs/token" } }
+      },
+      "oneOf": [
+        {
+          "required": ["normalizedContent"],
+          "properties": { "normalizedContent": { "type": "string" } }
+        },
+        {
+          "required": ["contentReference"],
+          "properties": { "contentReference": { "type": "string", "minLength": 1, "maxLength": 512 } }
+        }
+      ]
+    },
+    "acceptedPosition": { "$ref": "common.schema.json#/$defs/position" },
+    "followState": { "$ref": "common.schema.json#/$defs/followState" },
+    "currentConfidence": { "$ref": "common.schema.json#/$defs/confidence" },
+    "latestTranscript": { "type": ["string", "null"] },
+    "controllerLease": {
+      "type": ["object", "null"],
+      "additionalProperties": true,
+      "required": ["deviceId", "leaseId"],
+      "properties": {
+        "deviceId": { "$ref": "common.schema.json#/$defs/identifier" },
+        "leaseId": { "$ref": "common.schema.json#/$defs/identifier" }
+      }
+    },
+    "displayHints": {
+      "type": "object",
+      "properties": {
+        "readingZonePercent": { "type": "number", "minimum": 0, "maximum": 100 },
+        "readingLookaheadTokens": { "type": "integer", "minimum": 0 },
+        "theme": { "type": "string", "enum": ["dark", "light"] }
+      },
+      "additionalProperties": true
+    }
+  },
+  "$defs": {
+    "paragraph": {
+      "type": "object", "additionalProperties": false,
+      "required": ["paragraphIndex", "characterRange", "sentenceStart", "sentenceEnd"],
+      "properties": {
+        "paragraphIndex": { "$ref": "common.schema.json#/$defs/index" },
+        "characterRange": { "$ref": "common.schema.json#/$defs/textRange" },
+        "sentenceStart": { "$ref": "common.schema.json#/$defs/index" },
+        "sentenceEnd": { "$ref": "common.schema.json#/$defs/index" }
+      }
+    },
+    "sentence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sentenceIndex", "paragraphIndex", "characterRange", "tokenStart", "tokenEnd"],
+      "properties": {
+        "sentenceIndex": { "$ref": "common.schema.json#/$defs/index" },
+        "paragraphIndex": { "$ref": "common.schema.json#/$defs/index" },
+        "characterRange": { "$ref": "common.schema.json#/$defs/textRange" },
+        "tokenStart": { "$ref": "common.schema.json#/$defs/index" },
+        "tokenEnd": { "$ref": "common.schema.json#/$defs/index" }
+      }
+    },
+    "token": {
+      "type": "object", "additionalProperties": false,
+      "required": ["tokenIndex", "sentenceIndex", "paragraphIndex", "characterRange"],
+      "properties": {
+        "tokenIndex": { "$ref": "common.schema.json#/$defs/index" },
+        "sentenceIndex": { "$ref": "common.schema.json#/$defs/index" },
+        "paragraphIndex": { "$ref": "common.schema.json#/$defs/index" },
+        "characterRange": { "$ref": "common.schema.json#/$defs/textRange" }
+      }
+    }
+  }
+}

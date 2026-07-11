@@ -7,12 +7,6 @@ import { coerceSelectedProvider, getAsrProviderOptions } from './asr/providerReg
 import { ControlPanel } from './components/ControlPanel';
 import { NarrationBar } from './components/NarrationBar';
 import { PrompterView } from './components/PrompterView';
-import { alignTranscript } from './domain/alignment';
-import {
-  alignmentBufferTokens,
-  createAlignmentBufferState,
-  evaluateProvisionalAlignmentBuffer
-} from './domain/alignmentBuffer';
 import {
   buildManuscript,
   findParagraphIndexForSentence,
@@ -24,27 +18,13 @@ import {
 import { cleanupImportedManuscriptText } from './domain/manuscriptImportCleanup';
 import { shouldRecoverControlsFromHiddenLayout } from './domain/layoutRecovery';
 import {
-  MANUAL_REACQUIRE_BACKWARD_WINDOW,
-  MANUAL_REACQUIRE_FORWARD_WINDOW,
-  isNearManualVisibleAnchor,
-  shouldHoldAutomaticBackwardCandidate,
-  visibleReacquireAllowsBackward,
-  type VisibleReacquireSource
-} from './domain/manualFollow';
-import {
-  buildMovementDecisionMetrics,
-  estimateTokensPerLine,
-  proposedTargetFromLookahead,
-  type MovementDecisionInfo,
-  type MovementDecisionOutcome
+  type MovementDecisionInfo
 } from './domain/movementDiagnostics';
 import {
   deriveNarrationStatus,
   isBenignStartDiagnosticMessage,
   type StartDiagnostic
 } from './domain/narrationStatus';
-import { HIGH_CONFIDENCE, stateFromAlignment } from './domain/scrollModel';
-import { transcriptToTokens } from './domain/normalize';
 import type {
   AlignmentBufferDebug,
   AlignmentResult,
@@ -71,6 +51,13 @@ import {
 } from './state/appStore';
 import { loadSession, saveSession } from './state/projectStore';
 import { isEditableTarget } from './shortcuts/shortcuts';
+import {
+  EMPTY_SESSION_ALIGNMENT_DEBUG,
+  SessionCoordinator,
+  type RecordMovementParams,
+  type SessionCoordinatorState,
+  type VisibleReacquireAnchor
+} from './session/SessionCoordinator';
 
 function emptyAlignment(model: ManuscriptModel, tokenIndex: number): AlignmentResult {
   const sentenceIndex = findSentenceIndexForToken(model, tokenIndex);
@@ -108,32 +95,10 @@ const DEFAULT_LIVE_STATUS: LiveAsrConnectionStatus = {
   errorMessage: null
 };
 
-const EMPTY_ALIGNMENT_BUFFER_DEBUG: AlignmentBufferDebug = {
-  source: '',
-  rawTranscript: '',
-  normalizedTokens: [],
-  retainedTokens: [],
-  rollingBufferTokens: [],
-  provisionalBufferTokens: [],
-  evaluationBufferTokens: [],
-  matchedText: '',
-  confidence: 0,
-  moveDecision: 'Waiting for transcript.',
-  moveToTokenCalled: false,
-  retentionDecision: 'none',
-  retentionReason: 'No transcript processed yet.'
-};
+const EMPTY_ALIGNMENT_BUFFER_DEBUG = EMPTY_SESSION_ALIGNMENT_DEBUG;
 
 const DISPLAY_SETTINGS_MIGRATION_KEY = 'narration-prompter.display-settings-v3-reading-band-migrated';
 const MIC_STARTUP_GRACE_MS = 2000;
-
-type VisibleReacquireAnchor = {
-  source: VisibleReacquireSource;
-  visibleTokenIndex: number;
-  detectedAtMs: number;
-  direction: 'backward' | 'forward' | 'stationary';
-  hadFreshConfirmedAnchor: boolean;
-};
 
 function hasDisplaySettingsMigrationRun() {
   try {
@@ -159,18 +124,6 @@ function localWhisperSettingsEqual(a: LocalWhisperSettings, b: LocalWhisperSetti
     a.computeType === b.computeType &&
     a.chunkDurationSeconds === b.chunkDurationSeconds
   );
-}
-
-function manuscriptTokenSnippet(model: ManuscriptModel, tokenIndex: number, radius = 5) {
-  if (model.tokens.length === 0) return 'No manuscript tokens.';
-  const center = clamp(Math.round(tokenIndex), 0, model.tokens.length - 1);
-  const from = clamp(center - radius, 0, model.tokens.length);
-  const to = clamp(center + radius + 1, 0, model.tokens.length);
-  return model.tokens
-    .slice(from, to)
-    .map((token) => token.originalText || token.text)
-    .join(' ')
-    .slice(0, 110);
 }
 
 export default function App() {
@@ -256,15 +209,20 @@ export default function App() {
   const localWhisperProviderRef = useRef(
     new LocalWhisperAsrProvider(initialLocalWhisperSettings)
   );
-  const resyncArmedRef = useRef(false);
-  const lowConfidenceCountRef = useRef(0);
-  const localAlignmentBufferRef = useRef(createAlignmentBufferState());
   const scrollTestIdRef = useRef(0);
   const startupVisibleAnchorRequestIdRef = useRef(0);
-  const movementDecisionIdRef = useRef(0);
-  const lastFreshAnchorRef = useRef<{ tokenIndex: number; timestampMs: number } | null>(null);
   const lastAssistMovementKeyRef = useRef<string | null>(null);
   const manuscript = useMemo(() => buildManuscript(manuscriptText), [manuscriptText]);
+  const sessionCoordinatorRef = useRef<SessionCoordinator | null>(null);
+  if (!sessionCoordinatorRef.current) {
+    sessionCoordinatorRef.current = new SessionCoordinator({
+      manuscript,
+      currentTokenIndex,
+      followState,
+      displaySettings
+    });
+  }
+  const sessionCoordinator = sessionCoordinatorRef.current;
   const manuscriptRef = useRef(manuscript);
   const currentTokenRef = useRef(currentTokenIndex);
   const followStateRef = useRef(followState);
@@ -279,7 +237,6 @@ export default function App() {
     source: string;
     lastIssue: StartDiagnostic | null;
   } | null>(null);
-  const manualReacquireAnchorRef = useRef<VisibleReacquireAnchor | null>(null);
   const micStartupGraceTimeoutRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -290,7 +247,8 @@ export default function App() {
 
   useEffect(() => {
     displaySettingsRef.current = displaySettings;
-  }, [displaySettings]);
+    sessionCoordinator.setDisplaySettings(displaySettings);
+  }, [displaySettings, sessionCoordinator]);
 
   useEffect(() => {
     alignmentRef.current = alignment;
@@ -309,12 +267,13 @@ export default function App() {
     setCurrentSentenceIndex(sentenceIndex);
     setCurrentParagraphIndex(findParagraphIndexForSentence(manuscript, sentenceIndex));
     setAlignment(emptyAlignment(manuscript, clamped));
-    localAlignmentBufferRef.current = createAlignmentBufferState();
+    sessionCoordinator.replaceManuscript(manuscript, clamped);
     setAlignmentBufferDebug(EMPTY_ALIGNMENT_BUFFER_DEBUG);
-    lastFreshAnchorRef.current = null;
+    setTranscriptBuffer([]);
+    setManualReacquireAnchor(null);
     setMovementDecision(null);
     setMovementDecisionHistory([]);
-  }, [manuscript]);
+  }, [manuscript, sessionCoordinator]);
 
   useEffect(() => {
     currentTokenRef.current = currentTokenIndex;
@@ -322,7 +281,10 @@ export default function App() {
 
   useEffect(() => {
     followStateRef.current = followState;
-  }, [followState]);
+    if (sessionCoordinator.getState().followState !== followState) {
+      sessionCoordinator.setFollowState(followState);
+    }
+  }, [followState, sessionCoordinator]);
 
   useEffect(() => {
     selectedAsrProviderRef.current = selectedAsrProviderId;
@@ -360,109 +322,36 @@ export default function App() {
     }, MIC_STARTUP_GRACE_MS);
   }, []);
 
-  const moveToToken = useCallback((tokenIndex: number, nextState: FollowState = 'manual') => {
-    const model = manuscriptRef.current;
-    const clamped = clamp(tokenIndex, 0, Math.max(model.tokens.length - 1, 0));
-    const sentenceIndex = findSentenceIndexForToken(model, clamped);
-    currentTokenRef.current = clamped;
-    setCurrentTokenIndex(clamped);
-    setCurrentSentenceIndex(sentenceIndex);
-    setCurrentParagraphIndex(findParagraphIndexForSentence(model, sentenceIndex));
-    setFollowState(nextState);
+  const applyCoordinatorState = useCallback((state: SessionCoordinatorState) => {
+    currentTokenRef.current = state.currentTokenIndex;
+    followStateRef.current = state.followState;
+    alignmentRef.current = state.alignment;
+    setCurrentTokenIndex(state.currentTokenIndex);
+    setCurrentSentenceIndex(state.currentSentenceIndex);
+    setCurrentParagraphIndex(state.currentParagraphIndex);
+    setFollowState(state.followState);
+    setAlignment(state.alignment);
+    setTranscriptBuffer(state.transcriptBuffer);
+    setAlignmentBufferDebug(state.alignmentBufferDebug);
+    setManualReacquireAnchor(state.manualReacquireAnchor);
+    setMovementDecision(state.movementDecision);
+    setMovementDecisionHistory(state.movementDecisionHistory);
   }, []);
+
+  const moveToToken = useCallback((tokenIndex: number, nextState: FollowState = 'manual') => {
+    applyCoordinatorState(sessionCoordinator.setPosition(tokenIndex, nextState));
+  }, [applyCoordinatorState, sessionCoordinator]);
 
   const appendTrace = useCallback((entry: string) => {
     setTraceLog((prev) => [...prev.slice(-39), entry]);
   }, []);
 
-  const publishMovementDecision = useCallback((decision: MovementDecisionInfo) => {
-    setMovementDecision(decision);
-    setMovementDecisionHistory((previous) => [decision, ...previous].slice(0, 10));
-  }, []);
-
-  const recordMovementDecision = useCallback((params: {
-    source: string;
-    previousTokenIndex?: number;
-    result?: AlignmentResult;
-    confirmedTokenIndex?: number;
-    proposedTargetTokenIndex?: number;
-    confidence?: number;
-    followState: FollowState;
-    finalMovement: MovementDecisionOutcome;
-    engineReason?: string;
-    alignmentContext?: string;
-    markFreshAnchor?: boolean;
-    visibleAnchorTokenIndex?: number;
-  }) => {
-    const model = manuscriptRef.current;
-    const settings = displaySettingsRef.current ?? displaySettings;
-    const tokenCount = model.tokens.length;
-    const now = Date.now();
-    const lookahead = Math.max(0, Math.min(20, Math.round(settings.readingLookaheadTokens ?? 0)));
-    const confirmedTokenIndex = clamp(
-      params.confirmedTokenIndex ?? params.result?.tokenIndex ?? currentTokenRef.current,
-      0,
-      Math.max(tokenCount - 1, 0)
-    );
-    const proposedTargetTokenIndex = clamp(
-      params.proposedTargetTokenIndex ??
-        proposedTargetFromLookahead(confirmedTokenIndex, lookahead, tokenCount),
-      0,
-      Math.max(tokenCount - 1, 0)
-    );
-    const previousAnchor = lastFreshAnchorRef.current;
-    const previousAnchorTokenIndex = clamp(
-      previousAnchor?.tokenIndex ?? params.previousTokenIndex ?? currentTokenRef.current,
-      0,
-      Math.max(tokenCount - 1, 0)
-    );
-    const elapsedSinceAnchorMs = previousAnchor
-      ? Math.max(0, now - previousAnchor.timestampMs)
-      : null;
-    const confidence = params.confidence ?? params.result?.confidence ?? alignmentRef.current.confidence;
-    const engineReason = params.engineReason ?? params.result?.reason ?? alignmentRef.current.reason;
-    const metrics = buildMovementDecisionMetrics({
-      previousAnchorTokenIndex,
-      confirmedTokenIndex,
-      proposedTargetTokenIndex,
-      readingLookaheadTokens: lookahead,
-      elapsedSinceAnchorMs,
-      confidence,
-      followState: params.followState,
-      finalMovement: params.finalMovement,
-      resultDiagnostics: params.result?.diagnostics ?? alignmentRef.current.diagnostics,
-      engineReason,
-      alignmentContext: params.alignmentContext,
-      tokensPerLine: estimateTokensPerLine(settings.textWidthCh)
-    });
-
-    movementDecisionIdRef.current += 1;
-    publishMovementDecision({
-      id: movementDecisionIdRef.current,
-      timestampMs: now,
-      source: params.source,
-      visibleAnchorTokenIndex:
-        params.visibleAnchorTokenIndex ?? manualReacquireAnchorRef.current?.visibleTokenIndex,
-      previousAnchorTokenIndex,
-      previousAnchorSnippet: manuscriptTokenSnippet(model, previousAnchorTokenIndex),
-      confirmedTokenIndex,
-      confirmedSnippet: manuscriptTokenSnippet(model, confirmedTokenIndex),
-      proposedTargetTokenIndex,
-      proposedTargetSnippet: manuscriptTokenSnippet(model, proposedTargetTokenIndex),
-      readingLookaheadTokens: lookahead,
-      elapsedSinceAnchorMs,
-      confidence,
-      finalMovement: params.finalMovement,
-      ...metrics
-    });
-
-    if (params.markFreshAnchor) {
-      lastFreshAnchorRef.current = {
-        tokenIndex: confirmedTokenIndex,
-        timestampMs: now
-      };
-    }
-  }, [displaySettings, publishMovementDecision]);
+  const recordMovementDecision = useCallback((params: RecordMovementParams) => {
+    sessionCoordinator.recordMovement(params);
+    const state = sessionCoordinator.getState();
+    setMovementDecision(state.movementDecision);
+    setMovementDecisionHistory(state.movementDecisionHistory);
+  }, [sessionCoordinator]);
 
   const requestSmoothScrollTest = useCallback((lineCount: number) => {
     scrollTestIdRef.current += 1;
@@ -485,9 +374,9 @@ export default function App() {
   }, [appendTrace]);
 
   const clearManualReacquireAnchor = useCallback(() => {
-    manualReacquireAnchorRef.current = null;
+    sessionCoordinator.clearVisibleReacquireAnchor();
     setManualReacquireAnchor(null);
-  }, []);
+  }, [sessionCoordinator]);
 
   const requestStartupVisibleAnchor = useCallback(async () => {
     clearManualReacquireAnchor();
@@ -499,17 +388,15 @@ export default function App() {
   }, [clearManualReacquireAnchor]);
 
   const enterFollowing = useCallback(() => {
-    followStateRef.current = 'following';
-    setFollowState('following');
-  }, []);
+    applyCoordinatorState(sessionCoordinator.setFollowState('following'));
+  }, [applyCoordinatorState, sessionCoordinator]);
 
   const resetAlignmentContext = useCallback(() => {
-    localAlignmentBufferRef.current = createAlignmentBufferState();
-    lastFreshAnchorRef.current = null;
-    clearManualReacquireAnchor();
+    sessionCoordinator.resetTranscriptContext();
     setTranscriptBuffer([]);
     setAlignmentBufferDebug(EMPTY_ALIGNMENT_BUFFER_DEBUG);
-  }, [clearManualReacquireAnchor]);
+    setManualReacquireAnchor(null);
+  }, [sessionCoordinator]);
 
   const onTraceScroll = useCallback((info: { sentenceIndex: number; didScroll: boolean; reason: string }) => {
     const r = info.reason || '';
@@ -551,7 +438,7 @@ export default function App() {
       const isCruising = state.includes('cruising') || state.includes('slowed');
       recordMovementDecision({
         source: 'assist',
-        confirmedTokenIndex: lastFreshAnchorRef.current?.tokenIndex ?? currentTokenRef.current,
+        confirmedTokenIndex: sessionCoordinator.getFreshAnchorTokenIndex() ?? currentTokenRef.current,
         followState: followStateRef.current,
         finalMovement: isCruising ? 'only Assist-cruised' : 'held',
         confidence: isCruising ? alignmentRef.current.confidence : 0,
@@ -559,7 +446,7 @@ export default function App() {
         alignmentContext: `assist ${info.state}`
       });
     }
-  }, [appendTrace, recordMovementDecision]);
+  }, [appendTrace, recordMovementDecision, sessionCoordinator]);
 
   const onAnchorDebug = useCallback((info: any) => {
     anchorDebugRef.current = info;
@@ -576,7 +463,7 @@ export default function App() {
     scrollTop: number;
   }) => {
     if (info.requestId !== startupVisibleAnchorRequestIdRef.current) return;
-    const hadFreshConfirmedAnchor = Boolean(lastFreshAnchorRef.current);
+    const hadFreshConfirmedAnchor = sessionCoordinator.hasFreshAnchor();
     const anchor: VisibleReacquireAnchor = {
       source: 'startup',
       visibleTokenIndex: info.visibleTokenIndex,
@@ -584,18 +471,7 @@ export default function App() {
       direction: 'stationary',
       hadFreshConfirmedAnchor
     };
-    manualReacquireAnchorRef.current = anchor;
-    setManualReacquireAnchor(anchor);
-    localAlignmentBufferRef.current = createAlignmentBufferState();
-    lowConfidenceCountRef.current = 0;
-    resyncArmedRef.current = false;
-    setTranscriptBuffer([]);
-    setAlignmentBufferDebug({
-      ...EMPTY_ALIGNMENT_BUFFER_DEBUG,
-      moveDecision: `startup visible anchor set at token ${info.visibleTokenIndex}`,
-      retentionDecision: 'reset',
-      retentionReason: 'waiting for fresh transcript near the startup visible area'
-    });
+    applyCoordinatorState(sessionCoordinator.setVisibleReacquireAnchor(anchor, 'startup'));
     appendTrace(
       `startup visible anchor set token=${info.visibleTokenIndex} scrollTop=${info.scrollTop.toFixed(1)} freshAnchor=${hadFreshConfirmedAnchor ? 'yes' : 'no'}`
     );
@@ -611,7 +487,7 @@ export default function App() {
       alignmentContext: `startup visible anchor set; visible anchor token=${info.visibleTokenIndex}; fresh confirmed anchor=${hadFreshConfirmedAnchor ? 'yes' : 'no'}`,
       visibleAnchorTokenIndex: info.visibleTokenIndex
     });
-  }, [appendTrace, recordMovementDecision]);
+  }, [appendTrace, applyCoordinatorState, recordMovementDecision, sessionCoordinator]);
 
   const onManualScroll = useCallback((info: {
     visibleTokenIndex: number;
@@ -623,23 +499,9 @@ export default function App() {
       visibleTokenIndex: info.visibleTokenIndex,
       detectedAtMs: Date.now(),
       direction: info.direction,
-      hadFreshConfirmedAnchor: Boolean(lastFreshAnchorRef.current)
+      hadFreshConfirmedAnchor: sessionCoordinator.hasFreshAnchor()
     };
-    manualReacquireAnchorRef.current = anchor;
-    setManualReacquireAnchor(anchor);
-    localAlignmentBufferRef.current = createAlignmentBufferState();
-    lowConfidenceCountRef.current = 0;
-    resyncArmedRef.current = false;
-    setTranscriptBuffer([]);
-    setAlignmentBufferDebug({
-      ...EMPTY_ALIGNMENT_BUFFER_DEBUG,
-      moveDecision: `manual scroll detected; visible anchor token ${info.visibleTokenIndex}`,
-      retentionDecision: 'reset',
-      retentionReason: 'waiting for fresh transcript near the visible manuscript area'
-    });
-    if (followStateRef.current !== 'manual' && followStateRef.current !== 'paused') {
-      setFollowState('holding');
-    }
+    applyCoordinatorState(sessionCoordinator.setVisibleReacquireAnchor(anchor, 'manual'));
     appendTrace(
       `manual scroll detected direction=${info.direction} visible anchor token=${info.visibleTokenIndex} scrollTop=${info.scrollTop.toFixed(1)}`
     );
@@ -655,7 +517,7 @@ export default function App() {
       alignmentContext: `manual scroll detected; visible anchor token=${info.visibleTokenIndex}; direction=${info.direction}`,
       visibleAnchorTokenIndex: info.visibleTokenIndex
     });
-  }, [appendTrace, recordMovementDecision]);
+  }, [appendTrace, applyCoordinatorState, recordMovementDecision, sessionCoordinator]);
 
   // Trace assist param changes (enabled/speed/feel) when user adjusts Display controls. Runs after appendTrace exists.
   useEffect(() => {
@@ -663,470 +525,12 @@ export default function App() {
   }, [displaySettings.continuousAssistScroll, displaySettings.assistScrollSpeed, displaySettings.assistCorrectionFeel, appendTrace]);
 
   const processDelta = useCallback((delta: TranscriptDelta) => {
-    const raw = delta.text;
-    appendTrace(`recv ${delta.source}: raw="${raw}"`);
     setDeltas((previous) => [...previous.slice(-24), delta]);
-    const words = transcriptToTokens(delta.text);
-    appendTrace(`norm tokens: [${words.join(' ')}]`);
-    setInputLevel(delta.text.trim() ? clamp(0.25 + words.length / 10, 0.25, 1) : 0);
-
-    if (words.length === 0) {
-      appendTrace('empty transcript -> holding');
-      const nextState = followStateRef.current === 'manual' ? 'manual' : 'holding';
-      setAlignmentBufferDebug({
-        ...EMPTY_ALIGNMENT_BUFFER_DEBUG,
-        source: delta.source,
-        rawTranscript: raw,
-        moveDecision: 'held empty transcript',
-        retentionDecision: 'discarded',
-        retentionReason: 'empty transcript'
-      });
-      recordMovementDecision({
-        source: delta.source,
-        previousTokenIndex: currentTokenRef.current,
-        confirmedTokenIndex: currentTokenRef.current,
-        followState: nextState,
-        finalMovement: 'held',
-        confidence: 0,
-        engineReason: 'empty transcript',
-        alignmentContext: 'discarded empty transcript'
-      });
-      setFollowState(nextState);
-      return;
-    }
-
-    if (delta.source === 'local-whisper') {
-      const model = manuscriptRef.current;
-      const previousToken = currentTokenRef.current;
-      const wasResyncing = resyncArmedRef.current;
-      const manualAnchor = manualReacquireAnchorRef.current;
-      const searchAnchorToken = manualAnchor?.visibleTokenIndex ?? previousToken;
-      const decision = evaluateProvisionalAlignmentBuffer(
-        model,
-        localAlignmentBufferRef.current,
-        words,
-        searchAnchorToken,
-        {
-          widenWindow: !manualAnchor && (wasResyncing || followStateRef.current === 'lost'),
-          backwardWindow: manualAnchor ? MANUAL_REACQUIRE_BACKWARD_WINDOW : undefined,
-          forwardWindow: manualAnchor ? MANUAL_REACQUIRE_FORWARD_WINDOW : undefined
-        }
-      );
-      localAlignmentBufferRef.current = decision.state;
-      resyncArmedRef.current = false;
-      setAlignment(decision.result);
-      setTranscriptBuffer(alignmentBufferTokens(decision.state));
-
-      let moveToTokenCalled = false;
-      let moveDecision = 'held';
-      let movementFollowState: FollowState = followStateRef.current;
-      let finalMovement: MovementDecisionOutcome = 'held';
-      let movementContext = '';
-      const freshHighConfidenceMatch =
-        decision.moveRecommended && decision.result.confidence >= HIGH_CONFIDENCE;
-      const nearManualAnchor = Boolean(
-        manualAnchor &&
-        isNearManualVisibleAnchor(decision.result.tokenIndex, manualAnchor.visibleTokenIndex)
-      );
-      const visibleReacquireAllowsCandidateBackward = Boolean(
-        manualAnchor &&
-        visibleReacquireAllowsBackward(
-          manualAnchor.source,
-          manualAnchor.hadFreshConfirmedAnchor
-        )
-      );
-      const startupBackwardBlocked = Boolean(
-        manualAnchor?.source === 'startup' &&
-        !visibleReacquireAllowsCandidateBackward &&
-        decision.result.tokenIndex < previousToken
-      );
-      const autoBackwardCandidate = shouldHoldAutomaticBackwardCandidate({
-        candidateTokenIndex: decision.result.tokenIndex,
-        confirmedAnchorTokenIndex: previousToken,
-        explicitBackwardAllowed: wasResyncing,
-        visibleReacquireAllowsBackward: visibleReacquireAllowsCandidateBackward
-      });
-      appendTrace(
-        `local eval buffer=[${decision.evaluationTokens.join(' ')}] provisional=[${decision.state.provisionalTokens.join(' ')}]`
-      );
-      appendTrace(
-        `align matched="${decision.result.matchedText}" conf=${decision.result.confidence.toFixed(2)} deltaConf=${decision.deltaResult.confidence.toFixed(2)} | ${decision.result.reason}`
-      );
-      appendTrace(
-        `context: ${decision.retainedDelta ? 'retained' : 'discarded'} (${decision.retentionReason}) retained=[${decision.retainedTokens.join(' ')}]`
-      );
-
-      if (followStateRef.current === 'manual' || followStateRef.current === 'paused') {
-        moveDecision = 'manual/paused: no follow update';
-        finalMovement = 'ignored';
-        movementContext = 'manual/paused: no follow update';
-        appendTrace('manual/paused: moveToToken not called');
-      } else if (manualAnchor) {
-        if (freshHighConfidenceMatch && nearManualAnchor && !startupBackwardBlocked) {
-          lowConfidenceCountRef.current = 0;
-          movementFollowState = 'following';
-          moveToToken(decision.result.tokenIndex, 'following');
-          moveToTokenCalled = true;
-          finalMovement = 'accepted';
-          if (manualAnchor.source === 'startup') {
-            moveDecision = `cold-start reacquired from visible text at token ${decision.result.tokenIndex}`;
-            movementContext = `cold-start reacquired from visible text; startup visible anchor token=${manualAnchor.visibleTokenIndex}`;
-            appendTrace(
-              `cold-start reacquired from visible text visibleT=${manualAnchor.visibleTokenIndex} matchedT=${decision.result.tokenIndex}`
-            );
-          } else {
-            moveDecision = `reacquired after manual scroll at token ${decision.result.tokenIndex}`;
-            movementContext = `reacquired after manual scroll; visible anchor token=${manualAnchor.visibleTokenIndex}`;
-            appendTrace(
-              `reacquired after manual scroll visibleT=${manualAnchor.visibleTokenIndex} matchedT=${decision.result.tokenIndex}`
-            );
-          }
-          manualReacquireAnchorRef.current = null;
-          setManualReacquireAnchor(null);
-        } else {
-          movementFollowState = 'holding';
-          setFollowState('holding');
-          if (startupBackwardBlocked) {
-            moveDecision = `auto-backward candidate held: ${decision.result.tokenIndex} < confirmed ${previousToken}`;
-            movementContext = 'auto-backward candidate held after startup; possible rollback/reread';
-          } else if (manualAnchor.source === 'startup') {
-            moveDecision = freshHighConfidenceMatch
-              ? `held because startup match was outside visible neighborhood ${manualAnchor.visibleTokenIndex}`
-              : `held: waiting for cold-start match near visible anchor ${manualAnchor.visibleTokenIndex}`;
-            movementContext = freshHighConfidenceMatch
-              ? `held because startup match was outside visible neighborhood; startup visible anchor token=${manualAnchor.visibleTokenIndex}`
-              : `startup visible anchor reacquire pending; visible anchor token=${manualAnchor.visibleTokenIndex}`;
-          } else {
-            moveDecision = freshHighConfidenceMatch
-              ? `held: high-confidence match not near visible anchor ${manualAnchor.visibleTokenIndex}`
-              : `held: waiting to reacquire near visible anchor ${manualAnchor.visibleTokenIndex}`;
-            movementContext = `manual scroll reacquire pending; visible anchor token=${manualAnchor.visibleTokenIndex}`;
-          }
-          appendTrace(`moveToToken called: NO (${moveDecision})`);
-        }
-      } else if (freshHighConfidenceMatch && autoBackwardCandidate) {
-        movementFollowState = 'holding';
-        setFollowState('holding');
-        moveDecision = `auto-backward candidate held: ${decision.result.tokenIndex} < confirmed ${previousToken}`;
-        movementContext = 'auto-backward candidate held; possible rollback/reread';
-        appendTrace(`moveToToken called: NO (${moveDecision})`);
-      } else if (freshHighConfidenceMatch) {
-        lowConfidenceCountRef.current = 0;
-        const nextState = stateFromAlignment(decision.result, previousToken, wasResyncing, 0);
-        movementFollowState = nextState;
-        moveToToken(decision.result.tokenIndex, nextState);
-        moveToTokenCalled = true;
-        finalMovement = 'accepted';
-        moveDecision = `moved to token ${decision.result.tokenIndex} state=${nextState}`;
-        movementContext = `accepted automatic movement state=${nextState}`;
-        appendTrace(`moveToToken called: YES s${decision.result.sentenceIndex} state=${nextState}`);
-      } else {
-        lowConfidenceCountRef.current += 1;
-        const heldHighConfidenceStaleContext =
-          decision.result.confidence >= HIGH_CONFIDENCE && !decision.moveRecommended;
-        const nextState = heldHighConfidenceStaleContext
-          ? 'holding'
-          : stateFromAlignment(
-              decision.result,
-              previousToken,
-              wasResyncing,
-              lowConfidenceCountRef.current
-            );
-        movementFollowState = nextState;
-        setFollowState(nextState);
-        moveDecision = heldHighConfidenceStaleContext
-          ? 'held: current delta did not contribute a manuscript anchor'
-          : `held state=${nextState} confidence below threshold`;
-        movementContext = moveDecision;
-        appendTrace(
-          heldHighConfidenceStaleContext
-            ? `moveToToken called: NO state=${nextState} (stale context)`
-            : `moveToToken called: NO state=${nextState} (low-conf)`
-        );
-      }
-
-      recordMovementDecision({
-        source: delta.source,
-        previousTokenIndex: previousToken,
-        result: decision.result,
-        followState: movementFollowState,
-        finalMovement,
-        engineReason: decision.result.reason,
-        alignmentContext: `${movementContext || moveDecision}; ${decision.retainedDelta ? 'retained' : 'discarded'}: ${decision.retentionReason}`,
-        markFreshAnchor: moveToTokenCalled,
-        visibleAnchorTokenIndex: manualAnchor?.visibleTokenIndex
-      });
-
-      setAlignmentBufferDebug({
-        source: delta.source,
-        rawTranscript: raw,
-        normalizedTokens: words,
-        retainedTokens: decision.retainedTokens,
-        rollingBufferTokens: decision.state.committedTokens,
-        provisionalBufferTokens: decision.state.provisionalTokens,
-        evaluationBufferTokens: decision.evaluationTokens,
-        matchedText: decision.result.matchedText,
-        confidence: decision.result.confidence,
-        moveDecision,
-        moveToTokenCalled,
-        retentionDecision: decision.retainedDelta ? 'retained' : 'discarded',
-        retentionReason: decision.retentionReason
-      });
-      return;
-    }
-
-    setTranscriptBuffer((previous) => {
-      const next = [...previous, ...words].slice(-28);
-      const model = manuscriptRef.current;
-      const previousToken = currentTokenRef.current;
-      const wasResyncing = resyncArmedRef.current;
-      const manualAnchor = manualReacquireAnchorRef.current;
-      const searchAnchorToken = manualAnchor?.visibleTokenIndex ?? previousToken;
-      const result = alignTranscript(model, next, searchAnchorToken, {
-        widenWindow: !manualAnchor && (wasResyncing || followStateRef.current === 'lost'),
-        backwardWindow: manualAnchor ? MANUAL_REACQUIRE_BACKWARD_WINDOW : undefined,
-        forwardWindow: manualAnchor ? MANUAL_REACQUIRE_FORWARD_WINDOW : undefined
-      });
-
-      setAlignment(result);
-      resyncArmedRef.current = false;
-      appendTrace(`align matched="${result.matchedText}" conf=${result.confidence.toFixed(2)} s${result.sentenceIndex} p${result.paragraphIndex} t${result.tokenIndex} | ${result.reason}`);
-
-      if (followStateRef.current === 'manual' || followStateRef.current === 'paused') {
-        appendTrace('manual/paused: no follow update');
-        recordMovementDecision({
-          source: delta.source,
-          previousTokenIndex: previousToken,
-          result,
-          followState: followStateRef.current,
-          finalMovement: 'ignored',
-          engineReason: result.reason,
-          alignmentContext: 'standard rolling buffer provider; manual/paused'
-        });
-        setAlignmentBufferDebug({
-          source: delta.source,
-          rawTranscript: raw,
-          normalizedTokens: words,
-          retainedTokens: words,
-          rollingBufferTokens: next,
-          provisionalBufferTokens: [],
-          evaluationBufferTokens: next,
-          matchedText: result.matchedText,
-          confidence: result.confidence,
-          moveDecision: 'manual/paused: no follow update',
-          moveToTokenCalled: false,
-          retentionDecision: 'retained',
-          retentionReason: 'standard rolling buffer provider'
-        });
-        return next;
-      }
-
-      const highConfidenceMatch = result.confidence >= HIGH_CONFIDENCE;
-      const nearManualAnchor = Boolean(
-        manualAnchor && isNearManualVisibleAnchor(result.tokenIndex, manualAnchor.visibleTokenIndex)
-      );
-      const visibleReacquireAllowsCandidateBackward = Boolean(
-        manualAnchor &&
-        visibleReacquireAllowsBackward(
-          manualAnchor.source,
-          manualAnchor.hadFreshConfirmedAnchor
-        )
-      );
-      const startupBackwardBlocked = Boolean(
-        manualAnchor?.source === 'startup' &&
-        !visibleReacquireAllowsCandidateBackward &&
-        result.tokenIndex < previousToken
-      );
-      const autoBackwardCandidate = shouldHoldAutomaticBackwardCandidate({
-        candidateTokenIndex: result.tokenIndex,
-        confirmedAnchorTokenIndex: previousToken,
-        explicitBackwardAllowed: wasResyncing,
-        visibleReacquireAllowsBackward: visibleReacquireAllowsCandidateBackward
-      });
-
-      if (manualAnchor) {
-        if (highConfidenceMatch && nearManualAnchor && !startupBackwardBlocked) {
-          lowConfidenceCountRef.current = 0;
-          moveToToken(result.tokenIndex, 'following');
-          const startupReacquire = manualAnchor.source === 'startup';
-          appendTrace(
-            startupReacquire
-              ? `cold-start reacquired from visible text visibleT=${manualAnchor.visibleTokenIndex} matchedT=${result.tokenIndex}`
-              : `reacquired after manual scroll visibleT=${manualAnchor.visibleTokenIndex} matchedT=${result.tokenIndex}`
-          );
-          recordMovementDecision({
-            source: delta.source,
-            previousTokenIndex: previousToken,
-            result,
-            followState: 'following',
-            finalMovement: 'accepted',
-            engineReason: result.reason,
-            alignmentContext: startupReacquire
-              ? `cold-start reacquired from visible text; startup visible anchor token=${manualAnchor.visibleTokenIndex}`
-              : `reacquired after manual scroll; visible anchor token=${manualAnchor.visibleTokenIndex}`,
-            markFreshAnchor: true,
-            visibleAnchorTokenIndex: manualAnchor.visibleTokenIndex
-          });
-          setAlignmentBufferDebug({
-            source: delta.source,
-            rawTranscript: raw,
-            normalizedTokens: words,
-            retainedTokens: words,
-            rollingBufferTokens: next,
-            provisionalBufferTokens: [],
-            evaluationBufferTokens: next,
-            matchedText: result.matchedText,
-            confidence: result.confidence,
-            moveDecision: startupReacquire
-              ? `cold-start reacquired from visible text at token ${result.tokenIndex}`
-              : `reacquired after manual scroll at token ${result.tokenIndex}`,
-            moveToTokenCalled: true,
-            retentionDecision: 'retained',
-            retentionReason: startupReacquire
-              ? 'fresh high-confidence match near startup visible anchor'
-              : 'fresh high-confidence match near visible manual anchor'
-          });
-          manualReacquireAnchorRef.current = null;
-          setManualReacquireAnchor(null);
-        } else {
-          setFollowState('holding');
-          const moveDecision = startupBackwardBlocked
-            ? `auto-backward candidate held: ${result.tokenIndex} < confirmed ${previousToken}`
-            : manualAnchor.source === 'startup'
-              ? highConfidenceMatch
-                ? `held because startup match was outside visible neighborhood ${manualAnchor.visibleTokenIndex}`
-                : `held: waiting for cold-start match near visible anchor ${manualAnchor.visibleTokenIndex}`
-              : highConfidenceMatch
-                ? `held: high-confidence match not near visible anchor ${manualAnchor.visibleTokenIndex}`
-                : `held: waiting to reacquire near visible anchor ${manualAnchor.visibleTokenIndex}`;
-          appendTrace(`action: HELD (${moveDecision})`);
-          recordMovementDecision({
-            source: delta.source,
-            previousTokenIndex: previousToken,
-            result,
-            followState: 'holding',
-            finalMovement: 'held',
-            engineReason: result.reason,
-            alignmentContext: startupBackwardBlocked
-              ? 'auto-backward candidate held after startup; possible rollback/reread'
-              : manualAnchor.source === 'startup'
-                ? highConfidenceMatch
-                  ? `held because startup match was outside visible neighborhood; startup visible anchor token=${manualAnchor.visibleTokenIndex}`
-                  : `startup visible anchor reacquire pending; visible anchor token=${manualAnchor.visibleTokenIndex}`
-                : `manual scroll reacquire pending; visible anchor token=${manualAnchor.visibleTokenIndex}`,
-            visibleAnchorTokenIndex: manualAnchor.visibleTokenIndex
-          });
-          setAlignmentBufferDebug({
-            source: delta.source,
-            rawTranscript: raw,
-            normalizedTokens: words,
-            retainedTokens: words,
-            rollingBufferTokens: next,
-            provisionalBufferTokens: [],
-            evaluationBufferTokens: next,
-            matchedText: result.matchedText,
-            confidence: result.confidence,
-            moveDecision,
-            moveToTokenCalled: false,
-            retentionDecision: 'retained',
-            retentionReason:
-              manualAnchor.source === 'startup'
-                ? 'waiting for fresh high-confidence match near startup visible anchor'
-                : 'waiting for fresh high-confidence match near visible manual anchor'
-          });
-        }
-      } else if (highConfidenceMatch && autoBackwardCandidate) {
-        setFollowState('holding');
-        const moveDecision = `auto-backward candidate held: ${result.tokenIndex} < confirmed ${previousToken}`;
-        appendTrace(`action: HELD (${moveDecision})`);
-        recordMovementDecision({
-          source: delta.source,
-          previousTokenIndex: previousToken,
-          result,
-          followState: 'holding',
-          finalMovement: 'held',
-          engineReason: result.reason,
-          alignmentContext: 'auto-backward candidate held; possible rollback/reread'
-        });
-        setAlignmentBufferDebug({
-          source: delta.source,
-          rawTranscript: raw,
-          normalizedTokens: words,
-          retainedTokens: words,
-          rollingBufferTokens: next,
-          provisionalBufferTokens: [],
-          evaluationBufferTokens: next,
-          matchedText: result.matchedText,
-          confidence: result.confidence,
-          moveDecision,
-          moveToTokenCalled: false,
-          retentionDecision: 'retained',
-          retentionReason: 'automatic backward movement disabled during live following'
-        });
-      } else if (highConfidenceMatch) {
-        lowConfidenceCountRef.current = 0;
-        const nextState = stateFromAlignment(result, previousToken, wasResyncing, 0);
-        moveToToken(result.tokenIndex, nextState);
-        appendTrace(`action: MOVED s${result.sentenceIndex} state=${nextState} (high-conf)`);
-        recordMovementDecision({
-          source: delta.source,
-          previousTokenIndex: previousToken,
-          result,
-          followState: nextState,
-          finalMovement: 'accepted',
-          engineReason: result.reason,
-          alignmentContext: 'standard rolling buffer provider',
-          markFreshAnchor: true
-        });
-        setAlignmentBufferDebug({
-          source: delta.source,
-          rawTranscript: raw,
-          normalizedTokens: words,
-          retainedTokens: words,
-          rollingBufferTokens: next,
-          provisionalBufferTokens: [],
-          evaluationBufferTokens: next,
-          matchedText: result.matchedText,
-          confidence: result.confidence,
-          moveDecision: `moved to token ${result.tokenIndex} state=${nextState}`,
-          moveToTokenCalled: true,
-          retentionDecision: 'retained',
-          retentionReason: 'standard rolling buffer provider'
-        });
-      } else {
-        lowConfidenceCountRef.current += 1;
-        const nextState = stateFromAlignment(result, previousToken, wasResyncing, lowConfidenceCountRef.current);
-        setFollowState(nextState);
-        appendTrace(`action: HELD state=${nextState} (low-conf)`);
-        recordMovementDecision({
-          source: delta.source,
-          previousTokenIndex: previousToken,
-          result,
-          followState: nextState,
-          finalMovement: 'held',
-          engineReason: result.reason,
-          alignmentContext: 'standard rolling buffer provider'
-        });
-        setAlignmentBufferDebug({
-          source: delta.source,
-          rawTranscript: raw,
-          normalizedTokens: words,
-          retainedTokens: words,
-          rollingBufferTokens: next,
-          provisionalBufferTokens: [],
-          evaluationBufferTokens: next,
-          matchedText: result.matchedText,
-          confidence: result.confidence,
-          moveDecision: `held state=${nextState} confidence below threshold`,
-          moveToTokenCalled: false,
-          retentionDecision: 'retained',
-          retentionReason: 'standard rolling buffer provider'
-        });
-      }
-
-      return next;
-    });
-  }, [moveToToken, appendTrace, recordMovementDecision]);
+    const result = sessionCoordinator.processTranscript(delta);
+    for (const trace of result.traces) appendTrace(trace);
+    setInputLevel(result.inputLevel);
+    applyCoordinatorState(result.state);
+  }, [appendTrace, applyCoordinatorState, sessionCoordinator]);
 
   useEffect(() => {
     const manualOff = manualProviderRef.current.onDelta(processDelta);
@@ -1160,7 +564,9 @@ export default function App() {
     });
     const doneOff = mockProviderRef.current.onDone(() => {
       setIsMockPlaying(false);
-      if (selectedAsrProviderRef.current === 'mock') setFollowState('manual');
+      if (selectedAsrProviderRef.current === 'mock') {
+        applyCoordinatorState(sessionCoordinator.setFollowState('manual'));
+      }
     });
     return () => {
       manualOff();
@@ -1171,7 +577,7 @@ export default function App() {
       localWhisperStatusOff();
       doneOff();
     };
-  }, [processDelta]);
+  }, [applyCoordinatorState, processDelta, sessionCoordinator]);
 
   useEffect(() => {
     localWhisperProviderRef.current.setSettings(localWhisperSettings);
@@ -1320,8 +726,8 @@ export default function App() {
       return;
     }
     clearManualReacquireAnchor();
-    setFollowState('manual');
-  }, [clearManualReacquireAnchor, enterFollowing, requestStartupVisibleAnchor]);
+    applyCoordinatorState(sessionCoordinator.setFollowState('manual'));
+  }, [applyCoordinatorState, clearManualReacquireAnchor, enterFollowing, requestStartupVisibleAnchor, sessionCoordinator]);
 
   const togglePause = useCallback(async () => {
     if (followStateRef.current === 'paused') {
@@ -1329,8 +735,8 @@ export default function App() {
       enterFollowing();
       return;
     }
-    setFollowState('paused');
-  }, [enterFollowing, requestStartupVisibleAnchor]);
+    applyCoordinatorState(sessionCoordinator.setFollowState('paused'));
+  }, [applyCoordinatorState, enterFollowing, requestStartupVisibleAnchor, sessionCoordinator]);
 
   const stepSentence = useCallback((direction: -1 | 1) => {
     const model = manuscriptRef.current;
@@ -1347,11 +753,8 @@ export default function App() {
   }, [currentParagraphIndex, moveToToken, resetAlignmentContext]);
 
   const resync = useCallback(() => {
-    clearManualReacquireAnchor();
-    resyncArmedRef.current = true;
-    lowConfidenceCountRef.current = 0;
-    setFollowState('resyncing');
-  }, [clearManualReacquireAnchor]);
+    applyCoordinatorState(sessionCoordinator.armResync());
+  }, [applyCoordinatorState, sessionCoordinator]);
 
   const injectManual = useCallback(async () => {
     await manualProviderRef.current.start();
@@ -1375,8 +778,8 @@ export default function App() {
     await mockProviderRef.current.stop();
     clearManualReacquireAnchor();
     setIsMockPlaying(false);
-    setFollowState('manual');
-  }, [clearManualReacquireAnchor]);
+    applyCoordinatorState(sessionCoordinator.setFollowState('manual'));
+  }, [applyCoordinatorState, clearManualReacquireAnchor, sessionCoordinator]);
 
   const startMicMonitor = useCallback(async () => {
     if (selectedAsrProviderRef.current !== 'local-whisper') return;
@@ -1404,13 +807,13 @@ export default function App() {
     if (selectedAsrProviderRef.current === 'openai-realtime') {
       if (!liveConfig.enabled) {
         setSelectedAsrProviderId('manual');
-        setFollowState('manual');
+        applyCoordinatorState(sessionCoordinator.setFollowState('manual'));
         return;
       }
       if (liveStatus.listening) {
         await liveProviderRef.current.stop();
         clearManualReacquireAnchor();
-        setFollowState('manual');
+        applyCoordinatorState(sessionCoordinator.setFollowState('manual'));
       } else {
         try {
           await liveProviderRef.current.start();
@@ -1431,7 +834,7 @@ export default function App() {
         clearMicStartupGrace();
         await localWhisperProviderRef.current.stop();
         clearManualReacquireAnchor();
-        setFollowState('manual');
+        applyCoordinatorState(sessionCoordinator.setFollowState('manual'));
       } else {
         if (!localWhisperStatus.bridge.localWhisperBridgeAvailable) {
           await localWhisperProviderRef.current.refreshStatus().catch(() => undefined);
@@ -1497,7 +900,7 @@ export default function App() {
       await manualProviderRef.current.stop();
       clearManualReacquireAnchor();
       setIsListening(false);
-      setFollowState('manual');
+      applyCoordinatorState(sessionCoordinator.setFollowState('manual'));
     } else {
       setControlsVisible(false);
       await requestStartupVisibleAnchor();
@@ -1506,6 +909,7 @@ export default function App() {
       enterFollowing();
     }
   }, [
+    applyCoordinatorState,
     isListening,
     isMockPlaying,
     liveConfig.enabled,
@@ -1518,6 +922,7 @@ export default function App() {
     localWhisperStatus.listening,
     playMock,
     requestStartupVisibleAnchor,
+    sessionCoordinator,
     settleMicStartupGrace,
     stopMock
   ]);
@@ -1583,14 +988,14 @@ export default function App() {
     if (found !== null) {
       resetAlignmentContext();
       moveToToken(found, 'manual');
-      setAlignment({
+      applyCoordinatorState(sessionCoordinator.setManualAlignment({
         ...emptyAlignment(model, found),
         confidence: 1,
         matchedText: searchQuery,
         reason: 'Manual search jump.'
-      });
+      }));
     }
-  }, [moveToToken, resetAlignmentContext, searchQuery]);
+  }, [applyCoordinatorState, moveToToken, resetAlignmentContext, searchQuery, sessionCoordinator]);
 
   const toggleFullScreen = useCallback(() => {
     void window.prompterApi?.toggleFullScreen();

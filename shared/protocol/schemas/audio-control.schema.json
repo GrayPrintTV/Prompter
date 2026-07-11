@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://prompter.local/schemas/audio-control.schema.json",
+  "title": "Audio stream control payload",
+  "oneOf": [
+    { "$ref": "#/$defs/start" },
+    { "$ref": "#/$defs/stop" },
+    { "$ref": "#/$defs/gap" }
+  ],
+  "$defs": {
+    "streamBase": {
+      "type": "object",
+      "required": ["streamId"],
+      "properties": { "streamId": { "$ref": "common.schema.json#/$defs/identifier" } }
+    },
+    "start": {
+      "allOf": [
+        { "$ref": "#/$defs/streamBase" },
+        {
+          "type": "object", "additionalProperties": true,
+          "required": ["action", "streamId", "sampleRate", "channels", "encoding", "sequenceStart", "captureTimestampMs", "frameDurationMs"],
+          "properties": {
+            "action": { "const": "start" },
+            "streamId": { "$ref": "common.schema.json#/$defs/identifier" },
+            "sampleRate": { "type": "integer", "minimum": 8000, "maximum": 48000 },
+            "channels": { "const": 1 },
+            "encoding": { "const": "pcm-s16le" },
+            "sequenceStart": { "type": "integer", "minimum": 0 },
+            "captureTimestampMs": { "type": "integer", "minimum": 0 },
+            "frameDurationMs": { "type": "integer", "minimum": 10, "maximum": 2000 }
+          }
+        }
+      ]
+    },
+    "stop": {
+      "type": "object", "additionalProperties": true,
+      "required": ["action", "streamId", "lastSequence", "captureTimestampMs"],
+      "properties": {
+        "action": { "const": "stop" },
+        "streamId": { "$ref": "common.schema.json#/$defs/identifier" },
+        "lastSequence": { "type": "integer", "minimum": 0 },
+        "captureTimestampMs": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "gap": {
+      "type": "object", "additionalProperties": true,
+      "required": ["action", "streamId", "fromSequence", "toSequence", "reason"],
+      "properties": {
+        "action": { "const": "gap" },
+        "streamId": { "$ref": "common.schema.json#/$defs/identifier" },
+        "fromSequence": { "type": "integer", "minimum": 0 },
+        "toSequence": { "type": "integer", "minimum": 0 },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 500 }
+      }
+    },
+    "binaryFrameMetadata": {
+      "description": "Reserved metadata shape for a future binary PCM frame header. No binary transport is implemented in this phase.",
+      "type": "object", "additionalProperties": true,
+      "required": ["streamId", "sequence", "captureTimestampMs", "sampleRate", "channels", "encoding", "sampleCount"],
+      "properties": {
+        "streamId": { "$ref": "common.schema.json#/$defs/identifier" },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "captureTimestampMs": { "type": "integer", "minimum": 0 },
+        "sampleRate": { "type": "integer", "minimum": 8000, "maximum": 48000 },
+        "channels": { "const": 1 },
+        "encoding": { "const": "pcm-s16le" },
+        "sampleCount": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}
