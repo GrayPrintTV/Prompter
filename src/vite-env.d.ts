@@ -9,6 +9,12 @@ import type {
   MainPreloadError,
   OpenAiRealtimeSdpAnswer
 } from './domain/types';
+import type {
+  RendererSessionSync,
+  RendererSyncResult,
+  ServerCoordinatorUpdate,
+  ServerStatusSummary
+} from '../shared/protocol/messages';
 
 type ImportedManuscriptFile = {
   filePath: string;
@@ -50,6 +56,11 @@ declare global {
         headerSignature?: string;
         settings: LocalWhisperSettings;
       }): Promise<LocalWhisperTranscriptResult>;
+      syncServerSession(payload: RendererSessionSync): Promise<RendererSyncResult>;
+      getServerStatus(): Promise<ServerStatusSummary | null>;
+      getServerDiagnostics(): Promise<unknown>;
+      onServerStatus(callback: (status: ServerStatusSummary) => void): () => void;
+      onServerSessionState(callback: (update: ServerCoordinatorUpdate) => void): () => void;
       onLocalWhisperStatus(callback: (status: LocalWhisperStatus) => void): () => void;
     };
   }

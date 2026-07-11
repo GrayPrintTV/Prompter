@@ -54,7 +54,7 @@
       }
     },
     "binaryFrameMetadata": {
-      "description": "Reserved metadata shape for a future binary PCM frame header. No binary transport is implemented in this phase.",
+      "description": "Metadata associated with the immediately following binary PCM16 WebSocket frame.",
       "type": "object", "additionalProperties": true,
       "required": ["streamId", "sequence", "captureTimestampMs", "sampleRate", "channels", "encoding", "sampleCount"],
       "properties": {

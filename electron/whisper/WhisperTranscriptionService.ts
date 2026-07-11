@@ -2,6 +2,10 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
 import { mkdir, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import type {
+  LocalWhisperServiceStatus as LocalWhisperStatus,
+  LocalWhisperSettings
+} from '#prompter-shared/domain/types.js';
 import {
   REQUIRED_WHISPER_MODEL_FILES,
   isPathLikeExecutable,
@@ -14,75 +18,6 @@ import {
   type LocalWhisperLaunchPlan,
   type RuntimePathContext
 } from '../runtimePaths.js';
-
-export type LocalWhisperSettings = {
-  pythonExecutablePath: string;
-  modelName: string;
-  device: string;
-  computeType: string;
-  chunkDurationSeconds: number;
-};
-
-export type LocalWhisperStatus = {
-  providerId: 'local-whisper';
-  configured: boolean;
-  sidecarRunning: boolean;
-  modelPhase: 'stopped' | 'starting' | 'process-started' | 'model-loading' | 'ready' | 'transcribing' | 'returned-empty-transcript' | 'error';
-  listening: boolean;
-  status: 'idle' | 'starting' | 'listening' | 'error' | 'stopped';
-  lastTranscriptDelta: string;
-  errorMessage: string | null;
-  mic: {
-    captureState: 'not-requested' | 'requesting-permission' | 'permission-granted' | 'permission-denied' | 'stream-active' | 'stream-muted-ended' | 'media-recorder-recording' | 'pcm-capturing' | 'chunk-sent' | 'chunk-returned';
-    inputLevel: number;
-    deviceLabel: string;
-    monitorActive: boolean;
-    errorMessage: string | null;
-    log: string[];
-  };
-  chunk: {
-    chunksRecorded: number;
-    chunksQueued: number;
-    chunksSentToMain: number;
-    chunksDropped: number;
-    chunksReceivedBySidecar: number;
-    chunksReturnedFromSidecar: number;
-    chunksEmpty: number;
-    chunksFailed: number;
-    queueLength: number;
-    maxQueueLength: number;
-    estimatedQueueLatencyMs: number;
-    lastChunkSequence: number;
-    processingSequence: number;
-    lastTranscriptionDurationMs: number;
-    avgTranscriptionDurationMs: number;
-    lastRealtimeFactor: number;
-    avgRealtimeFactor: number;
-    droppedDueToOverflow: number;
-    droppedDueToSilence: number;
-    staleChunksDropped: number;
-    silenceChunksSuppressed: number;
-    lastChunkBytes: number;
-    lastChunkFormat: string;
-    lastMimeType: string;
-    lastFileExtension: string;
-    lastHeaderSignature: string;
-    lastSampleRate: number;
-    lastChunkDurationSeconds: number;
-    lastTranscriptText: string;
-    lastSidecarError: string | null;
-    warningMessage: string | null;
-    pendingResponses: number;
-  };
-  transcriptHistory: Array<{
-    text: string;
-    displayText: string;
-    isEmpty: boolean;
-    isFinal: boolean;
-    timestampMs: number;
-    source: 'local-whisper';
-  }>;
-};
 
 export type WhisperRuntimeDiagnostics = {
   localWhisperSidecarExecutablePath: string | null;

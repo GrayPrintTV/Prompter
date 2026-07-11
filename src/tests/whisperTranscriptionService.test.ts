@@ -2,9 +2,9 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 import {
-  WhisperTranscriptionService,
-  type LocalWhisperSettings
+  WhisperTranscriptionService
 } from '../../electron/whisper/WhisperTranscriptionService';
+import type { LocalWhisperSettings } from '../domain/types';
 
 const SETTINGS: LocalWhisperSettings = {
   pythonExecutablePath: 'python',
@@ -145,4 +145,3 @@ describe('WhisperTranscriptionService', () => {
     expect(status).toMatchObject({ sidecarRunning: false, modelPhase: 'stopped', status: 'stopped', errorMessage: null });
   });
 });
-

@@ -1,5 +1,7 @@
-import { app, BrowserWindow, dialog, ipcMain, screen } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, safeStorage, screen } from 'electron';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { hostname } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -15,9 +17,17 @@ import {
   type RuntimePathContext
 } from './runtimePaths.js';
 import {
-  WhisperTranscriptionService,
-  type LocalWhisperSettings
+  WhisperTranscriptionService
 } from './whisper/WhisperTranscriptionService.js';
+import type { LocalWhisperSettings } from '#prompter-shared/domain/types.js';
+import type { RendererSessionSync } from '#prompter-shared/protocol/messages.js';
+import { PairedDeviceStore } from './server/PairedDeviceStore.js';
+import { PairingService } from './server/PairingService.js';
+import { DiscoveryService } from './server/DiscoveryService.js';
+import { ServerSessionBridge } from './server/ServerSessionBridge.js';
+import { PrompterServer } from './server/PrompterServer.js';
+import { ProtocolValidator } from './server/ProtocolValidator.js';
+import { TrayController } from './tray/TrayController.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const APP_ID = 'com.narrationprompter.prompter';
@@ -25,6 +35,10 @@ const isDev = !app.isPackaged && Boolean(process.env.VITE_DEV_SERVER_URL);
 
 let mainWindow: BrowserWindow | null = null;
 let lastKnownWindowMaximized = false;
+let prompterServer: PrompterServer | null = null;
+let trayController: TrayController | null = null;
+let quitting = false;
+const serverSession = new ServerSessionBridge();
 
 type OpenAiRealtimeConfig = {
   apiKey: string;
@@ -39,6 +53,8 @@ const WINDOW_STATE_FILE = 'window-state.json';
 const APP_LOG_FILE = 'prompter-main.log';
 
 app.setAppUserModelId(APP_ID);
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) app.quit();
 
 type PreloadExposeDiagnostics = {
   started: boolean;
@@ -107,6 +123,107 @@ function appendDiagnosticLog(event: string, data: Record<string, unknown>) {
     );
   } catch (error) {
     console.warn('[main] failed to write diagnostic log', error);
+  }
+}
+
+function stableServerId() {
+  const serverDirectory = path.join(app.getPath('userData'), 'tablet-server');
+  const serverIdPath = path.join(serverDirectory, 'server-id.txt');
+  try {
+    const existing = readFileSync(serverIdPath, 'utf8').trim();
+    if (existing) return existing;
+  } catch { /* created below */ }
+  const serverId = randomUUID();
+  mkdirSync(serverDirectory, { recursive: true });
+  writeFileSync(serverIdPath, serverId, 'utf8');
+  return serverId;
+}
+
+async function initializeTabletServer() {
+  const devices = PairedDeviceStore.underUserData(app.getPath('userData'), safeStorage);
+  await devices.load();
+  const pairing = new PairingService(devices, async (request) => {
+    const options: Electron.MessageBoxOptions = {
+      type: 'question', title: 'Pair tablet', message: `Pair ${request.deviceName}?`,
+      detail: `Model: ${request.model ?? 'Unknown'}\nDevice ID: ${request.deviceId}\nAddress: ${request.remoteAddress}`,
+      buttons: ['Approve', 'Deny'], defaultId: 1, cancelId: 1, noLink: true
+    };
+    const result = mainWindow
+      ? await dialog.showMessageBox(mainWindow, options)
+      : await dialog.showMessageBox(options);
+    return { approved: result.response === 0 };
+  });
+  const discovery = new DiscoveryService();
+  const protocolSchemaRoot = app.isPackaged
+    ? path.join(process.resourcesPath, 'protocol-schemas')
+    : path.join(app.getAppPath(), 'shared', 'protocol', 'schemas');
+  prompterServer = new PrompterServer({
+    serverId: stableServerId(), productVersion: app.getVersion(), computerName: hostname(),
+    port: Number(process.env.PROMPTER_SERVER_PORT || 43127), pairing, devices, discovery, session: serverSession,
+    protocolValidator: new ProtocolValidator(protocolSchemaRoot),
+    whisperSettings: {
+      pythonExecutablePath: 'python', modelName: 'base.en', device: 'cpu', computeType: 'int8', chunkDurationSeconds: 2
+    },
+    transcribe: (chunk, settings) => whisperService.transcribe({
+      audioData: Uint8Array.from(chunk.wav).buffer,
+      mimeType: 'audio/wav', format: 'wav', extension: 'wav', sampleRate: chunk.sampleRate,
+      durationSeconds: chunk.durationSeconds, headerSignature: chunk.wav.subarray(0, 12).toString('hex'), settings
+    })
+  });
+  trayController = new TrayController({
+    openPrompter: restoreMainWindow,
+    toggleServer: async () => {
+      try {
+        if (prompterServer?.getStatus().enabled) await prompterServer.disable();
+        else await prompterServer?.enable();
+      } catch (error) {
+        appendDiagnosticLog('tablet-server-toggle-error', { message: error instanceof Error ? error.message : String(error) });
+      }
+    },
+    pairTablet: () => {
+      try { prompterServer?.startPairing(); }
+      catch (error) { dialog.showErrorBox('Tablet pairing unavailable', error instanceof Error ? error.message : String(error)); }
+    },
+    disconnectDevice: (deviceId) => prompterServer?.disconnectDevice(deviceId),
+    forgetDevice: async (deviceId) => { await prompterServer?.forgetDevice(deviceId); },
+    showDiagnostics: () => void dialog.showMessageBox({
+      title: 'Prompter tablet server diagnostics', type: 'info', buttons: ['OK'],
+      message: 'Tablet server diagnostics', detail: JSON.stringify(prompterServer?.diagnostics() ?? { enabled: false }, null, 2)
+    }),
+    quit: shutdownAndQuit
+  });
+  trayController.create(prompterServer.getStatus());
+  prompterServer.onStatus((status) => {
+    trayController?.update(status);
+    mainWindow?.webContents.send('tablet-server:status', status);
+    appendDiagnosticLog('tablet-server-status', {
+      state: status.state, bindAddress: status.bindAddress, port: status.port, lastError: status.lastError
+    });
+  });
+  serverSession.onState((state) => {
+    if (serverSession.getAuthority() === 'tablet') mainWindow?.webContents.send('tablet-server:sessionState', {
+      origin: 'tablet', deviceId: serverSession.getControllerDeviceId(), state
+    });
+  });
+}
+
+function restoreMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) createMainWindow();
+  if (mainWindow?.isMinimized()) mainWindow.restore();
+  mainWindow?.show();
+  mainWindow?.focus();
+}
+
+async function shutdownAndQuit() {
+  if (quitting) return;
+  quitting = true;
+  try {
+    prompterServer?.stopPairing();
+    await prompterServer?.shutdown();
+    await whisperService.stop();
+    trayController?.destroy();
+  } finally {
+    app.quit();
   }
 }
 
@@ -459,8 +576,11 @@ function createMainWindow() {
   }
 }
 
-app.whenReady().then(() => {
+app.on('second-instance', restoreMainWindow);
+
+if (hasSingleInstanceLock) app.whenReady().then(async () => {
   createMainWindow();
+  await initializeTabletServer();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -471,7 +591,14 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
-    app.quit();
+    void shutdownAndQuit();
+  }
+});
+
+app.on('before-quit', (event) => {
+  if (!quitting) {
+    event.preventDefault();
+    void shutdownAndQuit();
   }
 });
 
@@ -644,6 +771,14 @@ ipcMain.on('preload:diagnostic', (_event, diagnostics: PreloadExposeDiagnostics)
 ipcMain.handle('bridge:getDiagnostics', () => {
   return mainBridgeDiagnostics();
 });
+
+ipcMain.handle('tablet-server:syncSession', (_event, sync: RendererSessionSync) => {
+  const result = serverSession.applyRendererSync(sync);
+  if (result.accepted && !result.duplicate) prompterServer?.broadcastSnapshot();
+  return result;
+});
+ipcMain.handle('tablet-server:getStatus', () => prompterServer?.getStatus() ?? null);
+ipcMain.handle('tablet-server:getDiagnostics', () => prompterServer?.diagnostics() ?? null);
 
 ipcMain.handle('local-whisper:getStatus', () => localWhisperStatusForRenderer());
 

@@ -200,6 +200,7 @@ export default function App() {
     EMPTY_ALIGNMENT_BUFFER_DEBUG
   );
   const [inputLevel, setInputLevel] = useState(0);
+  const [sessionResetId, setSessionResetId] = useState(0);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const prompterStageRef = useRef<HTMLDivElement | null>(null);
@@ -238,6 +239,8 @@ export default function App() {
     lastIssue: StartDiagnostic | null;
   } | null>(null);
   const micStartupGraceTimeoutRef = useRef<number | null>(null);
+  const rendererSyncRevisionRef = useRef(0);
+  const lastRendererSyncFingerprintRef = useRef('');
 
   useEffect(() => {
     if (shouldRunDisplaySettingsMigration) {
@@ -338,6 +341,39 @@ export default function App() {
     setMovementDecisionHistory(state.movementDecisionHistory);
   }, []);
 
+  useEffect(() => {
+    const unsubscribe = window.prompterApi?.onServerSessionState((update) => {
+      if (update.origin !== 'tablet') return;
+      applyCoordinatorState(sessionCoordinator.adoptAuthoritativeState(update.state));
+    });
+    return () => unsubscribe?.();
+  }, [applyCoordinatorState, sessionCoordinator]);
+
+  useEffect(() => {
+    const api = window.prompterApi;
+    if (!api?.syncServerSession) return;
+    const timer = window.setTimeout(() => {
+      const candidate = {
+        manuscriptText,
+        manuscriptId: `desktop:${projectTitle}`,
+        currentTokenIndex,
+        followState,
+        displaySettings,
+        selectedProviderId: selectedAsrProviderId,
+        transcriptSourceActive: isListening || isMockPlaying,
+        sessionResetId
+      };
+      const fingerprint = JSON.stringify(candidate);
+      if (fingerprint === lastRendererSyncFingerprintRef.current) return;
+      lastRendererSyncFingerprintRef.current = fingerprint;
+      rendererSyncRevisionRef.current += 1;
+      void api.syncServerSession({ rendererRevision: rendererSyncRevisionRef.current, ...candidate }).catch(() => {
+        // The desktop remains fully usable if main-process synchronization is unavailable.
+      });
+    }, 120);
+    return () => window.clearTimeout(timer);
+  }, [currentTokenIndex, displaySettings, followState, isListening, isMockPlaying, manuscriptText, projectTitle, selectedAsrProviderId, sessionResetId]);
+
   const moveToToken = useCallback((tokenIndex: number, nextState: FollowState = 'manual') => {
     applyCoordinatorState(sessionCoordinator.setPosition(tokenIndex, nextState));
   }, [applyCoordinatorState, sessionCoordinator]);
@@ -392,6 +428,7 @@ export default function App() {
   }, [applyCoordinatorState, sessionCoordinator]);
 
   const resetAlignmentContext = useCallback(() => {
+    setSessionResetId((value) => value + 1);
     sessionCoordinator.resetTranscriptContext();
     setTranscriptBuffer([]);
     setAlignmentBufferDebug(EMPTY_ALIGNMENT_BUFFER_DEBUG);

@@ -124,10 +124,24 @@ spawnLogged('renderer', process.execPath, [
   '5173'
 ]);
 
+await runLogged('shared-tsc-build', process.execPath, [
+  nodeModuleScript('typescript', 'bin', 'tsc'),
+  '-p',
+  'tsconfig.shared.json'
+]);
+
 await runLogged('electron-tsc-build', process.execPath, [
   nodeModuleScript('typescript', 'bin', 'tsc'),
   '-p',
   'tsconfig.electron.json'
+]);
+
+spawnLogged('shared-tsc', process.execPath, [
+  nodeModuleScript('typescript', 'bin', 'tsc'),
+  '-p',
+  'tsconfig.shared.json',
+  '--watch',
+  '--preserveWatchOutput'
 ]);
 
 spawnLogged('electron-tsc', process.execPath, [

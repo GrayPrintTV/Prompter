@@ -1,6 +1,6 @@
 # Prompter shared protocol
 
-This directory is the language-neutral boundary between the authoritative Windows Prompter session and future native clients. JSON Schema is the source of truth. The schemas describe messages only; this phase does not provide a transport, listener, pairing implementation, or cryptography.
+This directory is the language-neutral boundary between the authoritative Windows Prompter session and future native clients. JSON Schema is the source of truth. Electron main now validates these shapes for the manually enabled trusted-LAN prototype.
 
 ## Versioning
 
@@ -19,8 +19,7 @@ The future Android implementation may generate or implement `kotlinx.serializati
 - `session-snapshot.schema.json`: complete authoritative recovery state.
 - `transcript-event.schema.json`: provider-neutral transcript evidence and resulting position.
 - `movement-event.schema.json`: semantic movement anchors.
-- `audio-control.schema.json`: stream start/stop/gap control and reserved binary-frame metadata.
-- `pairing-auth.schema.json`: message-shape placeholders only. No authentication is implemented here.
+- `audio-control.schema.json`: stream start/stop/gap control and metadata associated with PCM16 binary frames.
+- `pairing-auth.schema.json`: pairing and connection-challenge authentication payloads.
 
-Before broader distribution, the future transport is expected to use explicit Windows approval, random per-device credentials, challenge authentication on connection establishment, ordinary WebSocket ordering plus sequence/revision checks, and certificate-pinned WSS. Custom per-frame cryptography is explicitly outside this protocol foundation.
-
+The prototype uses explicit Windows approval, random per-device credentials, challenge authentication on connection establishment, and ordinary WebSocket ordering plus sequence/revision checks. It deliberately uses cleartext `ws` only on a trusted private LAN. Certificate-pinned WSS is required before broader distribution. Custom per-frame cryptography remains explicitly outside this protocol.

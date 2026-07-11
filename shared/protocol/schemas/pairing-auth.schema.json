@@ -11,10 +11,26 @@
     },
     "deviceId": { "$ref": "common.schema.json#/$defs/identifier" },
     "deviceName": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "model": { "type": "string", "minLength": 1, "maxLength": 160 },
     "requestId": { "$ref": "common.schema.json#/$defs/identifier" },
+    "pairingCode": { "type": "string", "pattern": "^[0-9]{6}$" },
     "credential": { "type": "string", "minLength": 1 },
     "challenge": { "type": "string", "minLength": 1 },
     "proof": { "type": "string", "minLength": 1 },
+    "clientNonce": { "type": "string", "minLength": 1 },
+    "timestampMs": { "type": "integer", "minimum": 0 },
+    "protocolMajor": { "type": "integer", "minimum": 0 },
+    "protocolMinor": { "type": "integer", "minimum": 0 },
     "reason": { "type": "string", "minLength": 1, "maxLength": 500 }
-  }
+  },
+  "allOf": [
+    { "if": { "properties": { "action": { "const": "pairRequest" } } }, "then": {
+      "properties": { "requestId": {}, "deviceId": {}, "deviceName": {}, "protocolMajor": {}, "protocolMinor": {} },
+      "required": ["requestId", "deviceId", "deviceName", "protocolMajor", "protocolMinor"]
+    } },
+    { "if": { "properties": { "action": { "const": "authenticate" } } }, "then": {
+      "properties": { "deviceId": {}, "clientNonce": {}, "timestampMs": {}, "proof": {}, "protocolMajor": {}, "protocolMinor": {} },
+      "required": ["deviceId", "clientNonce", "timestampMs", "proof", "protocolMajor", "protocolMinor"]
+    } }
+  ]
 }

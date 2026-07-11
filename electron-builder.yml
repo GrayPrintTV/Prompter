@@ -10,6 +10,20 @@ files:
   - dist/**/*
   - dist-electron/**/*.js
   - dist-electron/**/*.cjs
+  - dist-shared/**/*.js
+  - node_modules/ws/**/*
+  - node_modules/@homebridge/ciao/**/*
+  - node_modules/ajv/**/*
+  - node_modules/debug/**/*
+  - node_modules/fast-deep-equal/**/*
+  - node_modules/fast-uri/**/*
+  - node_modules/json-schema-traverse/**/*
+  - node_modules/require-from-string/**/*
+  - node_modules/source-map-support/**/*
+  - node_modules/source-map/**/*
+  - node_modules/buffer-from/**/*
+  - node_modules/ms/**/*
+  - node_modules/tslib/**/*
   - node_modules/@napi-rs/canvas/**/*
   - node_modules/@napi-rs/canvas-win32-x64-msvc/**/*
   - node_modules/@xmldom/xmldom/**/*
@@ -50,6 +64,10 @@ files:
   - '!**/test/**'
   - '!**/tests/**'
 extraResources:
+  - from: shared/protocol/schemas
+    to: protocol-schemas
+    filter:
+      - '*.json'
   - from: build/whisper-sidecar/dist/whisper-sidecar
     to: whisper-sidecar
     filter:

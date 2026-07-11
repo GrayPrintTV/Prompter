@@ -5,11 +5,14 @@
   "productName": "Prompter",
   "description": "Windows desktop narration prompter for audiobook and voiceover work.",
   "type": "module",
+  "imports": {
+    "#prompter-shared/*": "./dist-shared/*"
+  },
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "clean:electron": "node scripts/clean-electron-build.mjs",
-    "build": "npm run clean:electron && tsc -b tsconfig.app.json tsconfig.electron.json && vite build",
+    "build": "npm run clean:electron && tsc -p tsconfig.shared.json && tsc -b tsconfig.app.json tsconfig.electron.json && vite build",
     "build:whisper-sidecar": "node scripts/build-whisper-sidecar.mjs",
     "stage:whisper-model": "node scripts/stage-whisper-model.mjs",
     "prepare:self-contained": "npm run build:whisper-sidecar && npm run stage:whisper-model",
@@ -29,17 +32,20 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@homebridge/ciao": "^1.3.10",
+    "ajv": "^8.20.0",
     "mammoth": "^1.12.0",
     "pdfjs-dist": "4.10.38",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "ws": "^8.21.0"
   },
   "devDependencies": {
     "@types/node": "^20.14.15",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
+    "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^4.3.1",
-    "ajv": "^8.20.0",
     "electron": "^30.0.0",
     "electron-builder": "^26.15.3",
     "jsdom": "^24.1.1",

@@ -76,6 +76,19 @@ try {
     startLocalWhisper: (settings: unknown) => ipcRenderer.invoke('local-whisper:start', settings),
     stopLocalWhisper: () => ipcRenderer.invoke('local-whisper:stop'),
     transcribeLocalWhisperChunk: (payload: unknown) => ipcRenderer.invoke('local-whisper:transcribeChunk', payload),
+    syncServerSession: (payload: unknown) => ipcRenderer.invoke('tablet-server:syncSession', payload),
+    getServerStatus: () => ipcRenderer.invoke('tablet-server:getStatus'),
+    getServerDiagnostics: () => ipcRenderer.invoke('tablet-server:getDiagnostics'),
+    onServerStatus: (callback: (status: unknown) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, status: unknown) => callback(status);
+      ipcRenderer.on('tablet-server:status', listener);
+      return () => ipcRenderer.removeListener('tablet-server:status', listener);
+    },
+    onServerSessionState: (callback: (update: unknown) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, update: unknown) => callback(update);
+      ipcRenderer.on('tablet-server:sessionState', listener);
+      return () => ipcRenderer.removeListener('tablet-server:sessionState', listener);
+    },
     onLocalWhisperStatus: (callback: (status: unknown) => void) => {
       const listener = (_event: Electron.IpcRendererEvent, status: unknown) => callback(status);
       ipcRenderer.on('local-whisper:status', listener);
