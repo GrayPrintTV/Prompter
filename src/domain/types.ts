@@ -275,6 +275,12 @@ export type ElectronBridgeDiagnostics = {
   preloadDiagnosticExposed: boolean | null;
   preloadDiagnosticErrorMessage: string | null;
   preloadDiagnosticErrorStack: string | null;
+  localWhisperSidecarExecutablePath: string | null;
+  localWhisperSidecarScriptPath: string | null;
+  localWhisperModelPath: string | null;
+  localWhisperSidecarWorkingDirectory: string | null;
+  localWhisperUsesBundledSidecar: boolean | null;
+  localWhisperSidecarProcessId: number | null;
 };
 
 export type PreloadExposeDiagnostics = {

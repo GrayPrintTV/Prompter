@@ -2,7 +2,10 @@ node_modules/
 dist/
 dist-electron/
 out/
+build/
+release/
 .vite/
+*.tsbuildinfo
 .env
 .env.*
 !.env.example

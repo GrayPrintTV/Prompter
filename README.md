@@ -48,6 +48,18 @@ npm run build
 npm start
 ```
 
+## Package an unpacked Windows build
+
+```powershell
+npm run package:dir
+npm run package:self-contained
+npm run package:portable
+```
+
+`package:dir` creates an unpacked x64 production build under `release/win-unpacked`. It first builds the PyInstaller Local Whisper sidecar and stages the cached `base.en` model into ignored build output so the unpacked app can run Local Whisper without Python or a Hugging Face cache.
+
+`package:self-contained` runs `package:dir`, validates the packaged sidecar/model resources, and runs the sidecar JSONL smoke test. `package:portable` creates `release/Prompter-win-unpacked.zip` from that unpacked directory. The installer command is reserved as `npm run package:win` for a later packaging pass.
+
 ## Daily UI and Developer mode
 
 Fresh sessions open with Developer mode off. The normal Controls area is meant for narration work: project title, compact Listening status, Start Listening / Stop Listening, Local Whisper or Manual provider selection, manuscript import/editing, sentence/paragraph navigation, Resync, font size, text width, Focus Bar position/height, theme, always-on-top, and Assist Scroll on/off plus speed.
@@ -74,7 +86,7 @@ When enabled, it appears in Developer mode as `Live OpenAI Realtime (Experimenta
 
 ## Local Whisper transcription
 
-Local Whisper is the intended live provider and runs through this repo's Python sidecar, not the separate audiobook proofing tool. It captures microphone audio as local PCM, encodes short WAV chunks in the renderer, sends them to Electron main, and Electron main sends temporary `.wav` files to `python/local_whisper_sidecar.py`. The sidecar uses faster-whisper and returns transcript chunks in the same `TranscriptDelta` shape used by Manual and Mock.
+Local Whisper is the intended live provider and runs through this repo's sidecar, not the separate audiobook proofing tool. It captures microphone audio as local PCM, encodes short WAV chunks in the renderer, sends them to Electron main, and Electron main sends temporary `.wav` files to the sidecar. In development, Electron launches `python/local_whisper_sidecar.py` through the configured Python executable. In packaged builds, Electron launches the bundled `resources/whisper-sidecar/whisper-sidecar.exe` and passes the bundled model path under `resources/models/base.en` with local-only loading. The sidecar uses faster-whisper and returns transcript chunks in the same `TranscriptDelta` shape used by Manual and Mock.
 
 The Local Whisper defaults are tuned for conservative CPU live following:
 
@@ -86,11 +98,13 @@ The Local Whisper defaults are tuned for conservative CPU live following:
 
 Live testing has generally favored `base.en / cpu / int8 / 2s` over `turbo` or `tiny.en` for this near-live prompter use.
 
-Install sidecar dependencies in a Python environment:
+Install development sidecar dependencies in a Python environment:
 
 ```powershell
 python -m pip install -r python/requirements.txt
 ```
+
+The self-contained packaging pass is locked by `python/requirements-whisper-lock.txt` and expects the working project virtual environment at `.venv\Scripts\python.exe` unless `LOCAL_WHISPER_BUILD_PYTHON` is set. The packaged app ignores `LOCAL_WHISPER_PYTHON_EXECUTABLE` during normal use and always uses the bundled sidecar.
 
 Fresh sessions default to `Local Whisper` in the provider dropdown when the Python path and model name are present. Developer mode contains the Local Whisper settings panel for adjusting the Python path, model, device, compute type, and chunk duration. A little chunk latency is expected; the aligner only needs enough recognized words every sentence or two.
 
@@ -104,6 +118,12 @@ The sidecar distinguishes process startup from model readiness. `Process started
 
 ```powershell
 $env:LOCAL_WHISPER_MODEL_READY_TIMEOUT_MS = "240000"
+```
+
+For development diagnostics, the Python executable can also be overridden without changing saved UI settings:
+
+```powershell
+$env:LOCAL_WHISPER_PYTHON_EXECUTABLE = "C:\Path\To\python.exe"
 ```
 
 Run the Local Whisper sidecar self-test without Electron:

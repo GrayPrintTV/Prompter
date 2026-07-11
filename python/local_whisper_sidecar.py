@@ -47,22 +47,55 @@ def header_signature(audio_path: Path) -> str:
     return " ".join(f"{byte:02X}" for byte in data[:8])
 
 
-def load_model(model_name: str, device: str, compute_type: str) -> None:
+def required_model_files(model_path: Path) -> list[str]:
+    return [
+        name
+        for name in ["config.json", "model.bin", "tokenizer.json", "vocabulary.txt"]
+        if not (model_path / name).is_file()
+    ]
+
+
+def load_model(
+    model_name: str,
+    device: str,
+    compute_type: str,
+    model_path: str | None = None,
+    local_files_only: bool = False,
+) -> None:
     global model, model_config
     if IMPORT_ERROR is not None:
         raise RuntimeError(f"faster-whisper is not installed: {IMPORT_ERROR}")
+
+    model_source = model_name
+    normalized_model_path = ""
+    if model_path:
+        resolved_model_path = Path(model_path).resolve()
+        missing = required_model_files(resolved_model_path)
+        if missing:
+            raise FileNotFoundError(
+                f"Local Whisper model path is incomplete: {resolved_model_path}; missing {', '.join(missing)}"
+            )
+        model_source = str(resolved_model_path)
+        normalized_model_path = model_source
 
     requested = {
         "modelName": model_name,
         "device": device,
         "computeType": compute_type,
+        "modelPath": normalized_model_path,
+        "localFilesOnly": "true" if local_files_only else "false",
     }
     if model is not None and model_config == requested:
         emit({"type": "model-loaded", **requested})
         return
 
     emit({"type": "model-loading", **requested})
-    model = WhisperModel(model_name, device=device, compute_type=compute_type)
+    model = WhisperModel(
+        model_source,
+        device=device,
+        compute_type=compute_type,
+        local_files_only=local_files_only,
+    )
     model_config = requested
     emit({"type": "model-loaded", **requested})
 
@@ -72,6 +105,8 @@ def configure(command: dict[str, Any]) -> None:
         str(command.get("modelName") or "turbo"),
         str(command.get("device") or "cpu"),
         str(command.get("computeType") or "int8"),
+        str(command.get("modelPath") or "") or None,
+        bool(command.get("localFilesOnly")),
     )
 
 
@@ -175,8 +210,10 @@ def run_self_test(args: argparse.Namespace) -> int:
         "python": sys.executable,
         "fasterWhisperImport": IMPORT_ERROR is None,
         "modelName": args.model,
+        "modelPath": args.model_path,
         "device": args.device,
         "computeType": args.compute_type,
+        "localFilesOnly": bool(args.local_files_only),
         "modelLoaded": False,
         "wavDecoded": False,
         "transcriptText": "",
@@ -188,7 +225,7 @@ def run_self_test(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        load_model(args.model, args.device, args.compute_type)
+        load_model(args.model, args.device, args.compute_type, args.model_path or None, args.local_files_only)
         result["modelLoaded"] = True
         with tempfile.TemporaryDirectory(prefix="narration-prompter-sidecar-test-") as temp_dir:
             audio_path = Path(temp_dir) / "self-test.wav"
@@ -218,8 +255,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Local Whisper sidecar for Narration Prompter.")
     parser.add_argument("--self-test", action="store_true", help="Run import/model/WAV decode self-test and exit.")
     parser.add_argument("--model", default="turbo", help="faster-whisper model name for --self-test.")
+    parser.add_argument("--model-path", default="", help="Local faster-whisper model directory for --self-test.")
     parser.add_argument("--device", default="cpu", help="faster-whisper device for --self-test.")
     parser.add_argument("--compute-type", default="int8", help="faster-whisper compute type for --self-test.")
+    parser.add_argument("--local-files-only", action="store_true", help="Require local model files for --self-test.")
     return parser.parse_args(argv)
 
 

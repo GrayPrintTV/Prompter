@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, screen } from 'electron';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,9 +11,24 @@ import {
   validateOpenAiRealtimeSdpOffer
 } from './openAiRealtimeSession.js';
 import { importManuscriptFile } from './manuscriptImport.js';
+import {
+  REQUIRED_WHISPER_MODEL_FILES,
+  devEnvFileRoots,
+  isPathLikeExecutable,
+  localWhisperSpawnErrorMessage,
+  missingBundledModelMessage,
+  missingBundledSidecarMessage,
+  missingPythonExecutableMessage,
+  missingSidecarMessage,
+  resolveLocalWhisperLaunchPlan,
+  resolveRendererIndexPath,
+  type LocalWhisperLaunchPlan,
+  type RuntimePathContext
+} from './runtimePaths.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
+const APP_ID = 'com.narrationprompter.prompter';
+const isDev = !app.isPackaged && Boolean(process.env.VITE_DEV_SERVER_URL);
 
 let mainWindow: BrowserWindow | null = null;
 let lastKnownWindowMaximized = false;
@@ -27,10 +42,17 @@ type OpenAiRealtimeConfig = {
 
 const DEFAULT_TRANSCRIPTION_MODEL = 'gpt-realtime-whisper';
 const DEFAULT_WEBRTC_URL = 'https://api.openai.com/v1/realtime/calls';
-const LOCAL_WHISPER_SIDECAR = path.join(__dirname, '..', 'python', 'local_whisper_sidecar.py');
 const DEFAULT_PROCESS_READY_TIMEOUT_MS = 30000;
 const DEFAULT_MODEL_READY_TIMEOUT_MS = 180000;
 const WINDOW_STATE_FILE = 'window-state.json';
+const APP_LOG_FILE = 'prompter-main.log';
+const DEFAULT_LOCAL_WHISPER_SETTINGS: LocalWhisperSettings = {
+  pythonExecutablePath: 'python',
+  modelName: 'base.en',
+  device: 'cpu',
+  computeType: 'int8',
+  chunkDurationSeconds: 2
+};
 const PROVIDER_STATUS_TEXT = new Set([
   'sidecar is running',
   'local whisper sidecar is running',
@@ -39,6 +61,8 @@ const PROVIDER_STATUS_TEXT = new Set([
   'process started',
   'ready'
 ]);
+
+app.setAppUserModelId(APP_ID);
 
 type LocalWhisperSettings = {
   pythonExecutablePath: string;
@@ -137,6 +161,12 @@ type LocalWhisperStatus = {
     preloadDiagnosticExposed: boolean | null;
     preloadDiagnosticErrorMessage: string | null;
     preloadDiagnosticErrorStack: string | null;
+    localWhisperSidecarExecutablePath: string | null;
+    localWhisperSidecarScriptPath: string | null;
+    localWhisperModelPath: string | null;
+    localWhisperSidecarWorkingDirectory: string | null;
+    localWhisperUsesBundledSidecar: boolean | null;
+    localWhisperSidecarProcessId: number | null;
   };
 };
 
@@ -167,6 +197,12 @@ type MainRuntimeDiagnostics = {
   preloadDiagnosticExposed: boolean | null;
   preloadDiagnosticErrorMessage: string | null;
   preloadDiagnosticErrorStack: string | null;
+  localWhisperSidecarExecutablePath: string | null;
+  localWhisperSidecarScriptPath: string | null;
+  localWhisperModelPath: string | null;
+  localWhisperSidecarWorkingDirectory: string | null;
+  localWhisperUsesBundledSidecar: boolean | null;
+  localWhisperSidecarProcessId: number | null;
 };
 
 type PendingWhisperRequest = {
@@ -267,7 +303,13 @@ let localWhisperStatus: LocalWhisperStatus = {
     preloadDiagnosticStarted: null,
     preloadDiagnosticExposed: null,
     preloadDiagnosticErrorMessage: null,
-    preloadDiagnosticErrorStack: null
+    preloadDiagnosticErrorStack: null,
+    localWhisperSidecarExecutablePath: null,
+    localWhisperSidecarScriptPath: null,
+    localWhisperModelPath: null,
+    localWhisperSidecarWorkingDirectory: null,
+    localWhisperUsesBundledSidecar: null,
+    localWhisperSidecarProcessId: null
   }
 };
 
@@ -304,6 +346,91 @@ function audioHeaderSignature(buffer: Buffer) {
     .join(' ');
 }
 
+function runtimePathContext(): RuntimePathContext {
+  return {
+    isPackaged: app.isPackaged,
+    appPath: safeString(() => app.getAppPath()),
+    mainDirname: __dirname,
+    resourcesPath: process.resourcesPath,
+    env: process.env
+  };
+}
+
+function localWhisperLaunchPlan(settings: LocalWhisperSettings = localWhisperSettings ?? DEFAULT_LOCAL_WHISPER_SETTINGS) {
+  return resolveLocalWhisperLaunchPlan(
+    runtimePathContext(),
+    settings.pythonExecutablePath,
+    settings.modelName,
+    app.getPath('userData'),
+    process.env
+  );
+}
+
+function localWhisperRuntimeDiagnostics() {
+  try {
+    const plan = localWhisperLaunchPlan();
+    return {
+      localWhisperSidecarExecutablePath: plan.executablePath,
+      localWhisperSidecarScriptPath: plan.scriptPath,
+      localWhisperModelPath: plan.modelPath,
+      localWhisperSidecarWorkingDirectory: plan.workingDirectory,
+      localWhisperUsesBundledSidecar: plan.bundled,
+      localWhisperSidecarProcessId: localWhisperProcess?.pid ?? null
+    };
+  } catch {
+    return {
+      localWhisperSidecarExecutablePath: null,
+      localWhisperSidecarScriptPath: null,
+      localWhisperModelPath: null,
+      localWhisperSidecarWorkingDirectory: null,
+      localWhisperUsesBundledSidecar: null,
+      localWhisperSidecarProcessId: null
+    };
+  }
+}
+
+function appendDiagnosticLog(event: string, data: Record<string, unknown>) {
+  try {
+    const logDir = path.join(app.getPath('userData'), 'logs');
+    mkdirSync(logDir, { recursive: true });
+    appendFileSync(
+      path.join(logDir, APP_LOG_FILE),
+      `${JSON.stringify({ timestamp: new Date().toISOString(), event, ...data })}\n`,
+      'utf8'
+    );
+  } catch (error) {
+    console.warn('[main] failed to write diagnostic log', error);
+  }
+}
+
+function missingRequiredWhisperModelFiles(modelPath: string) {
+  return REQUIRED_WHISPER_MODEL_FILES.filter((fileName) => !existsSync(path.join(modelPath, fileName)));
+}
+
+function validateLocalWhisperLaunchPlan(plan: LocalWhisperLaunchPlan) {
+  if (plan.bundled) {
+    if (!existsSync(plan.executablePath)) {
+      throw new Error(missingBundledSidecarMessage(plan.executablePath));
+    }
+    const modelPath = plan.modelPath ?? '';
+    const missingModelFiles = modelPath ? missingRequiredWhisperModelFiles(modelPath) : [...REQUIRED_WHISPER_MODEL_FILES];
+    if (!modelPath || missingModelFiles.length > 0) {
+      throw new Error(missingBundledModelMessage(modelPath || '(not resolved)', missingModelFiles));
+    }
+    return;
+  }
+
+  if (!plan.executablePath || !plan.modelName.trim()) {
+    throw new Error('Local Whisper is not configured. Set Python executable and model name.');
+  }
+  if (!plan.scriptPath || !existsSync(plan.scriptPath)) {
+    throw new Error(missingSidecarMessage(plan.scriptPath ?? '(not resolved)'));
+  }
+  if (isPathLikeExecutable(plan.executablePath) && !existsSync(plan.executablePath)) {
+    throw new Error(missingPythonExecutableMessage(plan.executablePath));
+  }
+}
+
 function runtimeDiagnostics(preloadPath: string): MainRuntimeDiagnostics {
   return {
     appPath: safeString(() => app.getAppPath()),
@@ -312,13 +439,14 @@ function runtimeDiagnostics(preloadPath: string): MainRuntimeDiagnostics {
     preloadPath,
     preloadExists: existsSync(preloadPath),
     isDev,
-    viteDevServerUrl: process.env.VITE_DEV_SERVER_URL ?? null,
+    viteDevServerUrl: isDev ? process.env.VITE_DEV_SERVER_URL ?? null : null,
     preloadErrorMessage: latestPreloadError?.message ?? null,
     preloadErrorStack: latestPreloadError?.stack ?? null,
     preloadDiagnosticStarted: latestPreloadDiagnostics?.started ?? null,
     preloadDiagnosticExposed: latestPreloadDiagnostics?.exposed ?? null,
     preloadDiagnosticErrorMessage: latestPreloadDiagnostics?.errorMessage ?? null,
-    preloadDiagnosticErrorStack: latestPreloadDiagnostics?.errorStack ?? null
+    preloadDiagnosticErrorStack: latestPreloadDiagnostics?.errorStack ?? null,
+    ...localWhisperRuntimeDiagnostics()
   };
 }
 
@@ -383,8 +511,7 @@ function parseEnvFile(filePath: string) {
 }
 
 function loadLocalEnv() {
-  const roots = Array.from(new Set([process.cwd(), app.getAppPath()]));
-  for (const root of roots) {
+  for (const root of devEnvFileRoots(runtimePathContext())) {
     parseEnvFile(path.join(root, '.env.local'));
     parseEnvFile(path.join(root, '.env'));
   }
@@ -467,11 +594,33 @@ function openAiFetchErrorDetails(error: unknown, prompt?: string) {
 }
 
 function localWhisperConfigured(settings: LocalWhisperSettings) {
-  return Boolean(settings.pythonExecutablePath.trim() && settings.modelName.trim());
+  return app.isPackaged || Boolean(settings.pythonExecutablePath.trim() && settings.modelName.trim());
 }
 
-function localWhisperSettingsKey(settings: LocalWhisperSettings) {
-  return `${settings.modelName}\n${settings.device}\n${settings.computeType}`;
+function localWhisperConfigKey(
+  modelName: string,
+  device: string,
+  computeType: string,
+  modelPath: string | null = null,
+  localFilesOnly = false
+) {
+  return [
+    modelName.trim(),
+    device.trim(),
+    computeType.trim(),
+    modelPath ?? '',
+    localFilesOnly ? 'true' : 'false'
+  ].join('\n');
+}
+
+function localWhisperSettingsKey(settings: LocalWhisperSettings, plan: LocalWhisperLaunchPlan) {
+  return localWhisperConfigKey(
+    plan.modelName || settings.modelName,
+    settings.device,
+    settings.computeType,
+    plan.modelPath,
+    plan.localFilesOnly
+  );
 }
 
 function patchLocalWhisperStatus(patch: Partial<LocalWhisperStatus>) {
@@ -504,11 +653,6 @@ function localWhisperTranscriptHistoryItem(text: string) {
     timestampMs: Date.now(),
     source: 'local-whisper' as const
   };
-}
-
-function sidecarPath() {
-  const devPath = path.join(process.cwd(), 'python', 'local_whisper_sidecar.py');
-  return existsSync(devPath) ? devPath : LOCAL_WHISPER_SIDECAR;
 }
 
 function sendLocalWhisperCommand(command: Record<string, unknown>) {
@@ -620,11 +764,15 @@ function handleLocalWhisperMessage(message: Record<string, unknown>) {
     return;
   }
   if (messageType === 'model-loaded') {
-    localWhisperModelConfigKey = [
+    const localFilesOnly =
+      message.localFilesOnly === true || String(message.localFilesOnly ?? '').toLowerCase() === 'true';
+    localWhisperModelConfigKey = localWhisperConfigKey(
       String(message.modelName ?? localWhisperSettings?.modelName ?? ''),
       String(message.device ?? localWhisperSettings?.device ?? ''),
-      String(message.computeType ?? localWhisperSettings?.computeType ?? '')
-    ].join('\n');
+      String(message.computeType ?? localWhisperSettings?.computeType ?? ''),
+      String(message.modelPath ?? '') || null,
+      localFilesOnly
+    );
     resolveModelReadyWaiters();
     patchLocalWhisperStatus({ modelPhase: 'ready', status: 'listening', sidecarRunning: true });
     return;
@@ -774,13 +922,12 @@ function handleLocalWhisperStdout(chunk: Buffer) {
 
 async function startLocalWhisperSidecar(settings: LocalWhisperSettings) {
   localWhisperSettings = settings;
-  const requestedModelKey = localWhisperSettingsKey(settings);
+  const launchPlan = localWhisperLaunchPlan(settings);
+  const requestedModelKey = localWhisperSettingsKey(settings, launchPlan);
   if (localWhisperModelConfigKey && localWhisperModelConfigKey !== requestedModelKey) {
     localWhisperModelReady = false;
   }
-  if (!localWhisperConfigured(settings)) {
-    throw new Error('Local Whisper is not configured. Set Python executable and model name.');
-  }
+  validateLocalWhisperLaunchPlan(launchPlan);
 
   if (!localWhisperProcess) {
     localWhisperBuffer = '';
@@ -805,9 +952,21 @@ async function startLocalWhisperSidecar(settings: LocalWhisperSettings) {
         // new latency/stale/silence/rt fields carried via spread
       }
     });
+    mkdirSync(launchPlan.workingDirectory, { recursive: true });
     const processReady = waitForProcessReady();
-    localWhisperProcess = spawn(settings.pythonExecutablePath, [sidecarPath()], {
-      cwd: process.cwd(),
+    appendDiagnosticLog('local-whisper-spawn', {
+      executablePath: launchPlan.executablePath,
+      args: launchPlan.args,
+      scriptPath: launchPlan.scriptPath,
+      modelName: launchPlan.modelName,
+      modelPath: launchPlan.modelPath,
+      localFilesOnly: launchPlan.localFilesOnly,
+      bundled: launchPlan.bundled,
+      workingDirectory: launchPlan.workingDirectory
+    });
+    localWhisperProcess = spawn(launchPlan.executablePath, launchPlan.args, {
+      cwd: launchPlan.workingDirectory,
+      stdio: 'pipe',
       windowsHide: true
     });
     const thisProc = localWhisperProcess;
@@ -819,6 +978,10 @@ async function startLocalWhisperSidecar(settings: LocalWhisperSettings) {
       const message = String(chunk).trim();
       if (message) {
         const errorMessage = message.slice(0, 500);
+        appendDiagnosticLog('local-whisper-stderr', {
+          message: errorMessage,
+          bundled: launchPlan.bundled
+        });
         patchLocalWhisperStatus({
           errorMessage,
           chunk: {
@@ -828,7 +991,10 @@ async function startLocalWhisperSidecar(settings: LocalWhisperSettings) {
         });
       }
     });
-    thisProc.on('error', (error) => {
+    thisProc.on('error', (error: NodeJS.ErrnoException) => {
+      const spawnError = new Error(
+        localWhisperSpawnErrorMessage(error, launchPlan.executablePath, launchPlan.bundled)
+      );
       if (localWhisperProcess === thisProc) {
         localWhisperProcess = null;
       }
@@ -838,13 +1004,13 @@ async function startLocalWhisperSidecar(settings: LocalWhisperSettings) {
         modelPhase: 'error',
         listening: false,
         status: 'error',
-        errorMessage: error.message
+        errorMessage: spawnError.message
       });
-      rejectProcessReadyWaiters(error);
-      rejectModelReadyWaiters(error);
-      rejectPendingWhisperRequests(error);
+      rejectProcessReadyWaiters(spawnError);
+      rejectModelReadyWaiters(spawnError);
+      rejectPendingWhisperRequests(spawnError);
     });
-    thisProc.on('exit', () => {
+    thisProc.on('exit', (code, signal) => {
       if (localWhisperProcess === thisProc) {
         localWhisperProcess = null;
       }
@@ -853,6 +1019,12 @@ async function startLocalWhisperSidecar(settings: LocalWhisperSettings) {
       localWhisperModelConfigKey = '';
       const intentional = intentionallyStoppingGeneration === thisGen;
       intentionallyStoppingGeneration = null; // consumed by this proc's exit handler
+      appendDiagnosticLog('local-whisper-exit', {
+        code,
+        signal,
+        intentional,
+        bundled: launchPlan.bundled
+      });
       patchLocalWhisperStatus({
         sidecarRunning: false,
         modelPhase: 'stopped',
@@ -885,7 +1057,9 @@ async function startLocalWhisperSidecar(settings: LocalWhisperSettings) {
     try {
       sendLocalWhisperCommand({
         type: 'configure',
-        modelName: settings.modelName,
+        modelName: launchPlan.modelName,
+        modelPath: launchPlan.modelPath ?? undefined,
+        localFilesOnly: launchPlan.localFilesOnly,
         device: settings.device,
         computeType: settings.computeType
       });
@@ -1069,7 +1243,7 @@ function createMainWindow() {
   if (isDev && process.env.VITE_DEV_SERVER_URL) {
     mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
   } else {
-    mainWindow.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
+    mainWindow.loadFile(resolveRendererIndexPath(runtimePathContext()));
   }
 }
 
@@ -1331,6 +1505,7 @@ ipcMain.handle(
     settings: LocalWhisperSettings;
   }) => {
     await startLocalWhisperSidecar(payload.settings);
+    const launchPlan = localWhisperLaunchPlan(payload.settings);
     const tempDir = path.join(app.getPath('temp'), 'narration-prompter-local-whisper');
     await mkdir(tempDir, { recursive: true });
     const audioBuffer = Buffer.from(payload.audioData);
@@ -1360,7 +1535,9 @@ ipcMain.handle(
         headerSignature,
         sampleRate: payload.sampleRate,
         chunkDurationSeconds: payload.durationSeconds,
-        modelName: payload.settings.modelName,
+        modelName: launchPlan.modelName,
+        modelPath: launchPlan.modelPath ?? undefined,
+        localFilesOnly: launchPlan.localFilesOnly,
         device: payload.settings.device,
         computeType: payload.settings.computeType
       });

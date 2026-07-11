@@ -60,7 +60,13 @@ const BRIDGE_OK: ElectronBridgeDiagnostics = {
   preloadDiagnosticStarted: true,
   preloadDiagnosticExposed: true,
   preloadDiagnosticErrorMessage: null,
-  preloadDiagnosticErrorStack: null
+  preloadDiagnosticErrorStack: null,
+  localWhisperSidecarExecutablePath: 'C:\\dev\\Prompter\\.venv\\Scripts\\python.exe',
+  localWhisperSidecarScriptPath: 'C:\\dev\\Prompter\\python\\local_whisper_sidecar.py',
+  localWhisperModelPath: null,
+  localWhisperSidecarWorkingDirectory: 'C:\\Users\\Ada\\AppData\\Roaming\\Prompter\\local-whisper-sidecar',
+  localWhisperUsesBundledSidecar: false,
+  localWhisperSidecarProcessId: null
 };
 
 describe('ASR provider selection', () => {

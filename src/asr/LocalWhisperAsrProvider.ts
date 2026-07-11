@@ -210,7 +210,13 @@ function createDefaultBridgeDiagnostics(): ElectronBridgeDiagnostics {
     preloadDiagnosticStarted: null,
     preloadDiagnosticExposed: null,
     preloadDiagnosticErrorMessage: null,
-    preloadDiagnosticErrorStack: null
+    preloadDiagnosticErrorStack: null,
+    localWhisperSidecarExecutablePath: null,
+    localWhisperSidecarScriptPath: null,
+    localWhisperModelPath: null,
+    localWhisperSidecarWorkingDirectory: null,
+    localWhisperUsesBundledSidecar: null,
+    localWhisperSidecarProcessId: null
   };
 }
 
@@ -1081,6 +1087,12 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       preloadDiagnosticExposed: preloadDiagnostics?.exposed ?? null,
       preloadDiagnosticErrorMessage: preloadDiagnostics?.errorMessage ?? null,
       preloadDiagnosticErrorStack: preloadDiagnostics?.errorStack ?? null,
+      localWhisperSidecarExecutablePath: null,
+      localWhisperSidecarScriptPath: null,
+      localWhisperModelPath: null,
+      localWhisperSidecarWorkingDirectory: null,
+      localWhisperUsesBundledSidecar: null,
+      localWhisperSidecarProcessId: null,
       errorMessage: localWhisperBridgeAvailable
         ? preloadErrorMessage
         : preloadErrorMessage ?? 'Local Whisper bridge unavailable. Are you running inside Electron?'
