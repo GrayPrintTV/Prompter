@@ -40,4 +40,34 @@ describe('AudioIngress', () => {
     expect(ingress.diagnostics().queueDurationMs).toBeLessThanOrEqual(600);
     expect(ingress.diagnostics().framesDropped).toBeGreaterThan(0);
   });
+
+  it('associates audio with the authenticated connection and does not let an old close stop its replacement', async () => {
+    const ingress = new AudioIngress(() => undefined, () => true);
+    const metadata = {
+      streamId: 's1', sequence: 0, captureTimestampMs: 1, sampleRate: 16000 as const,
+      channels: 1 as const, encoding: 'pcm-s16le' as const, sampleCount: 3200
+    };
+
+    ingress.start('tablet', start, 'connection-a');
+    expect(ingress.metadataRejectionReason('tablet', metadata, 'connection-b')).toContain('stale connection generation');
+    await expect(ingress.accept('tablet', metadata, Buffer.alloc(6400), 'connection-b'))
+      .rejects.toThrow('stale connection generation');
+
+    ingress.start('tablet', start, 'connection-b');
+    ingress.stop('tablet', 's1', 'connection-a');
+    expect(ingress.metadataRejectionReason('tablet', metadata, 'connection-b')).toBeNull();
+    await expect(ingress.accept('tablet', metadata, Buffer.alloc(6400), 'connection-b')).resolves.toBeUndefined();
+  });
+
+  it('rejects metadata before stream registration and from stale stream ids', () => {
+    const ingress = new AudioIngress(() => undefined, () => true);
+    const metadata = {
+      streamId: 's1', sequence: 0, captureTimestampMs: 1, sampleRate: 16000 as const,
+      channels: 1 as const, encoding: 'pcm-s16le' as const, sampleCount: 3200
+    };
+    expect(ingress.metadataRejectionReason('tablet', metadata, 'connection-a')).toContain('no active audio stream');
+    ingress.start('tablet', start, 'connection-a');
+    expect(ingress.metadataRejectionReason('tablet', { ...metadata, streamId: 'old-stream' }, 'connection-a'))
+      .toContain('stale streamId');
+  });
 });

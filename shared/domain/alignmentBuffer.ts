@@ -7,7 +7,6 @@ const MAX_COMMITTED_TOKENS = 28;
 const MAX_PROVISIONAL_TOKENS = 18;
 const ANCHOR_CONFIDENCE = 0.3;
 const OFFSCRIPT_CLEAR_COUNT = 3;
-const ISOLATED_SINGLE_ANCHOR_WINDOW = 24;
 
 export type AlignmentBufferState = {
   committedTokens: string[];
@@ -25,6 +24,11 @@ export type AlignmentBufferDecision = {
   clearedProvisional: boolean;
   moveRecommended: boolean;
   retentionReason: string;
+  selectedCandidateStartTokenIndex: number;
+  selectedCandidateEndTokenIndex: number;
+  newDeltaMatchedWordCount: number;
+  newDeltaDistinctiveMatchedWordCount: number;
+  commitRejectedReason: string | null;
 };
 
 export function createAlignmentBufferState(): AlignmentBufferState {
@@ -39,11 +43,6 @@ function clampRecent(tokens: string[], maxTokens: number) {
   return tokens.slice(-maxTokens);
 }
 
-function hasDistinctiveMatch(result: AlignmentResult) {
-  const matchedTokens = transcriptToTokens(result.matchedText);
-  return matchedTokens.some((token) => token.length >= 4 && !COMMON_WORDS.has(token));
-}
-
 function isDistinctiveToken(token: string) {
   return token.length >= 4 && !COMMON_WORDS.has(token);
 }
@@ -52,28 +51,13 @@ function hasDistinctiveToken(tokens: string[]) {
   return tokens.some(isDistinctiveToken);
 }
 
-function isNearbyDeltaAnchor(deltaResult: AlignmentResult, currentTokenIndex: number) {
-  if (deltaResult.confidence < ANCHOR_CONFIDENCE || !hasDistinctiveMatch(deltaResult)) return false;
-
-  const distinctiveTokens = transcriptToTokens(deltaResult.matchedText).filter(isDistinctiveToken);
-  if (
-    distinctiveTokens.length === 1 &&
-    Math.abs(deltaResult.tokenIndex - currentTokenIndex) > ISOLATED_SINGLE_ANCHOR_WINDOW
-  ) {
-    return false;
-  }
-
-  return true;
-}
-
-function matchedDeltaContribution(deltaTokens: string[], result: AlignmentResult, deltaResult: AlignmentResult, currentTokenIndex: number) {
-  if (isNearbyDeltaAnchor(deltaResult, currentTokenIndex)) {
-    return transcriptToTokens(deltaResult.matchedText);
-  }
-
-  const matchedTokens = new Set(transcriptToTokens(result.matchedText));
-  const exactContribution = deltaTokens.filter((token) => matchedTokens.has(token));
-  return hasDistinctiveToken(exactContribution) ? exactContribution : [];
+function matchedDeltaContribution(candidateTokens: string[], deltaTokens: string[], result: AlignmentResult) {
+  const deltaStart = Math.max(0, candidateTokens.length - deltaTokens.length);
+  const indexes = result.diagnostics?.selectedTranscriptTokenIndexes ?? [];
+  return indexes
+    .filter((index) => index >= deltaStart && index < candidateTokens.length)
+    .map((index) => candidateTokens[index])
+    .filter(Boolean);
 }
 
 export function evaluateProvisionalAlignmentBuffer(
@@ -104,8 +88,14 @@ export function evaluateProvisionalAlignmentBuffer(
     maxTranscriptTokens: MAX_COMMITTED_TOKENS
   });
 
-  const retainedTokens = matchedDeltaContribution(deltaTokens, result, deltaResult, currentTokenIndex);
+  const retainedTokens = matchedDeltaContribution(candidateTokens, deltaTokens, result);
   const deltaHasAnchor = hasDistinctiveToken(retainedTokens);
+  const newDeltaMatchedWordCount = retainedTokens.length;
+  const newDeltaDistinctiveMatchedWordCount = retainedTokens.filter(isDistinctiveToken).length;
+  const selectedCandidateStartTokenIndex = result.diagnostics?.selectedCandidateStartTokenIndex ?? currentTokenIndex;
+  const selectedCandidateEndTokenIndex = result.diagnostics?.selectedCandidateEndTokenIndex ?? result.tokenIndex;
+  const metadata = { selectedCandidateStartTokenIndex, selectedCandidateEndTokenIndex, newDeltaMatchedWordCount, newDeltaDistinctiveMatchedWordCount };
+  const staleCandidateRejected = result.confidence >= HIGH_CONFIDENCE && !deltaHasAnchor;
 
   if (result.confidence >= HIGH_CONFIDENCE && deltaHasAnchor) {
     const committedTokens = clampRecent(transcriptToTokens(result.matchedText), MAX_COMMITTED_TOKENS);
@@ -123,7 +113,8 @@ export function evaluateProvisionalAlignmentBuffer(
       retainedTokens,
       clearedProvisional: state.provisionalTokens.length > 0,
       moveRecommended: true,
-      retentionReason: 'committed provisional context after high-confidence manuscript match'
+      retentionReason: 'committed provisional context after high-confidence manuscript match',
+      ...metadata, commitRejectedReason: null
     };
   }
 
@@ -148,7 +139,8 @@ export function evaluateProvisionalAlignmentBuffer(
       retainedTokens,
       clearedProvisional: false,
       moveRecommended: false,
-      retentionReason: `retained matched manuscript anchors: ${retainedTokens.join(' ')}`
+      retentionReason: `retained matched manuscript anchors: ${retainedTokens.join(' ')}`,
+      ...metadata, commitRejectedReason: null
     };
   }
 
@@ -169,7 +161,9 @@ export function evaluateProvisionalAlignmentBuffer(
     moveRecommended: false,
     retentionReason: clearedProvisional
       ? 'discarded off-script delta and cleared stale provisional anchors after repeated misses'
-      : 'discarded off-script delta from alignment context'
+      : 'discarded off-script delta from alignment context',
+    ...metadata,
+    commitRejectedReason: staleCandidateRejected ? 'selected candidate has no distinctive current-delta match' : null
   };
 }
 

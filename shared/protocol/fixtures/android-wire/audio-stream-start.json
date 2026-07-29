@@ -1,0 +1,1 @@
+{"protocolMajor":1,"protocolMinor":2,"type":"audioStreamStart","serverId":"server-wire","sessionId":"android-pending","connectionId":"android-wire","sequence":0,"sentAtMs":1700000000000,"payload":{"action":"start","streamId":"stream-wire","sampleRate":16000,"channels":1,"encoding":"pcm-s16le","sequenceStart":0,"captureTimestampMs":1700000000000,"frameDurationMs":200}}

@@ -1,0 +1,1 @@
+{"protocolMajor":1,"protocolMinor":2,"type":"pairRequest","serverId":"server-wire","sessionId":"android-pending","connectionId":"android-wire","sequence":0,"sentAtMs":1700000000000,"payload":{"action":"pairRequest","requestId":"request-wire","deviceId":"device-wire","deviceName":"Galaxy Tab A8","model":"SM-X200","pairingCode":"012345","protocolMajor":1,"protocolMinor":2}}

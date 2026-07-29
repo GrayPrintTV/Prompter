@@ -10,7 +10,8 @@ const Ajv2020 = Ajv2020Module as unknown as new (options: Record<string, unknown
 const SCHEMA_FILES = [
   'common.schema.json', 'envelope.schema.json', 'session-snapshot.schema.json',
   'transcript-event.schema.json', 'movement-event.schema.json', 'audio-control.schema.json',
-  'pairing-auth.schema.json'
+  'pairing-auth.schema.json', 'runtime-settings.schema.json', 'manual-reposition.schema.json',
+  'manual-follow-diagnostic.schema.json'
 ];
 
 export class ProtocolValidator {
@@ -23,6 +24,9 @@ export class ProtocolValidator {
       envelope: ajv.getSchema('https://prompter.local/schemas/envelope.schema.json')!,
       pairing: ajv.getSchema('https://prompter.local/schemas/pairing-auth.schema.json')!,
       audio: ajv.getSchema('https://prompter.local/schemas/audio-control.schema.json')!,
+      runtimeSettings: ajv.getSchema('https://prompter.local/schemas/runtime-settings.schema.json')!,
+      manualReposition: ajv.getSchema('https://prompter.local/schemas/manual-reposition.schema.json')!,
+      manualFollowDiagnostic: ajv.getSchema('https://prompter.local/schemas/manual-follow-diagnostic.schema.json')!,
       audioMetadata: ajv.getSchema('https://prompter.local/schemas/audio-control.schema.json#/$defs/binaryFrameMetadata')!
     };
   }

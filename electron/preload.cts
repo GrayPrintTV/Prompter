@@ -66,6 +66,7 @@ try {
     openTextFile: () => ipcRenderer.invoke('dialog:openTextFile'),
     toggleFullScreen: () => ipcRenderer.invoke('window:toggleFullScreen'),
     toggleAlwaysOnTop: () => ipcRenderer.invoke('window:toggleAlwaysOnTop'),
+    quitApp: () => ipcRenderer.invoke('app:quit'),
     getOpenAiRealtimeConfigStatus: () => ipcRenderer.invoke('openai-realtime:getConfigStatus'),
     exchangeOpenAiRealtimeSdp: (offerSdp: string) => {
       console.info('[preload] OpenAI Realtime SDP forwarding over IPC', safeSdpDiagnostics(offerSdp));
@@ -79,6 +80,17 @@ try {
     syncServerSession: (payload: unknown) => ipcRenderer.invoke('tablet-server:syncSession', payload),
     getServerStatus: () => ipcRenderer.invoke('tablet-server:getStatus'),
     getServerDiagnostics: () => ipcRenderer.invoke('tablet-server:getDiagnostics'),
+    prepareTablet: () => ipcRenderer.invoke('tablet-server:prepare'),
+    getTabletLogEvents: () => ipcRenderer.invoke('tablet-log:getEvents'),
+    copyTabletLog: (events: unknown[]) => ipcRenderer.invoke('tablet-log:copy', events),
+    clearTabletLogView: () => ipcRenderer.invoke('tablet-log:clearView'),
+    openTabletLogFolder: () => ipcRenderer.invoke('tablet-log:openFolder'),
+    saveTabletDiagnosticBundle: () => ipcRenderer.invoke('tablet-log:saveBundle'),
+    onTabletLogEvent: (callback: (event: unknown) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, diagnostic: unknown) => callback(diagnostic);
+      ipcRenderer.on('tablet-log:event', listener);
+      return () => ipcRenderer.removeListener('tablet-log:event', listener);
+    },
     onServerStatus: (callback: (status: unknown) => void) => {
       const listener = (_event: Electron.IpcRendererEvent, status: unknown) => callback(status);
       ipcRenderer.on('tablet-server:status', listener);
@@ -88,6 +100,11 @@ try {
       const listener = (_event: Electron.IpcRendererEvent, update: unknown) => callback(update);
       ipcRenderer.on('tablet-server:sessionState', listener);
       return () => ipcRenderer.removeListener('tablet-server:sessionState', listener);
+    },
+    onTabletMode: (callback: (status: unknown) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, status: unknown) => callback(status);
+      ipcRenderer.on('tablet-server:mode', listener);
+      return () => ipcRenderer.removeListener('tablet-server:mode', listener);
     },
     onLocalWhisperStatus: (callback: (status: unknown) => void) => {
       const listener = (_event: Electron.IpcRendererEvent, status: unknown) => callback(status);

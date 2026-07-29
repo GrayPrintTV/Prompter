@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 64 64" role="img" aria-label="Prompter">
+  <rect x="3" y="3" width="58" height="58" rx="12" fill="#101820" stroke="#ffffff" stroke-width="4"/>
+  <path d="M19 48V16h16c8 0 13 5 13 12s-5 12-13 12h-8v8zm8-24v8h7c4 0 6-1 6-4s-2-4-6-4z" fill="#ffffff"/>
+  <path d="M45 13h6v6h-6z" fill="#80cbc4"/>
+</svg>

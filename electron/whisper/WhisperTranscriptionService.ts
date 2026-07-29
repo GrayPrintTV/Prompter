@@ -122,6 +122,8 @@ export class WhisperTranscriptionService {
   private readonly pending = new Map<string, PendingRequest>();
   private readonly processWaiters = new Set<ReadyWaiter>();
   private readonly modelWaiters = new Set<ReadyWaiter>();
+  private readonly finalizedProcesses = new WeakSet<object>();
+  private statusPublicationDisposed = false;
   private status = createInitialStatus();
 
   constructor(private readonly deps: WhisperServiceDependencies) {}
@@ -133,6 +135,13 @@ export class WhisperTranscriptionService {
       chunk: { ...this.status.chunk },
       transcriptHistory: [...this.status.transcriptHistory]
     };
+  }
+
+  /** Application shutdown may outlive the renderer. Keep sidecar cleanup/status state intact,
+   * but stop calling the external status sink once it has been disposed. */
+  disposeStatusPublication() {
+    if (this.statusPublicationDisposed) return;
+    this.statusPublicationDisposed = true;
   }
 
   getRuntimeDiagnostics(): WhisperRuntimeDiagnostics {
@@ -317,7 +326,7 @@ export class WhisperTranscriptionService {
       chunk: { ...this.status.chunk, ...patch.chunk },
       transcriptHistory: patch.transcriptHistory ?? this.status.transcriptHistory
     };
-    this.deps.publishStatus?.(this.getStatus());
+    if (!this.statusPublicationDisposed) this.deps.publishStatus?.(this.getStatus());
   }
 
   private send(command: Record<string, unknown>) {
@@ -453,6 +462,8 @@ export class WhisperTranscriptionService {
   }
 
   private handleProcessError(processInstance: ChildProcessWithoutNullStreams, error: NodeJS.ErrnoException, plan: LocalWhisperLaunchPlan) {
+    if (this.finalizedProcesses.has(processInstance)) return;
+    this.finalizedProcesses.add(processInstance);
     const spawnError = new Error(localWhisperSpawnErrorMessage(error, plan.executablePath, plan.bundled));
     if (this.process === processInstance) this.process = null;
     this.intentionallyStoppingGeneration = null;
@@ -461,6 +472,8 @@ export class WhisperTranscriptionService {
   }
 
   private handleProcessExit(processInstance: ChildProcessWithoutNullStreams, generation: number, code: number | null, signal: NodeJS.Signals | null, plan: LocalWhisperLaunchPlan) {
+    if (this.finalizedProcesses.has(processInstance)) return;
+    this.finalizedProcesses.add(processInstance);
     if (this.process === processInstance) this.process = null;
     this.processReady = false; this.modelReady = false; this.modelConfigKey = '';
     const intentional = this.intentionallyStoppingGeneration === generation;

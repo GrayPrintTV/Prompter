@@ -13,8 +13,10 @@ import type {
   RendererSessionSync,
   RendererSyncResult,
   ServerCoordinatorUpdate,
-  ServerStatusSummary
+  ServerStatusSummary,
+  TabletModeStatus
 } from '../shared/protocol/messages';
+import type { StructuredDiagnosticEvent } from '../shared/protocol/diagnostics';
 
 type ImportedManuscriptFile = {
   filePath: string;
@@ -40,6 +42,7 @@ declare global {
       openTextFile(): Promise<ImportedManuscriptFile | null>;
       toggleFullScreen(): Promise<boolean>;
       toggleAlwaysOnTop(): Promise<boolean>;
+      quitApp(): Promise<boolean>;
       getOpenAiRealtimeConfigStatus(): Promise<LiveAsrConfigStatus>;
       exchangeOpenAiRealtimeSdp(offerSdp: string): Promise<OpenAiRealtimeSdpAnswer>;
       getBridgeDiagnostics(): Promise<ElectronBridgeDiagnostics>;
@@ -59,8 +62,16 @@ declare global {
       syncServerSession(payload: RendererSessionSync): Promise<RendererSyncResult>;
       getServerStatus(): Promise<ServerStatusSummary | null>;
       getServerDiagnostics(): Promise<unknown>;
+      prepareTablet(): Promise<ServerStatusSummary>;
+      getTabletLogEvents(): Promise<StructuredDiagnosticEvent[]>;
+      copyTabletLog(events: StructuredDiagnosticEvent[]): Promise<void>;
+      clearTabletLogView(): Promise<void>;
+      openTabletLogFolder(): Promise<void>;
+      saveTabletDiagnosticBundle(): Promise<string | null>;
+      onTabletLogEvent(callback: (event: StructuredDiagnosticEvent) => void): () => void;
       onServerStatus(callback: (status: ServerStatusSummary) => void): () => void;
       onServerSessionState(callback: (update: ServerCoordinatorUpdate) => void): () => void;
+      onTabletMode(callback: (status: TabletModeStatus) => void): () => void;
       onLocalWhisperStatus(callback: (status: LocalWhisperStatus) => void): () => void;
     };
   }

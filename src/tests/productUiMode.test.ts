@@ -2,7 +2,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEFAULT_LOCAL_WHISPER_STATUS } from '../asr/LocalWhisperAsrProvider';
-import { ControlPanel } from '../components/ControlPanel';
+import { ControlPanel, getTabletProductStatus } from '../components/ControlPanel';
 import { buildManuscript } from '../domain/manuscript';
 import type {
   AlignmentBufferDebug,
@@ -16,6 +16,7 @@ import {
   DEFAULT_MOCK_SCRIPT,
   SAMPLE_MANUSCRIPT
 } from '../state/appStore';
+import type { ServerStatusSummary } from '../../shared/protocol/messages';
 
 const model = buildManuscript(SAMPLE_MANUSCRIPT);
 
@@ -158,22 +159,66 @@ function renderControlPanel(developerMode: boolean) {
       scrollAnimationStatus: null,
       movementDecision: null,
       movementDecisionHistory: [],
-      lastStartDiagnostic: null
+      lastStartDiagnostic: null,
+      tabletStatus: null,
+      onPrepareTablet: vi.fn(),
+      onQuitPrompter: vi.fn()
     })
   );
+}
+
+function tabletStatus(overrides: Partial<ServerStatusSummary> = {}): ServerStatusSummary {
+  return {
+    enabled: false,
+    state: 'off',
+    bindAddress: null,
+    port: 43127,
+    candidateAddresses: [],
+    advertisedServiceName: null,
+    pairingActive: false,
+    pairingCode: null,
+    pairingExpiresAtMs: null,
+    pairedDeviceCount: 0,
+    pairedDevices: [],
+    connectedDevices: [],
+    controllerDeviceId: null,
+    controllerDisplayName: null,
+    operatingMode: 'desktop',
+    manuscriptLoaded: true,
+    tabletNarrationActive: false,
+    tabletStartDescription: 'Start from current desktop position',
+    tabletResumeAvailable: true,
+    transcriptAuthority: 'desktop',
+    safeStorageAvailable: true,
+    credentialStorage: 'encrypted',
+    cleartextTransportWarning: '',
+    lastError: null,
+    ...overrides
+  };
 }
 
 describe('product UI mode', () => {
   beforeEach(() => localStorage.clear());
 
-  it('does not show movement diagnostics in normal controls by default', () => {
+  it('shows a narrator workflow and hides engineering controls by default', () => {
     const html = renderControlPanel(false);
 
     expect(html).toContain('Local Whisper ready');
-    expect(html).toContain('Developer');
+    expect(html).toContain('Open manuscript');
+    expect(html).toContain('Narration');
+    expect(html).toContain('>Start<');
+    expect(html).toContain('>Pause<');
+    expect(html).toContain('>Stop<');
+    expect(html).toContain('Tablet');
+    expect(html).toContain('Quit');
+    expect(html).toContain('Open Advanced');
     expect(html).not.toContain('Movement decision');
     expect(html).not.toContain('Mock Playback');
     expect(html).not.toContain('Live OpenAI Realtime');
+    expect(html).not.toContain('Start Mic Monitor');
+    expect(html).not.toContain('Bridge Diagnostics');
+    expect(html).not.toContain('protocol');
+    expect(html).not.toContain('socket');
   });
 
   it('shows developer diagnostics when developer mode is enabled', () => {
@@ -183,5 +228,28 @@ describe('product UI mode', () => {
     expect(html).toContain('Advanced Diagnostics');
     expect(html).toContain('Mock');
     expect(html).toContain('Live OpenAI Realtime');
+    expect(html).toContain('Leave Advanced');
+    expect(html).toContain('Start Mic Monitor');
+  });
+
+  it('uses simple tablet status language without exposing transport details', () => {
+    expect(getTabletProductStatus(tabletStatus()).label).toBe('Tablet is optional');
+    expect(getTabletProductStatus(tabletStatus({
+      enabled: true,
+      state: 'pairing',
+      pairingActive: true,
+      pairingCode: '427913'
+    }))).toMatchObject({
+      label: 'Ready to pair',
+      detail: 'Enter 427913 on the tablet.'
+    });
+    expect(getTabletProductStatus(tabletStatus({
+      enabled: true,
+      state: 'connected',
+      connectedDevices: [{ deviceId: 'tab-1', displayName: 'Studio Tablet', remoteAddress: '192.168.1.8' }]
+    }))).toMatchObject({
+      label: 'Tablet connected',
+      detail: 'Studio Tablet'
+    });
   });
 });

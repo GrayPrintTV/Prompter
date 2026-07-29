@@ -5,6 +5,9 @@ import type {
   SessionCoordinatorState,
   TranscriptSource
 } from '../session/SessionCoordinator.js';
+import type { RuntimeSettings } from './runtime-settings.js';
+
+export type { RuntimeSettings } from './runtime-settings.js';
 
 export type ProtocolEnvelope<T = Record<string, unknown>> = {
   protocolMajor: number;
@@ -16,6 +19,16 @@ export type ProtocolEnvelope<T = Record<string, unknown>> = {
   sequence: number;
   sentAtMs: number;
   payload: T;
+};
+
+export type BuildIdentityPayload = {
+  versionName?: string;
+  versionCode?: number;
+  buildTimestamp?: string;
+  gitHash?: string;
+  dirty?: boolean;
+  protocolMajor?: number;
+  protocolMinor?: number;
 };
 
 export type RendererSessionSync = {
@@ -53,6 +66,12 @@ export type ServerStatusSummary = {
   pairedDevices: Array<{ deviceId: string; displayName: string; model: string; lastConnectedAt: number | null }>;
   connectedDevices: Array<{ deviceId: string; displayName: string; remoteAddress: string }>;
   controllerDeviceId: string | null;
+  controllerDisplayName: string | null;
+  operatingMode: 'desktop' | 'tablet';
+  manuscriptLoaded: boolean;
+  tabletNarrationActive: boolean;
+  tabletStartDescription: string;
+  tabletResumeAvailable: boolean;
   transcriptAuthority: 'desktop' | 'tablet' | 'manual';
   safeStorageAvailable: boolean;
   credentialStorage: 'encrypted' | 'plaintext-fallback';
@@ -69,6 +88,7 @@ export type PairRequestPayload = {
   pairingCode?: string;
   protocolMajor: number;
   protocolMinor: number;
+  clientBuild?: BuildIdentityPayload;
 };
 
 export type AuthenticatePayload = {
@@ -79,6 +99,7 @@ export type AuthenticatePayload = {
   proof: string;
   protocolMajor: number;
   protocolMinor: number;
+  clientBuild?: BuildIdentityPayload;
 };
 
 export type AudioStreamStartPayload = {
@@ -103,6 +124,60 @@ export type AudioFrameMetadata = {
   flags?: number;
 };
 
+export type TabletManualRepositionPayload = {
+  action: 'manualReposition';
+  manuscriptRevision: number;
+  visibleTokenIndex: number;
+  visibleCharacter: number;
+  sentenceIndex: number;
+  paragraphIndex: number;
+  direction: 'backward' | 'forward' | 'stationary';
+  inputSource: 'touch' | 'pointer' | 'unknown';
+  scrollContainer: string;
+  detectedAtMs: number;
+};
+
+export type TabletManualRepositionResult = {
+  accepted: boolean;
+  reason: string;
+  manuscriptRevision: number;
+  visibleTokenIndex: number;
+  sessionRevision: number;
+};
+
+export type TabletManualRepositionStatus = {
+  status: 'holding' | 'reacquired';
+  anchorTokenIndex: number;
+  distanceTokens: number;
+};
+
+export type TabletManualFollowDiagnosticPayload = {
+  action: 'manualFollowDiagnostic';
+  timestampMs: number;
+  sequence: number;
+  level: 'debug' | 'info' | 'warn' | 'error';
+  event: string;
+  message: string;
+  details: Record<string, string>;
+};
+
+export type MovementEventPayload = {
+  sessionRevision: number;
+  manuscriptRevision: number;
+  confirmedTokenIndex: number;
+  targetTokenIndex: number;
+  targetCharacter: number;
+  sentenceIndex: number;
+  paragraphIndex: number;
+  confidence: number;
+  durationHintMs: number;
+  classification: string;
+  reason: string;
+  manualRepositionStatus?: TabletManualRepositionStatus['status'];
+  manualAnchorTokenIndex?: number;
+  manualAnchorDistanceTokens?: number;
+};
+
 export type TranscriptEventPayload = {
   sessionRevision: number;
   manuscriptRevision: number;
@@ -121,8 +196,18 @@ export type TranscriptEventPayload = {
   };
 };
 
+export type RuntimeSettingsPayload = RuntimeSettings;
+
 export type ServerCoordinatorUpdate = {
   origin: 'tablet';
-  deviceId: string;
+  deviceId: string | null;
   state: SessionCoordinatorState;
+  movementSuppressedOnDesktop: boolean;
+};
+
+export type TabletModeStatus = {
+  mode: 'desktop' | 'tablet';
+  deviceId: string | null;
+  deviceName: string | null;
+  reason: string;
 };

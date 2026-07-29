@@ -58,6 +58,9 @@ import {
   type SessionCoordinatorState,
   type VisibleReacquireAnchor
 } from './session/SessionCoordinator';
+import type { ServerStatusSummary, TabletModeStatus } from '../shared/protocol/messages';
+import { rendererProjectionForTabletUpdate } from './session/tabletAuthority';
+import type { ManualScrollInputSource } from './domain/manualFollow';
 
 function emptyAlignment(model: ManuscriptModel, tokenIndex: number): AlignmentResult {
   const sentenceIndex = findSentenceIndexForToken(model, tokenIndex);
@@ -201,6 +204,13 @@ export default function App() {
   );
   const [inputLevel, setInputLevel] = useState(0);
   const [sessionResetId, setSessionResetId] = useState(0);
+  const [tabletStatus, setTabletStatus] = useState<ServerStatusSummary | null>(null);
+  const [tabletModeStatus, setTabletModeStatus] = useState<TabletModeStatus>({
+    mode: 'desktop',
+    deviceId: null,
+    deviceName: null,
+    reason: 'No tablet controller lease'
+  });
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const prompterStageRef = useRef<HTMLDivElement | null>(null);
@@ -241,6 +251,7 @@ export default function App() {
   const micStartupGraceTimeoutRef = useRef<number | null>(null);
   const rendererSyncRevisionRef = useRef(0);
   const lastRendererSyncFingerprintRef = useRef('');
+  const tabletModeRef = useRef(false);
 
   useEffect(() => {
     if (shouldRunDisplaySettingsMigration) {
@@ -341,13 +352,21 @@ export default function App() {
     setMovementDecisionHistory(state.movementDecisionHistory);
   }, []);
 
+  const applyCoordinatorDiagnostics = useCallback((state: SessionCoordinatorState) => {
+    setAlignment(state.alignment);
+    setTranscriptBuffer(state.transcriptBuffer);
+    setAlignmentBufferDebug(state.alignmentBufferDebug);
+    setMovementDecision(state.movementDecision);
+    setMovementDecisionHistory(state.movementDecisionHistory);
+  }, []);
+
   useEffect(() => {
-    const unsubscribe = window.prompterApi?.onServerSessionState((update) => {
-      if (update.origin !== 'tablet') return;
-      applyCoordinatorState(sessionCoordinator.adoptAuthoritativeState(update.state));
-    });
-    return () => unsubscribe?.();
-  }, [applyCoordinatorState, sessionCoordinator]);
+    const api = window.prompterApi;
+    if (!api?.getServerStatus) return;
+    void api.getServerStatus().then(setTabletStatus).catch(() => setTabletStatus(null));
+    const unsubscribe = api.onServerStatus(setTabletStatus);
+    return () => unsubscribe();
+  }, []);
 
   useEffect(() => {
     const api = window.prompterApi;
@@ -530,6 +549,8 @@ export default function App() {
     visibleTokenIndex: number;
     scrollTop: number;
     direction: 'backward' | 'forward' | 'stationary';
+    source: ManualScrollInputSource;
+    correctionCancelled: boolean;
   }) => {
     const anchor: VisibleReacquireAnchor = {
       source: 'manual-scroll',
@@ -540,18 +561,18 @@ export default function App() {
     };
     applyCoordinatorState(sessionCoordinator.setVisibleReacquireAnchor(anchor, 'manual'));
     appendTrace(
-      `manual scroll detected direction=${info.direction} visible anchor token=${info.visibleTokenIndex} scrollTop=${info.scrollTop.toFixed(1)}`
+      `manual scroll detected source=${info.source} direction=${info.direction}; auto-follow suppressed; correction=${info.correctionCancelled ? 'cancelled' : 'idle'}; visible anchor chosen token=${info.visibleTokenIndex} scrollTop=${info.scrollTop.toFixed(1)}; manual anchor accepted/rebased`
     );
     recordMovementDecision({
-      source: 'manual-scroll',
+      source: `manual-scroll:${info.source}`,
       previousTokenIndex: currentTokenRef.current,
       confirmedTokenIndex: currentTokenRef.current,
       proposedTargetTokenIndex: info.visibleTokenIndex,
       confidence: 0,
       followState: 'holding',
       finalMovement: 'held',
-      engineReason: `manual scroll detected; visible anchor token=${info.visibleTokenIndex}`,
-      alignmentContext: `manual scroll detected; visible anchor token=${info.visibleTokenIndex}; direction=${info.direction}`,
+      engineReason: `manual scroll detected source=${info.source}; visible anchor token=${info.visibleTokenIndex}`,
+      alignmentContext: `manual scroll detected; visible anchor token=${info.visibleTokenIndex}; direction=${info.direction}; source=${info.source}; auto-follow suppressed`,
       visibleAnchorTokenIndex: info.visibleTokenIndex
     });
   }, [appendTrace, applyCoordinatorState, recordMovementDecision, sessionCoordinator]);
@@ -562,6 +583,7 @@ export default function App() {
   }, [displaySettings.continuousAssistScroll, displaySettings.assistScrollSpeed, displaySettings.assistCorrectionFeel, appendTrace]);
 
   const processDelta = useCallback((delta: TranscriptDelta) => {
+    if (tabletModeRef.current) return;
     setDeltas((previous) => [...previous.slice(-24), delta]);
     const result = sessionCoordinator.processTranscript(delta);
     for (const trace of result.traces) appendTrace(trace);
@@ -794,6 +816,7 @@ export default function App() {
   }, [applyCoordinatorState, sessionCoordinator]);
 
   const injectManual = useCallback(async () => {
+    if (tabletModeRef.current) return;
     await manualProviderRef.current.start();
     setIsListening(true);
     manualProviderRef.current.pushText(manualTranscript);
@@ -801,6 +824,7 @@ export default function App() {
   }, [manualTranscript]);
 
   const playMock = useCallback(async () => {
+    if (tabletModeRef.current) return;
     const lines = mockScript.split(/\r?\n/);
     const intervalMs = slowMockRef.current ? 2800 : 950;
     mockProviderRef.current.setScript(lines, intervalMs);
@@ -819,6 +843,7 @@ export default function App() {
   }, [applyCoordinatorState, clearManualReacquireAnchor, sessionCoordinator]);
 
   const startMicMonitor = useCallback(async () => {
+    if (tabletModeRef.current) return;
     if (selectedAsrProviderRef.current !== 'local-whisper') return;
     try {
       await localWhisperProviderRef.current.startMicMonitoring();
@@ -831,7 +856,40 @@ export default function App() {
     await localWhisperProviderRef.current.stopMicMonitoring();
   }, []);
 
+  const stopDesktopSourcesForTabletMode = useCallback(async () => {
+    clearMicStartupGrace();
+    const stops: Promise<unknown>[] = [];
+    if (isListening) stops.push(manualProviderRef.current.stop());
+    if (isMockPlaying) stops.push(mockProviderRef.current.stop());
+    if (liveStatus.listening) stops.push(liveProviderRef.current.stop());
+    if (localWhisperStatus.listening) stops.push(localWhisperProviderRef.current.stop());
+    await Promise.allSettled(stops);
+    setIsListening(false);
+    setIsMockPlaying(false);
+  }, [clearMicStartupGrace, isListening, isMockPlaying, liveStatus.listening, localWhisperStatus.listening]);
+
+  useEffect(() => {
+    const unsubscribeMode = window.prompterApi?.onTabletMode((status) => {
+      tabletModeRef.current = status.mode === 'tablet';
+      setTabletModeStatus(status);
+      if (status.mode === 'tablet') void stopDesktopSourcesForTabletMode();
+    });
+    const unsubscribeState = window.prompterApi?.onServerSessionState((update) => {
+      if (update.origin !== 'tablet') return;
+      if (rendererProjectionForTabletUpdate(tabletModeRef.current, update.movementSuppressedOnDesktop) === 'diagnostics-only') {
+        applyCoordinatorDiagnostics(update.state);
+      } else {
+        applyCoordinatorState(sessionCoordinator.adoptAuthoritativeState(update.state));
+      }
+    });
+    return () => {
+      unsubscribeMode?.();
+      unsubscribeState?.();
+    };
+  }, [applyCoordinatorDiagnostics, applyCoordinatorState, sessionCoordinator, stopDesktopSourcesForTabletMode]);
+
   const toggleListening = useCallback(async () => {
+    if (tabletModeRef.current) return;
     if (selectedAsrProviderRef.current === 'mock') {
       if (isMockPlaying) {
         await stopMock();
@@ -1042,7 +1100,18 @@ export default function App() {
     void window.prompterApi?.toggleAlwaysOnTop();
   }, []);
 
+  const prepareTablet = useCallback(() => {
+    void window.prompterApi?.prepareTablet()
+      .then(setTabletStatus)
+      .catch(() => undefined);
+  }, []);
+
+  const quitPrompter = useCallback(() => {
+    void window.prompterApi?.quitApp();
+  }, []);
+
   const selectAsrProvider = useCallback((providerId: AsrProviderId) => {
+    if (tabletModeRef.current) return;
     clearManualReacquireAnchor();
     setSelectedAsrProviderId(coerceSelectedProvider(providerId, liveConfig, localWhisperSettings));
   }, [clearManualReacquireAnchor, liveConfig, localWhisperSettings]);
@@ -1174,6 +1243,7 @@ export default function App() {
         : selectedAsrProviderId === 'local-whisper'
           ? localWhisperStatus.listening
           : isListening;
+  const tabletMode = tabletModeStatus.mode === 'tablet';
   const selectedProviderStarting =
     selectedAsrProviderId === 'openai-realtime'
       ? liveStatus.status === 'starting'
@@ -1240,13 +1310,18 @@ export default function App() {
     errorMessage: selectedProviderError,
     warningMessage: selectedProviderWarning
   });
-  const startStopDisabled =
+  const startStopDisabled = tabletMode || (
     selectedAsrProviderId === 'local-whisper' &&
     !selectedProviderListening &&
-    !localWhisperStatus.bridge.localWhisperBridgeAvailable;
+    !localWhisperStatus.bridge.localWhisperBridgeAvailable);
 
   return (
     <div className={`app-shell ${controlsVisible ? '' : 'controls-hidden'}`}>
+      {tabletMode && (
+        <div className="tablet-mode-banner">
+          Tablet control — {tabletModeStatus.deviceName ?? 'Android tablet'} is running narration
+        </div>
+      )}
       <ControlPanel
         projectTitle={projectTitle}
         onProjectTitleChange={setProjectTitle}
@@ -1321,6 +1396,10 @@ export default function App() {
         movementDecision={movementDecision}
         movementDecisionHistory={movementDecisionHistory}
         lastStartDiagnostic={lastStartDiagnostic}
+        tabletStatus={tabletStatus}
+        onPrepareTablet={prepareTablet}
+        onQuitPrompter={quitPrompter}
+        providerControlsDisabled={tabletMode}
       />
       <div className="prompter-stage" ref={prompterStageRef}>
         <NarrationBar
@@ -1331,19 +1410,21 @@ export default function App() {
           controlsVisible={controlsVisible}
           startStopDisabled={startStopDisabled}
           onStartStop={toggleListening}
+          isPaused={followState === 'paused'}
+          onTogglePause={togglePause}
           onToggleControls={() => setControlsVisible((visible) => !visible)}
         />
         <PrompterView
           model={manuscript}
           currentSentenceIndex={currentSentenceIndex}
           currentTokenIndex={currentTokenIndex}
-          followState={followState}
+          followState={tabletMode ? 'paused' : followState}
           confidence={alignment.confidence}
           settings={displaySettings}
           layoutMode={controlsVisible ? 'with-controls' : 'prompter-only'}
           assistScrollLagging={localQueueLagging}
           manualScrollTrackingEnabled={
-            selectedProviderListening && followState !== 'manual' && followState !== 'paused'
+            !tabletMode && selectedProviderListening && followState !== 'manual' && followState !== 'paused'
           }
           visibleReacquireActive={Boolean(manualReacquireAnchor)}
           visibleReacquireSource={manualReacquireAnchor?.source}

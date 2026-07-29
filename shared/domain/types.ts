@@ -75,6 +75,10 @@ export type AlignmentResult = {
     duplicateJumpPenaltyApplied: boolean;
     duplicateJumpCandidateRejected: boolean;
     selectedDirection: 'backward' | 'forward' | 'overlap';
+    selectedCandidateStartTokenIndex?: number;
+    selectedCandidateEndTokenIndex?: number;
+    selectedTranscriptTokenIndexes?: number[];
+    runnerUpConfidence?: number | null;
   };
   searchWindow: {
     fromToken: number;
@@ -96,6 +100,15 @@ export type AlignmentBufferDebug = {
   moveToTokenCalled: boolean;
   retentionDecision: string;
   retentionReason: string;
+  selectedCandidateStartTokenIndex?: number;
+  selectedCandidateEndTokenIndex?: number;
+  newDeltaMatchedWordCount?: number;
+  newDeltaDistinctiveMatchedWordCount?: number;
+  commitRejectedReason?: string;
+  lowConfidenceCount?: number;
+  lostOrResyncing?: boolean;
+  reacquireEvent?: 'search' | 'candidate' | 'accepted' | 'rejected';
+  reacquireReason?: string;
 };
 
 export type FollowState =
@@ -126,6 +139,14 @@ export type DisplaySettings = {
   // Conservative token lookahead for scroll target (confirmed + N). 0 = exact confirmed token (current behavior).
   readingLookaheadTokens?: number;
   addExtraSpacingOnImport: boolean;
+  // Windows-authoritative tablet display/follow preferences. Values are normalized into RuntimeSettings for native clients.
+  backgroundColor: string;
+  textColor: string;
+  highlightColor: string;
+  highlightOpacity: number;
+  tabletFollowEnabled: boolean;
+  tabletFollowDeadZoneDp: number;
+  tabletLargeCorrectionPolicy: 'animate' | 'snap';
 };
 
 export type AssistStatusInfo = {

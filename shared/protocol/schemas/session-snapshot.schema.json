@@ -53,7 +53,9 @@
         "theme": { "type": "string", "enum": ["dark", "light"] }
       },
       "additionalProperties": true
-    }
+    },
+    "runtimeSettings": { "$ref": "runtime-settings.schema.json" }
+    ,"narrationSessionId": { "type": ["string", "null"], "minLength": 1, "maxLength": 160 }
   },
   "$defs": {
     "paragraph": {

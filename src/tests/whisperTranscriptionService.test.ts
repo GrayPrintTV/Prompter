@@ -144,4 +144,38 @@ describe('WhisperTranscriptionService', () => {
     expect(harness.process.kill).toHaveBeenCalledOnce();
     expect(status).toMatchObject({ sidecarRunning: false, modelPhase: 'stopped', status: 'stopped', errorMessage: null });
   });
+
+  it('publishes an unexpected sidecar exit while the application is alive', async () => {
+    const harness = createHarness();
+    await harness.service.start(SETTINGS);
+    const before = harness.published.length;
+    harness.process.emit('exit', 1, null);
+
+    expect(harness.published.length).toBe(before + 1);
+    expect(harness.service.getStatus()).toMatchObject({ status: 'stopped', errorMessage: 'Local Whisper sidecar stopped unexpectedly.' });
+  });
+
+  it('makes duplicate exit events during explicit shutdown harmless', async () => {
+    const harness = createHarness();
+    await harness.service.start(SETTINGS);
+    await harness.service.stop();
+    await Promise.resolve(); // fake process emits its intentional exit in a microtask
+    const afterIntentionalExit = harness.published.length;
+    harness.process.emit('exit', 0, null);
+
+    expect(harness.published.length).toBe(afterIntentionalExit);
+    expect(harness.service.getStatus()).toMatchObject({ status: 'stopped', errorMessage: null });
+  });
+
+  it('updates its own stopped state but does not publish late child events after publication disposal', async () => {
+    const harness = createHarness();
+    await harness.service.start(SETTINGS);
+    const before = harness.published.length;
+    harness.service.disposeStatusPublication();
+    harness.service.disposeStatusPublication();
+    expect(() => harness.process.emit('exit', 0, null)).not.toThrow();
+
+    expect(harness.published).toHaveLength(before);
+    expect(harness.service.getStatus()).toMatchObject({ sidecarRunning: false, status: 'stopped' });
+  });
 });

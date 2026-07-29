@@ -20,9 +20,11 @@ fun ConnectionScreen(state: MainUiState, viewModel: MainViewModel) {
     }) }) { padding ->
         LazyColumn(Modifier.fillMaxSize().padding(padding).padding(horizontal = 20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             item {
-                Text("Windows server", style = MaterialTheme.typography.headlineSmall)
+                Text("Connect to your studio", style = MaterialTheme.typography.headlineSmall)
                 Text(connectionLabel(state.connection), color = MaterialTheme.colorScheme.onSurfaceVariant)
-                state.lastError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                if (state.connection is ConnectionState.Error) {
+                    state.lastError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                }
             }
             item {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -37,8 +39,8 @@ fun ConnectionScreen(state: MainUiState, viewModel: MainViewModel) {
                 ElevatedCard(Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text(server.displayName, style = MaterialTheme.typography.titleMedium)
-                        Text("${server.host}:${server.port} · protocol ${server.protocolMajor}.${server.protocolMinor}")
-                        Text(if (server.pairingAvailable) "Pairing available" else "Pairing state not advertised")
+                        Text("Prompter is available on your studio network")
+                        Text(if (server.pairingAvailable) "Ready to pair" else "Previously paired tablets can reconnect")
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Button(onClick = { viewModel.pair(server) }) { Text("Pair") }
                             OutlinedButton(onClick = { viewModel.connect(server) }) { Text("Connect") }
@@ -48,12 +50,13 @@ fun ConnectionScreen(state: MainUiState, viewModel: MainViewModel) {
             }
             item {
                 HorizontalDivider()
-                Text("Manual fallback", style = MaterialTheme.typography.titleMedium)
-                OutlinedTextField(state.manualAddress, viewModel::setManualAddress, label = { Text("Private IP or hostname[:port]") }, singleLine = true)
+                Text("Can’t find your computer?", style = MaterialTheme.typography.titleMedium)
+                Text("Enter the computer name or private network address shown by Prompter.")
+                OutlinedTextField(state.manualAddress, viewModel::setManualAddress, label = { Text("Computer name or address") }, singleLine = true)
                 Spacer(Modifier.height(8.dp))
                 OutlinedButton(onClick = viewModel::addManualAddress) { Text("Add server") }
                 Spacer(Modifier.height(24.dp))
-                Text("Trusted-LAN prototype: manuscript and microphone audio are not encrypted in transit.", color = MaterialTheme.colorScheme.error)
+                Text("Use tablet connection only on your private studio network.", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
@@ -61,11 +64,11 @@ fun ConnectionScreen(state: MainUiState, viewModel: MainViewModel) {
 
 private fun connectionLabel(state: ConnectionState) = when (state) {
     ConnectionState.Disconnected -> "Disconnected"
-    is ConnectionState.Connecting -> "Connecting to ${state.endpoint}"
-    ConnectionState.AwaitingChallenge -> "Waiting for server challenge"
-    is ConnectionState.PairingPending -> "Waiting for approval on ${state.serverName}"
-    ConnectionState.Authenticating -> "Authenticating"
-    is ConnectionState.Connected -> "Connected to ${state.endpoint}"
-    is ConnectionState.Reconnecting -> "Reconnecting in ${state.delayMs} ms (attempt ${state.attempt})"
-    is ConnectionState.Error -> state.message
+    is ConnectionState.Connecting -> "Connecting…"
+    ConnectionState.AwaitingChallenge -> "Verifying connection…"
+    is ConnectionState.PairingPending -> "Approve this tablet on ${state.serverName}"
+    ConnectionState.Authenticating -> "Signing in…"
+    is ConnectionState.Connected -> "Connected to Prompter"
+    is ConnectionState.Reconnecting -> "Reconnecting…"
+    is ConnectionState.Error -> "Couldn’t connect to Prompter"
 }

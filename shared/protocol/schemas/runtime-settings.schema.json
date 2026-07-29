@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://prompter.local/schemas/runtime-settings.schema.json",
+  "title": "Windows authoritative tablet runtime settings",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["settingsRevision", "source", "updatedAtMs", "display", "follow", "serverAlignment"],
+  "properties": {
+    "settingsRevision": { "$ref": "common.schema.json#/$defs/revision" },
+    "source": { "const": "windows" },
+    "updatedAtMs": { "type": "integer", "minimum": 0 },
+    "display": {
+      "type": "object", "additionalProperties": false,
+      "required": ["backgroundColor", "textColor", "highlightColor", "highlightOpacity", "fontSizeSp", "lineSpacing", "sideMarginsDp", "paragraphSpacingEm", "readingBandFraction", "readingBandHeightLines"],
+      "properties": {
+        "backgroundColor": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
+        "textColor": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
+        "highlightColor": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
+        "highlightOpacity": { "type": "number", "minimum": 0, "maximum": 1 },
+        "fontSizeSp": { "type": "number", "minimum": 12, "maximum": 120 },
+        "lineSpacing": { "type": "number", "minimum": 1, "maximum": 3 },
+        "contentWidthFraction": { "type": "number", "minimum": 0.3, "maximum": 1 },
+        "sideMarginsDp": { "type": "number", "minimum": 0, "maximum": 200 },
+        "paragraphSpacingEm": { "type": "number", "minimum": 0, "maximum": 8 },
+        "readingBandFraction": { "type": "number", "minimum": 0.05, "maximum": 0.95 },
+        "readingBandHeightLines": { "type": "number", "minimum": 1, "maximum": 3 }
+      }
+    },
+    "follow": {
+      "type": "object", "additionalProperties": false,
+      "required": ["enabled", "smoothness", "maximumSpeedDpPerSec", "catchUpAggressiveness", "deadZoneDp", "largeCorrectionPolicy"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "smoothness": { "type": "number", "minimum": 0, "maximum": 1 },
+        "maximumSpeedDpPerSec": { "type": "number", "minimum": 1, "maximum": 5000 },
+        "catchUpAggressiveness": { "type": "number", "minimum": 0, "maximum": 1 },
+        "deadZoneDp": { "type": "number", "minimum": 0, "maximum": 120 },
+        "largeCorrectionPolicy": { "enum": ["animate", "snap"] }
+      }
+    },
+    "serverAlignment": {
+      "type": "object", "additionalProperties": false, "required": ["readingLookaheadTokens"],
+      "properties": { "readingLookaheadTokens": { "type": "integer", "minimum": 0, "maximum": 20 } }
+    }
+  }
+}

@@ -21,5 +21,7 @@ The future Android implementation may generate or implement `kotlinx.serializati
 - `movement-event.schema.json`: semantic movement anchors.
 - `audio-control.schema.json`: stream start/stop/gap control and metadata associated with PCM16 binary frames.
 - `pairing-auth.schema.json`: pairing and connection-challenge authentication payloads.
+- `runtime-settings.schema.json`: complete Windows-authoritative tablet palette, layout, native follow behavior, and server-alignment display configuration. It is carried in snapshots and live `runtimeSettings` messages without changing manuscript or lease revisions.
+- `manual-reposition.schema.json`: authenticated tablet reading-band anchor used to rebase the shared coordinator after an intentional native scroll.
 
 The prototype uses explicit Windows approval, random per-device credentials, challenge authentication on connection establishment, and ordinary WebSocket ordering plus sequence/revision checks. It deliberately uses cleartext `ws` only on a trusted private LAN. Certificate-pinned WSS is required before broader distribution. Custom per-frame cryptography remains explicitly outside this protocol.

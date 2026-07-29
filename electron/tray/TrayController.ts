@@ -1,29 +1,33 @@
-import { Menu, Tray, clipboard, nativeImage } from 'electron';
+import { Menu, Tray, clipboard } from 'electron';
+import { createPrompterIcon } from './PrompterIcon.js';
 import type { ServerStatusSummary } from '#prompter-shared/protocol/messages.js';
 
 export type TrayActions = {
   openPrompter(): void;
+  hidePrompter(): void;
   toggleServer(): Promise<void> | void;
   pairTablet(): void;
   disconnectDevice(deviceId: string): void;
+  releaseTabletControl(): void;
+  startTabletFromBeginning(): void;
+  resumeTabletFromCurrentPosition(): void;
+  setTabletPositionFromWindowsView(): void;
   forgetDevice(deviceId: string): Promise<void> | void;
   showDiagnostics(): void;
+  showLiveLog(): void;
   quit(): Promise<void> | void;
 };
-
-// Temporary neutral 16x16 PNG. State remains accessible in tooltip and menu text until polished assets arrive.
-const PLACEHOLDER_ICON = 'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAANUlEQVR42mNgGAWjYBSMglEwCkbBKBgF4z8DA8P/DAwM/xkYGP4zMDD8Z2Bg+M/AwPAfA0PDAwA9jQYhCgT2ywAAAABJRU5ErkJggg==';
 
 export class TrayController {
   private tray: Tray | null = null;
   private status: ServerStatusSummary | null = null;
+  private windowVisible = true;
 
   constructor(private readonly actions: TrayActions) {}
 
   create(initialStatus: ServerStatusSummary) {
     if (this.tray) return;
-    const icon = nativeImage.createFromBuffer(Buffer.from(PLACEHOLDER_ICON, 'base64'));
-    icon.setTemplateImage(true);
+    const icon = createPrompterIcon();
     this.tray = new Tray(icon);
     this.tray.on('double-click', () => this.actions.openPrompter());
     this.update(initialStatus);
@@ -48,18 +52,38 @@ export class TrayController {
       : [{ label: 'No paired devices', enabled: false }];
     const address = status.bindAddress ? `ws://${status.bindAddress}:${status.port}` : null;
     this.tray.setContextMenu(Menu.buildFromTemplate([
+      { label: status.operatingMode === 'tablet' ? `Mode: Tablet ? ${status.controllerDisplayName ?? 'Tablet'}` : 'Mode: Desktop', enabled: false },
+      { label: status.manuscriptLoaded ? 'Manuscript: Loaded' : 'Manuscript: Not loaded', enabled: false },
+      { type: 'separator' },
       { label: 'Open Prompter', click: () => this.actions.openPrompter() },
+      ...(this.windowVisible ? [{ label: 'Hide Prompter', click: () => this.actions.hidePrompter() } as const] : []),
       { type: 'separator' },
       { label: status.enabled ? 'Server Off' : 'Server On', click: () => void this.actions.toggleServer() },
       { label: 'Pair Tablet', enabled: status.enabled && !status.pairingActive, click: () => this.actions.pairTablet() },
       ...(status.pairingActive ? [{ label: `Pairing code: ${status.pairingCode ?? 'pending'}`, enabled: false } as const] : []),
       { label: 'Connected Devices', submenu: devices },
+      { label: 'Controller Device', submenu: status.controllerDeviceId ? [
+        { label: status.controllerDisplayName ?? status.controllerDeviceId, enabled: false },
+        { label: 'Release Tablet Control', click: () => this.actions.releaseTabletControl() }
+      ] : [{ label: 'No controller', enabled: false }] },
+      ...(status.operatingMode === 'tablet' ? [
+        { label: status.tabletStartDescription, enabled: false } as const,
+        { label: 'Start from Beginning', enabled: !status.tabletNarrationActive, click: () => this.actions.startTabletFromBeginning() } as const,
+        { label: 'Resume from Current Position', enabled: !status.tabletNarrationActive && status.tabletResumeAvailable, click: () => this.actions.resumeTabletFromCurrentPosition() } as const,
+        { label: 'Set Tablet Position from Windows View', enabled: !status.tabletNarrationActive, click: () => this.actions.setTabletPositionFromWindowsView() } as const
+      ] : []),
       { label: 'Paired Devices', submenu: pairedDevices },
       { label: 'Copy Server Address', enabled: Boolean(address), click: () => address && clipboard.writeText(address) },
+      { label: 'Live Tablet Log', click: () => this.actions.showLiveLog() },
       { label: 'Diagnostics', click: () => this.actions.showDiagnostics() },
       { type: 'separator' },
       { label: 'Quit', click: () => void this.actions.quit() }
     ]));
+  }
+
+  setWindowVisible(visible: boolean) {
+    this.windowVisible = visible;
+    if (this.status) this.update(this.status);
   }
 
   destroy() {

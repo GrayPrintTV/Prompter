@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://prompter.local/schemas/manual-follow-diagnostic.schema.json",
+  "title": "Android manual-follow diagnostic payload",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["action", "timestampMs", "sequence", "level", "event", "message", "details"],
+  "properties": {
+    "action": { "const": "manualFollowDiagnostic" },
+    "timestampMs": { "type": "integer", "minimum": 0 },
+    "sequence": { "type": "integer", "minimum": 0 },
+    "level": { "type": "string", "enum": ["debug", "info", "warn", "error"] },
+    "event": { "type": "string", "minLength": 1, "maxLength": 160 },
+    "message": { "type": "string", "minLength": 1, "maxLength": 500 },
+    "details": {
+      "type": "object",
+      "maxProperties": 40,
+      "additionalProperties": { "type": "string", "maxLength": 500 }
+    }
+  }
+}

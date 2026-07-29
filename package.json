@@ -12,7 +12,8 @@
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "clean:electron": "node scripts/clean-electron-build.mjs",
-    "build": "npm run clean:electron && tsc -p tsconfig.shared.json && tsc -b tsconfig.app.json tsconfig.electron.json && vite build",
+    "generate:icons": "node scripts/generate-prompter-icons.mjs",
+    "build": "npm run generate:icons && npm run clean:electron && tsc -p tsconfig.shared.json && tsc -b tsconfig.app.json tsconfig.electron.json && vite build",
     "build:whisper-sidecar": "node scripts/build-whisper-sidecar.mjs",
     "stage:whisper-model": "node scripts/stage-whisper-model.mjs",
     "prepare:self-contained": "npm run build:whisper-sidecar && npm run stage:whisper-model",
@@ -30,6 +31,10 @@
     "start": "electron .",
     "test": "vitest run",
     "test:watch": "vitest"
+    ,"android:test": "node scripts/run-android-gradle.mjs testDebugUnitTest"
+    ,"android:assemble-debug": "node scripts/run-android-gradle.mjs assembleDebug"
+    ,"android:install-debug": "node scripts/run-android-gradle.mjs installDebug"
+    ,"android:lint": "node scripts/run-android-gradle.mjs lintDebug"
   },
   "dependencies": {
     "@homebridge/ciao": "^1.3.10",

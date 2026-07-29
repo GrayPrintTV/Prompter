@@ -1,7 +1,6 @@
 import { useState, useEffect, type ChangeEvent, type ClipboardEvent } from 'react';
 import { DebugPanel } from './DebugPanel';
 import { ShortcutHelp } from './ShortcutHelp';
-import { StatusIndicator } from './StatusIndicator';
 import { TortureTestPanel } from './TortureTestPanel';
 import { getAsrProviderOptions, type AsrProviderOption } from '../asr/providerRegistry';
 import type { MovementDecisionInfo } from '../domain/movementDiagnostics';
@@ -25,6 +24,7 @@ import type {
 } from '../domain/types';
 import { DEFAULT_DISPLAY_SETTINGS } from '../state/appStore';
 import { cleanupImportedManuscriptText } from '../domain/manuscriptImportCleanup';
+import type { ServerStatusSummary } from '../../shared/protocol/messages';
 
 type Props = {
   projectTitle: string;
@@ -97,6 +97,10 @@ type Props = {
   movementDecision?: MovementDecisionInfo | null;
   movementDecisionHistory?: MovementDecisionInfo[];
   lastStartDiagnostic?: StartDiagnostic | null;
+  tabletStatus: ServerStatusSummary | null;
+  onPrepareTablet(): void;
+  onQuitPrompter(): void;
+  providerControlsDisabled?: boolean;
 };
 
 function formatMicCaptureState(state: MicCaptureState) {
@@ -234,6 +238,59 @@ export function getNarratorStatusMessage(params: {
   return narrationStatus.label;
 }
 
+export function getTabletProductStatus(status: ServerStatusSummary | null) {
+  if (!status) {
+    return {
+      tone: 'muted',
+      label: 'Tablet unavailable',
+      detail: 'Tablet access is available in the installed desktop app.'
+    };
+  }
+  if (status.connectedDevices.length > 0) {
+    const names = status.connectedDevices.map((device) => device.displayName).join(', ');
+    return {
+      tone: 'good',
+      label: status.connectedDevices.length === 1 ? 'Tablet connected' : 'Tablets connected',
+      detail: names
+    };
+  }
+  if (status.state === 'error') {
+    return {
+      tone: 'error',
+      label: 'Tablet needs attention',
+      detail: status.lastError ?? 'Tablet access could not be started.'
+    };
+  }
+  if (status.pairingActive) {
+    return {
+      tone: 'attention',
+      label: 'Ready to pair',
+      detail: status.pairingCode
+        ? `Enter ${status.pairingCode} on the tablet.`
+        : 'Open Prompter Tablet to finish pairing.'
+    };
+  }
+  if (!status.enabled || status.state === 'off') {
+    return {
+      tone: 'muted',
+      label: 'Tablet is optional',
+      detail: 'Set up a tablet when you want a second reading screen.'
+    };
+  }
+  if (status.pairedDeviceCount > 0) {
+    return {
+      tone: 'ready',
+      label: 'Waiting for tablet',
+      detail: 'Open Prompter Tablet on your paired device.'
+    };
+  }
+  return {
+    tone: 'ready',
+    label: 'Tablet ready',
+    detail: 'Pair a tablet to use it as a wireless reading screen.'
+  };
+}
+
 export function ControlPanel(props: Props) {
   const {
     projectTitle,
@@ -305,7 +362,11 @@ export function ControlPanel(props: Props) {
     scrollAnimationStatus,
     movementDecision,
     movementDecisionHistory,
-    lastStartDiagnostic
+    lastStartDiagnostic,
+    tabletStatus,
+    onPrepareTablet,
+    onQuitPrompter,
+    providerControlsDisabled = false
   } = props;
 
   const handleManuscriptPaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
@@ -332,6 +393,13 @@ export function ControlPanel(props: Props) {
   const selectedProviderLabel =
     allProviderOptions.find((option) => option.id === selectedAsrProviderId)?.label ?? 'Manual';
   const localMic = selectedAsrProviderId === 'local-whisper' ? localWhisperStatus.mic : null;
+  const localMicActive = Boolean(localMic && (
+    localMic.captureState === 'stream-active' ||
+    localMic.captureState === 'pcm-capturing' ||
+    localMic.captureState === 'chunk-sent' ||
+    localMic.captureState === 'chunk-returned' ||
+    localMic.captureState === 'media-recorder-recording'
+  ));
   const localBridgeUnavailable =
     selectedAsrProviderId === 'local-whisper' && !localWhisperStatus.bridge.localWhisperBridgeAvailable;
   const transcriptHistory = getActiveAsrTranscriptHistory(selectedAsrProviderId, deltas, localWhisperStatus);
@@ -342,8 +410,7 @@ export function ControlPanel(props: Props) {
         ? localWhisperStatus.lastTranscriptDelta
         : '') ||
     'Nothing heard yet';
-  const startStopLabel = isListening ? 'Stop Listening' : 'Start Listening';
-  const startStopDisabled = localBridgeUnavailable && !isListening;
+  const startStopDisabled = providerControlsDisabled || (localBridgeUnavailable && !isListening);
   const localWhisperRunning = selectedAsrProviderId === 'local-whisper' && localWhisperStatus.listening;
   const narratorStatusMessage = getNarratorStatusMessage({
     narrationStatus,
@@ -352,6 +419,7 @@ export function ControlPanel(props: Props) {
     followState,
     isListening
   });
+  const tabletProductStatus = getTabletProductStatus(tabletStatus);
 
   // Derive LW lag for assist exposure (same conditions as App passes to PrompterView)
   const chunk = localWhisperStatus.chunk || {};
@@ -528,7 +596,11 @@ export function ControlPanel(props: Props) {
   return (
     <aside className="control-panel">
       <header className="app-header">
-        <div>
+        <div className="app-brand">
+          <span>Narration studio</span>
+          <strong>Prompter</strong>
+        </div>
+        <div className="project-title-field">
           <label htmlFor="project-title">Project</label>
           <input
             id="project-title"
@@ -536,81 +608,143 @@ export function ControlPanel(props: Props) {
             onChange={(event) => onProjectTitleChange(event.target.value)}
           />
         </div>
-        <button
-          type="button"
-          className={developerMode ? 'developer-mode-toggle is-active' : 'developer-mode-toggle'}
-          onClick={onToggleDeveloperMode}
-          title="Toggle developer diagnostics (Ctrl+Shift+D)"
-        >
-          Developer
-        </button>
-        <button type="button" onClick={onToggleFullScreen}>Full</button>
+        <div className="app-header-actions">
+          <button type="button" onClick={onToggleFullScreen}>Full screen</button>
+          <button type="button" className="quit-button" onClick={onQuitPrompter}>Quit</button>
+        </div>
       </header>
 
-      <section className="panel-section">
-        {developerMode ? (
-          <StatusIndicator state={followState} confidence={confidence} isListening={isListening || isMockPlaying} />
-        ) : (
-          <div className={`narrator-status-card narration-${narrationStatus.tone}`}>
-            <div>
-              <span className="narrator-status-label">{narratorStatusMessage}</span>
-              <span className="status-subtle">{selectedProviderLabel}</span>
-            </div>
-            {narrationStatus.warning && (
-              <div className="narrator-status-warning">{narrationStatus.warning}</div>
-            )}
+      <section className="panel-section manuscript-setup">
+        <div className="section-heading-row">
+          <div>
+            <span className="section-kicker">Step 1</span>
+            <h2>Manuscript</h2>
+          </div>
+          <span className="manuscript-word-count">{model.tokens.length.toLocaleString()} words</span>
+        </div>
+        <div className="primary-action-row">
+          <button type="button" className="button-primary" onClick={onImportTxt}>Open manuscript</button>
+          <input
+            ref={fileInputRef}
+            className="hidden-file-input"
+            type="file"
+            accept=".txt,.md,.docx,.pdf,text/plain,text/markdown,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/pdf"
+            onChange={onLocalFileSelected}
+          />
+          <details className="manuscript-editor-details">
+            <summary>Edit text</summary>
+            <label className="manuscript-import-spacing-option">
+              <input
+                type="checkbox"
+                checked={settings.addExtraSpacingOnImport}
+                onChange={(event) => onSettingsChange({
+                  ...settings,
+                  addExtraSpacingOnImport: event.target.checked
+                })}
+              />
+              Add narrator-friendly line spacing
+            </label>
+            <textarea
+              className="manuscript-input"
+              value={manuscriptText}
+              onChange={(event) => onManuscriptTextChange(event.target.value)}
+              onPaste={handleManuscriptPaste}
+              spellCheck={false}
+            />
+          </details>
+        </div>
+        {manuscriptImportError && (
+          <div className="settings-warning manuscript-import-error" role="alert">
+            {manuscriptImportError}
           </div>
         )}
-        <div className="position-line">
-          <span>Paragraph {Math.min(currentParagraphIndex + 1, model.paragraphs.length || 1)} / {model.paragraphs.length || 1}</span>
-          <span>Sentence {Math.min(currentSentenceIndex + 1, model.sentences.length || 1)} / {model.sentences.length || 1}</span>
-        </div>
-        <div className="level-meter" aria-label="Input level">
-          <div style={{ width: `${Math.round(inputLevel * 100)}%` }} />
-        </div>
       </section>
 
-      {/* Listening - default visible core controls per req */}
-      <section className="panel-section">
-        <h2>Listening</h2>
+      <section className="panel-section narration-controls">
+        <div className="section-heading-row">
+          <div>
+            <span className="section-kicker">Step 2</span>
+            <h2>Narration</h2>
+          </div>
+          <div className={`narrator-status-pill narration-${narrationStatus.tone}`}>
+            {narratorStatusMessage}
+          </div>
+        </div>
+        <label className="field-label" htmlFor="narration-provider">Narration mode</label>
         <select
+          id="narration-provider"
           className="provider-select"
           value={selectedAsrProviderId}
           onChange={(event) => onSelectedAsrProviderChange(event.target.value as AsrProviderId)}
           aria-label="ASR provider"
+          disabled={providerControlsDisabled}
         >
           {providerOptions.map((option) => (
             <option key={option.id} value={option.id} disabled={!option.enabled}>
-              {option.label}{option.enabled ? '' : ' (not configured)'}
+              {option.id === 'local-whisper' && !developerMode
+                ? 'Microphone — Local Whisper'
+                : option.id === 'manual' && !developerMode
+                  ? 'Manual positioning'
+                  : option.label}{option.enabled ? '' : ' (not configured)'}
             </option>
           ))}
         </select>
 
-        {/* Monitor / Following controls - default visible */}
-        <div className="inline-actions" style={{marginBottom: '8px'}}>
-          {selectedAsrProviderId === 'local-whisper' && (
+        <div className="transport-controls">
+          <button
+            type="button"
+            className="button-primary transport-start"
+            onClick={onStartStop}
+            disabled={startStopDisabled || isListening}
+          >
+            Start
+          </button>
+          <button type="button" onClick={onTogglePause} disabled={providerControlsDisabled || !isListening}>
+            {followState === 'paused' ? 'Resume' : 'Pause'}
+          </button>
+          <button
+            type="button"
+            className="transport-stop"
+            onClick={onStartStop}
+            disabled={providerControlsDisabled || !isListening}
+          >
+            Stop
+          </button>
+        </div>
+
+        <div className="narration-readiness">
+          <div>
+            <span>Microphone</span>
+            <strong>{localMicActive ? 'Ready' : isListening ? 'Starting…' : 'Ready when you start'}</strong>
+          </div>
+          <div>
+            <span>Following</span>
+            <strong>{followState === 'following' ? 'Following narration' : followState === 'paused' ? 'Paused' : 'Waiting for speech'}</strong>
+          </div>
+        </div>
+        <div className="level-meter" aria-label="Microphone level">
+          <div style={{ width: `${Math.round(inputLevel * 100)}%` }} />
+        </div>
+        <div className="latest-heard">
+          <span>Latest phrase</span>
+          <strong>{latestHeard}</strong>
+        </div>
+        {narrationStatus.warning && (
+          <div className="narrator-status-warning">{narrationStatus.warning}</div>
+        )}
+
+        {developerMode && selectedAsrProviderId === 'local-whisper' && (
+          <div className="inline-actions developer-inline-actions">
             <button
               type="button"
               onClick={localMic && localMic.monitorActive ? onStopMicMonitor : onStartMicMonitor}
+              disabled={providerControlsDisabled}
             >
-              {localMic && localMic.monitorActive ? 'Stop Monitor' : 'Start Monitor'}
+              {localMic && localMic.monitorActive ? 'Stop Mic Monitor' : 'Start Mic Monitor'}
             </button>
-          )}
-          <button type="button" onClick={onStartStop} disabled={startStopDisabled}>{startStopLabel}</button>
-          <button type="button" onClick={onToggleFollow}>{followState === 'manual' ? 'Follow' : 'Manual'}</button>
-          <button type="button" onClick={onTogglePause}>{followState === 'paused' ? 'Resume' : 'Pause'}</button>
-        </div>
-
-        {!developerMode && (
-          <div className="daily-listening-summary">
-            <div>
-              <strong>{narratorStatusMessage}</strong>
-              {narrationStatus.warning && <span>{narrationStatus.warning}</span>}
-            </div>
-            <div>
-              <span>Heard</span>
-              <strong>{latestHeard}</strong>
-            </div>
+            <button type="button" onClick={onToggleFollow} disabled={providerControlsDisabled}>
+              {followState === 'manual' ? 'Enable Follow' : 'Manual Hold'}
+            </button>
           </div>
         )}
 
@@ -682,6 +816,27 @@ export function ControlPanel(props: Props) {
         </dl>}
       </section>
 
+      <section className="panel-section tablet-panel">
+        <div className="section-heading-row">
+          <div>
+            <span className="section-kicker">Optional</span>
+            <h2>Tablet</h2>
+          </div>
+          <span className={`tablet-status-dot is-${tabletProductStatus.tone}`} aria-hidden="true" />
+        </div>
+        <div className="tablet-product-status">
+          <strong>{tabletProductStatus.label}</strong>
+          <span>{tabletProductStatus.detail}</span>
+        </div>
+        {tabletStatus?.connectedDevices.length ? (
+          <div className="settings-subtle">The tablet will follow this narration session automatically.</div>
+        ) : (
+          <button type="button" onClick={onPrepareTablet}>
+            {tabletStatus?.pairingActive ? 'Create a new pairing code' : 'Set up tablet'}
+          </button>
+        )}
+      </section>
+
       {/* Local Whisper Health - dedicated, with indicator */}
       {developerMode && selectedAsrProviderId === 'local-whisper' && (
         <section className="panel-section">
@@ -733,16 +888,23 @@ export function ControlPanel(props: Props) {
         </ol>
       </div>}
 
-      {/* Navigation - basic nav buttons, default visible */}
-      <section className="panel-section button-grid">
-        <h2>Navigation</h2>
-        <button type="button" onClick={onToggleFollow}>{followState === 'manual' ? 'Follow' : 'Manual'}</button>
-        <button type="button" onClick={onTogglePause}>{followState === 'paused' ? 'Resume' : 'Pause'}</button>
-        <button type="button" onClick={onResync}>Resync</button>
-        <button type="button" onClick={() => onStepSentence(-1)}>Back Sent</button>
-        <button type="button" onClick={() => onStepSentence(1)}>Next Sent</button>
-        <button type="button" onClick={() => onStepParagraph(-1)}>Back Para</button>
-        <button type="button" onClick={() => onStepParagraph(1)}>Next Para</button>
+      <section className="panel-section">
+        <div className="section-heading-row">
+          <div>
+            <span className="section-kicker">Recovery</span>
+            <h2>Find your place</h2>
+          </div>
+          <span className="position-summary">
+            Paragraph {Math.min(currentParagraphIndex + 1, model.paragraphs.length || 1)}
+          </span>
+        </div>
+        <button type="button" className="find-place-button" onClick={onResync}>Find my spoken position</button>
+        <div className="navigation-grid">
+          <button type="button" onClick={() => onStepSentence(-1)}>Previous sentence</button>
+          <button type="button" onClick={() => onStepSentence(1)}>Next sentence</button>
+          <button type="button" onClick={() => onStepParagraph(-1)}>Previous paragraph</button>
+          <button type="button" onClick={() => onStepParagraph(1)}>Next paragraph</button>
+        </div>
       </section>
 
       <section className="panel-section display-panel">
@@ -914,6 +1076,83 @@ export function ControlPanel(props: Props) {
             <span>Firm</span>
           </div>
         </div>}
+        <div className="tablet-appearance-control">
+          <div className="reading-zone-label">
+            <span>Tablet appearance</span>
+            <strong>Matches connected tablet</strong>
+          </div>
+          <div className="appearance-presets">
+            <button type="button" onClick={() => onSettingsChange({ ...settings, backgroundColor: '#111315', textColor: '#F4EBDD', highlightColor: '#80CBC4', highlightOpacity: .14 })}>Studio dark</button>
+            <button type="button" onClick={() => onSettingsChange({ ...settings, backgroundColor: '#1A1512', textColor: '#F4E4C1', highlightColor: '#C89155', highlightOpacity: .16 })}>Warm</button>
+            <button type="button" onClick={() => onSettingsChange({ ...settings, backgroundColor: '#F6F1E7', textColor: '#20201D', highlightColor: '#5A938B', highlightOpacity: .12 })}>Light</button>
+          </div>
+          <label className="toggle-row">
+            <input
+              type="checkbox"
+              checked={settings.tabletFollowEnabled}
+              onChange={(event) => onSettingsChange({ ...settings, tabletFollowEnabled: event.target.checked })}
+            />
+            <span>Tablet follows narration automatically</span>
+          </label>
+          {developerMode && (
+            <details className="tablet-calibration-details">
+              <summary>Exact tablet colors and follow calibration</summary>
+              <div className="tablet-color-grid">
+                {([
+                  ['Background', 'backgroundColor'],
+                  ['Text', 'textColor'],
+                  ['Focus bar', 'highlightColor']
+                ] as const).map(([label, key]) => (
+                  <label key={key}>
+                    <span>{label}</span>
+                    <input
+                      type="color"
+                      value={settings[key]}
+                      onChange={(event) => onSettingsChange({ ...settings, [key]: event.target.value.toUpperCase() })}
+                    />
+                  </label>
+                ))}
+              </div>
+              <label>
+                Focus bar opacity
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  value={settings.highlightOpacity}
+                  onChange={(event) => onSettingsChange({ ...settings, highlightOpacity: Number(event.target.value) })}
+                />
+              </label>
+              <label>
+                Tablet dead zone (dp)
+                <input
+                  type="number"
+                  min={0}
+                  max={120}
+                  value={settings.tabletFollowDeadZoneDp}
+                  onChange={(event) => onSettingsChange({
+                    ...settings,
+                    tabletFollowDeadZoneDp: Math.max(0, Math.min(120, Number(event.target.value) || 0))
+                  })}
+                />
+              </label>
+              <label>
+                Large tablet correction
+                <select
+                  value={settings.tabletLargeCorrectionPolicy}
+                  onChange={(event) => onSettingsChange({
+                    ...settings,
+                    tabletLargeCorrectionPolicy: event.target.value as 'animate' | 'snap'
+                  })}
+                >
+                  <option value="animate">Animate</option>
+                  <option value="snap">Snap</option>
+                </select>
+              </label>
+            </details>
+          )}
+        </div>
         {developerMode && <div className="scroll-test-control">
           <div className="reading-zone-label">
             <span>Scroll test</span>
@@ -1069,43 +1308,23 @@ export function ControlPanel(props: Props) {
         </div>
       </section>
 
-      {/* Manuscript - import visible, textarea here (core but grouped) */}
-      <section className="panel-section">
-        <h2>Manuscript</h2>
-        <div className="inline-actions">
-          <button type="button" onClick={onImportTxt}>Import file</button>
-          <input
-            ref={fileInputRef}
-            className="hidden-file-input"
-            type="file"
-            accept=".txt,.md,.docx,.pdf,text/plain,text/markdown,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/pdf"
-            onChange={onLocalFileSelected}
-          />
-          <span>{model.tokens.length.toLocaleString()} words</span>
+      <section className={`panel-section advanced-access ${developerMode ? 'is-active' : ''}`}>
+        <div>
+          <h2>{developerMode ? 'Advanced tools are on' : 'Need troubleshooting tools?'}</h2>
+          <p>
+            {developerMode
+              ? 'Technical controls and diagnostics are available below.'
+              : 'Advanced mode reveals diagnostics, test providers, and calibration controls.'}
+          </p>
         </div>
-        <label className="manuscript-import-spacing-option">
-          <input
-            type="checkbox"
-            checked={settings.addExtraSpacingOnImport}
-            onChange={(event) => onSettingsChange({
-              ...settings,
-              addExtraSpacingOnImport: event.target.checked
-            })}
-          />
-          Add extra spacing between imported lines
-        </label>
-        {manuscriptImportError && (
-          <div className="settings-warning manuscript-import-error" role="alert">
-            {manuscriptImportError}
-          </div>
-        )}
-        <textarea
-          className="manuscript-input"
-          value={manuscriptText}
-          onChange={(event) => onManuscriptTextChange(event.target.value)}
-          onPaste={handleManuscriptPaste}
-          spellCheck={false}
-        />
+        <button
+          type="button"
+          className={developerMode ? 'developer-mode-toggle is-active' : 'developer-mode-toggle'}
+          onClick={onToggleDeveloperMode}
+          title="Toggle advanced diagnostics (Ctrl+Shift+D)"
+        >
+          {developerMode ? 'Leave Advanced' : 'Open Advanced'}
+        </button>
       </section>
 
       {/* Advanced Diagnostics - default collapsed (bridge, some status, detailed if any) */}

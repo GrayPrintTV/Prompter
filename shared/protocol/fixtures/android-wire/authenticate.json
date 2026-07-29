@@ -1,0 +1,1 @@
+{"protocolMajor":1,"protocolMinor":2,"type":"authenticate","serverId":"server-wire","sessionId":"android-pending","connectionId":"android-wire","sequence":0,"sentAtMs":1700000000000,"payload":{"action":"authenticate","deviceId":"device-wire","clientNonce":"client-nonce-wire","timestampMs":1700000000000,"proof":"proof-wire","protocolMajor":1,"protocolMinor":2}}

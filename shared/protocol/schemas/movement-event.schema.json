@@ -16,6 +16,9 @@
     "confidence": { "$ref": "common.schema.json#/$defs/confidence" },
     "durationHintMs": { "type": "integer", "minimum": 0 },
     "classification": { "type": "string", "minLength": 1, "maxLength": 120 },
-    "reason": { "type": "string", "minLength": 1, "maxLength": 1000 }
+    "reason": { "type": "string", "minLength": 1, "maxLength": 1000 },
+    "manualRepositionStatus": { "type": "string", "enum": ["holding", "reacquired"] },
+    "manualAnchorTokenIndex": { "$ref": "common.schema.json#/$defs/index" },
+    "manualAnchorDistanceTokens": { "type": "integer" }
   }
 }

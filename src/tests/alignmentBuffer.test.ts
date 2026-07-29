@@ -22,6 +22,31 @@ function applyDelta(
 }
 
 describe('Local Whisper provisional alignment buffer', () => {
+  it('does not recommit an old high-confidence candidate from an unrelated new-delta anchor', () => {
+    const manuscript = buildManuscript('Alpha beacon opens the first scripted sentence clearly. This sentence is deliberately skipped entirely by the narrator. Later orchard lantern harbor violet quartz follows with distinctive exact words. Finally the closing sentence ends.');
+    let state = createAlignmentBufferState();
+    let decision = evaluateProvisionalAlignmentBuffer(manuscript, state, transcriptToTokens('Alpha beacon opens the first scripted sentence clearly'), 0);
+    expect(decision.moveRecommended).toBe(true);
+    state = decision.state;
+    decision = evaluateProvisionalAlignmentBuffer(manuscript, state, transcriptToTokens('Later orchard lantern'), decision.result.tokenIndex);
+
+    expect(decision.moveRecommended).toBe(false);
+    expect(decision.newDeltaMatchedWordCount).toBe(0);
+    expect(decision.newDeltaDistinctiveMatchedWordCount).toBe(0);
+    expect(decision.commitRejectedReason).toContain('selected candidate');
+    expect(decision.state.committedTokens.join(' ')).toContain('alpha beacon');
+  });
+
+  it('commits only when the selected candidate itself contains current delta evidence', () => {
+    let state = createAlignmentBufferState();
+    let decision = applyDelta('studio', state);
+    state = decision.state;
+    decision = applyDelta('light blinked once', state);
+
+    expect(decision.moveRecommended).toBe(true);
+    expect(decision.newDeltaMatchedWordCount).toBeGreaterThanOrEqual(3);
+    expect(decision.newDeltaDistinctiveMatchedWordCount).toBeGreaterThanOrEqual(2);
+  });
   it('lets weak manuscript anchors accumulate into a high-confidence move', () => {
     let state = createAlignmentBufferState();
 

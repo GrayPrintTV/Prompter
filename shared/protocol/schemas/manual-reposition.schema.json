@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://prompter.local/schemas/manual-reposition.schema.json",
+  "title": "Tablet manual reposition payload",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "action",
+    "manuscriptRevision",
+    "visibleTokenIndex",
+    "visibleCharacter",
+    "sentenceIndex",
+    "paragraphIndex",
+    "direction",
+    "inputSource",
+    "scrollContainer",
+    "detectedAtMs"
+  ],
+  "properties": {
+    "action": { "const": "manualReposition" },
+    "manuscriptRevision": { "type": "integer", "minimum": 0 },
+    "visibleTokenIndex": { "type": "integer", "minimum": 0 },
+    "visibleCharacter": { "type": "integer", "minimum": 0 },
+    "sentenceIndex": { "type": "integer", "minimum": 0 },
+    "paragraphIndex": { "type": "integer", "minimum": 0 },
+    "direction": { "enum": ["backward", "forward", "stationary"] },
+    "inputSource": { "enum": ["touch", "pointer", "unknown"] },
+    "scrollContainer": { "type": "string", "minLength": 1, "maxLength": 120 },
+    "detectedAtMs": { "type": "integer", "minimum": 0 }
+  }
+}

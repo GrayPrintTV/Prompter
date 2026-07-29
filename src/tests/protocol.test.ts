@@ -21,9 +21,12 @@ function createValidator() {
   for (const file of [
     'common.schema.json',
     'envelope.schema.json',
+    'runtime-settings.schema.json',
     'session-snapshot.schema.json',
     'transcript-event.schema.json',
     'movement-event.schema.json',
+    'manual-reposition.schema.json',
+    'manual-follow-diagnostic.schema.json',
     'audio-control.schema.json',
     'pairing-auth.schema.json'
   ]) {
@@ -65,6 +68,52 @@ describe('shared protocol schemas', () => {
     delete fixture.payload.sessionRevision;
     delete fixture.payload.manuscriptRevision;
     expect(validate(fixture.payload)).toBe(false);
+  });
+
+  it('validates explicit tablet manual reposition movement status', () => {
+    const validate = createValidator().getSchema('https://prompter.local/schemas/movement-event.schema.json')!;
+    const fixture = readJson('fixtures/valid-movement.json');
+    Object.assign(fixture.payload, {
+      manualRepositionStatus: 'reacquired',
+      manualAnchorTokenIndex: 40,
+      manualAnchorDistanceTokens: 3
+    });
+    expect(validate(fixture.payload)).toBe(true);
+    fixture.payload.manualRepositionStatus = 'expired';
+    expect(validate(fixture.payload)).toBe(false);
+  });
+
+  it('validates tablet manual reposition anchors and rejects unknown fields', () => {
+    const validate = createValidator().getSchema('https://prompter.local/schemas/manual-reposition.schema.json')!;
+    const payload = {
+      action: 'manualReposition',
+      manuscriptRevision: 2,
+      visibleTokenIndex: 40,
+      visibleCharacter: 240,
+      sentenceIndex: 4,
+      paragraphIndex: 2,
+      direction: 'forward',
+      inputSource: 'touch',
+      scrollContainer: 'prompter-lazy-column',
+      detectedAtMs: 10_000
+    };
+    expect(validate(payload), JSON.stringify(validate.errors)).toBe(true);
+    expect(validate({ ...payload, untrustedField: true })).toBe(false);
+  });
+
+  it('validates bounded Android manual-follow diagnostic uploads', () => {
+    const validate = createValidator().getSchema('https://prompter.local/schemas/manual-follow-diagnostic.schema.json')!;
+    const payload = {
+      action: 'manualFollowDiagnostic',
+      timestampMs: 10_000,
+      sequence: 4,
+      level: 'info',
+      event: 'android.manual_scroll.anchor_sent',
+      message: 'Tablet manual anchor sent.',
+      details: { visibleTokenIndex: '121', overrideState: 'anchor sent' }
+    };
+    expect(validate(payload), JSON.stringify(validate.errors)).toBe(true);
+    expect(validate({ ...payload, unknown: true })).toBe(false);
   });
 
   it('ignores unknown additive optional fields for same-major minor compatibility', () => {

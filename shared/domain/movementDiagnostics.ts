@@ -16,6 +16,8 @@ export type MovementDecisionClassification =
   | 'cold-start reacquired'
   | 'manual scroll anchor'
   | 'manual scroll reacquired'
+  | 'bounded forward reacquired'
+  | 'held while lost'
   | 'held / stale / uncertain';
 
 export type MovementDecisionOutcome =
@@ -166,6 +168,8 @@ export function classifyMovementDecision(
   if (alignmentContext.includes('reacquired after manual scroll')) {
     return 'manual scroll reacquired';
   }
+  if (alignmentContext.includes('bounded forward reacquired')) return 'bounded forward reacquired';
+  if (input.followState === 'lost' && input.finalMovement === 'held') return 'held while lost';
   if (alignmentContext.includes('manual scroll detected')) {
     return 'manual scroll anchor';
   }
@@ -224,6 +228,8 @@ export function describeMovementDecision(
   if (classification === 'manual scroll reacquired') {
     return 'reacquired after manual scroll near the visible anchor';
   }
+  if (classification === 'bounded forward reacquired') return 'reacquired from bounded forward Local Whisper evidence';
+  if (classification === 'held while lost') return 'held: alignment lost; waiting for strong bounded reacquisition evidence';
   if (classification === 'manual scroll anchor') {
     return 'manual scroll detected: waiting for a fresh nearby match';
   }

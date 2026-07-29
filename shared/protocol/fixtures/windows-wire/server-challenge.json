@@ -1,0 +1,1 @@
+{"protocolMajor":1,"protocolMinor":0,"type":"serverChallenge","serverId":"server-wire","sessionId":"session-wire","connectionId":"connection-wire","sequence":0,"sentAtMs":1700000000000,"payload":{"nonce":"challenge-wire","issuedAtMs":1700000000000,"serverId":"server-wire"}}

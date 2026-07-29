@@ -1,6 +1,7 @@
-import { app, BrowserWindow, dialog, ipcMain, safeStorage, screen } from 'electron';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, safeStorage, screen, shell } from 'electron';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { hostname } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,8 +20,10 @@ import {
 import {
   WhisperTranscriptionService
 } from './whisper/WhisperTranscriptionService.js';
+import { WhisperStatusPublisher } from './whisper/WhisperStatusPublisher.js';
 import type { LocalWhisperSettings } from '#prompter-shared/domain/types.js';
-import type { RendererSessionSync } from '#prompter-shared/protocol/messages.js';
+import type { BuildIdentityPayload, RendererSessionSync } from '#prompter-shared/protocol/messages.js';
+import { PROTOCOL_MAJOR, PROTOCOL_MINOR } from '#prompter-shared/protocol/protocol-version.js';
 import { PairedDeviceStore } from './server/PairedDeviceStore.js';
 import { PairingService } from './server/PairingService.js';
 import { DiscoveryService } from './server/DiscoveryService.js';
@@ -28,6 +31,11 @@ import { ServerSessionBridge } from './server/ServerSessionBridge.js';
 import { PrompterServer } from './server/PrompterServer.js';
 import { ProtocolValidator } from './server/ProtocolValidator.js';
 import { TrayController } from './tray/TrayController.js';
+import { createPrompterIcon } from './tray/PrompterIcon.js';
+import { DiagnosticLogService, diagnosticError } from './server/DiagnosticLogService.js';
+import { LiveTabletLogWindow } from './server/LiveTabletLogWindow.js';
+import { TabletModeController } from './server/TabletModeController.js';
+import type { StructuredDiagnosticEvent } from '#prompter-shared/protocol/diagnostics.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const APP_ID = 'com.narrationprompter.prompter';
@@ -38,6 +46,9 @@ let lastKnownWindowMaximized = false;
 let prompterServer: PrompterServer | null = null;
 let trayController: TrayController | null = null;
 let quitting = false;
+let tabletDiagnostics: DiagnosticLogService | null = null;
+let liveTabletLog: LiveTabletLogWindow | null = null;
+let tabletModeController: TabletModeController | null = null;
 const serverSession = new ServerSessionBridge();
 
 type OpenAiRealtimeConfig = {
@@ -139,10 +150,59 @@ function stableServerId() {
   return serverId;
 }
 
+function electronBuildIdentity(): BuildIdentityPayload {
+  let gitHash = process.env.PROMPTER_GIT_HASH || process.env.GIT_COMMIT || 'unavailable';
+  let dirty: boolean | undefined;
+  if (!app.isPackaged) {
+    try {
+      gitHash = execFileSync('git', ['rev-parse', '--short=12', 'HEAD'], {
+        cwd: app.getAppPath(),
+        encoding: 'utf8',
+        windowsHide: true
+      }).trim() || gitHash;
+      dirty = execFileSync('git', ['status', '--porcelain'], {
+        cwd: app.getAppPath(),
+        encoding: 'utf8',
+        windowsHide: true
+      }).trim().length > 0;
+    } catch {
+      dirty = undefined;
+    }
+  }
+  let buildTimestamp = process.env.PROMPTER_BUILD_TIMESTAMP;
+  if (!buildTimestamp) {
+    try { buildTimestamp = statSync(fileURLToPath(import.meta.url)).mtime.toISOString(); }
+    catch { buildTimestamp = 'unavailable'; }
+  }
+  return {
+    versionName: app.getVersion(),
+    buildTimestamp,
+    gitHash,
+    ...(dirty === undefined ? {} : { dirty }),
+    protocolMajor: PROTOCOL_MAJOR,
+    protocolMinor: PROTOCOL_MINOR
+  };
+}
+
 async function initializeTabletServer() {
+  tabletDiagnostics = new DiagnosticLogService(path.join(app.getPath('userData'), 'logs'));
+  tabletModeController = new TabletModeController({
+    hideMainWindow: () => mainWindow?.hide(),
+    notifyRenderer: (status) => mainWindow?.webContents.send('tablet-server:mode', status),
+    record: (event, status) => tabletDiagnostics?.record({
+      component: 'server.mode', level: 'info', event,
+      message: status.mode === 'tablet' ? `Tablet Mode entered; ${status.deviceName ?? 'tablet'} owns narration control.` : `Tablet Mode exited: ${status.reason}.`,
+      deviceId: status.deviceId ?? undefined, details: { mode: status.mode, reason: status.reason, deviceName: status.deviceName }
+    })
+  });
+  liveTabletLog = new LiveTabletLogWindow(currentPreloadPath);
+  tabletDiagnostics.onEvent((event) => {
+    for (const window of BrowserWindow.getAllWindows()) window.webContents.send('tablet-log:event', event);
+  });
   const devices = PairedDeviceStore.underUserData(app.getPath('userData'), safeStorage);
   await devices.load();
   const pairing = new PairingService(devices, async (request) => {
+    tabletDiagnostics?.record({ component: 'server.pairing', level: 'info', event: 'pairing.approval.dialog.opening', message: 'Opening Windows pairing approval dialog.', requestId: request.requestId, deviceId: request.deviceId, remoteAddress: request.remoteAddress });
     const options: Electron.MessageBoxOptions = {
       type: 'question', title: 'Pair tablet', message: `Pair ${request.deviceName}?`,
       detail: `Model: ${request.model ?? 'Unknown'}\nDevice ID: ${request.deviceId}\nAddress: ${request.remoteAddress}`,
@@ -151,16 +211,20 @@ async function initializeTabletServer() {
     const result = mainWindow
       ? await dialog.showMessageBox(mainWindow, options)
       : await dialog.showMessageBox(options);
+    tabletDiagnostics?.record({ component: 'server.pairing', level: result.response === 0 ? 'info' : 'warn', event: result.response === 0 ? 'pairing.approval.dialog.approved' : 'pairing.approval.dialog.denied', message: result.response === 0 ? 'User approved pairing dialog.' : 'User denied pairing dialog.', requestId: request.requestId, deviceId: request.deviceId, remoteAddress: request.remoteAddress });
     return { approved: result.response === 0 };
   });
+  pairing.setDiagnostics(tabletDiagnostics);
   const discovery = new DiscoveryService();
   const protocolSchemaRoot = app.isPackaged
     ? path.join(process.resourcesPath, 'protocol-schemas')
     : path.join(app.getAppPath(), 'shared', 'protocol', 'schemas');
   prompterServer = new PrompterServer({
     serverId: stableServerId(), productVersion: app.getVersion(), computerName: hostname(),
+    buildInfo: electronBuildIdentity(),
     port: Number(process.env.PROMPTER_SERVER_PORT || 43127), pairing, devices, discovery, session: serverSession,
     protocolValidator: new ProtocolValidator(protocolSchemaRoot),
+    diagnostics: tabletDiagnostics,
     whisperSettings: {
       pythonExecutablePath: 'python', modelName: 'base.en', device: 'cpu', computeType: 'int8', chunkDurationSeconds: 2
     },
@@ -172,12 +236,14 @@ async function initializeTabletServer() {
   });
   trayController = new TrayController({
     openPrompter: restoreMainWindow,
+    hidePrompter: () => mainWindow?.hide(),
     toggleServer: async () => {
       try {
         if (prompterServer?.getStatus().enabled) await prompterServer.disable();
         else await prompterServer?.enable();
       } catch (error) {
         appendDiagnosticLog('tablet-server-toggle-error', { message: error instanceof Error ? error.message : String(error) });
+        tabletDiagnostics?.record({ component: 'server.listener', level: 'error', event: 'server.listener.toggle_failed', message: 'Server toggle failed.', ...diagnosticError(error) });
       }
     },
     pairTablet: () => {
@@ -185,14 +251,20 @@ async function initializeTabletServer() {
       catch (error) { dialog.showErrorBox('Tablet pairing unavailable', error instanceof Error ? error.message : String(error)); }
     },
     disconnectDevice: (deviceId) => prompterServer?.disconnectDevice(deviceId),
+    releaseTabletControl: () => prompterServer?.releaseTabletControl(undefined, 'Tablet control released from tray'),
+    startTabletFromBeginning: () => { prompterServer?.selectTabletStartPolicy('beginning'); },
+    resumeTabletFromCurrentPosition: () => { prompterServer?.selectTabletStartPolicy('resume'); },
+    setTabletPositionFromWindowsView: () => { prompterServer?.selectTabletPositionFromWindowsView(); },
     forgetDevice: async (deviceId) => { await prompterServer?.forgetDevice(deviceId); },
     showDiagnostics: () => void dialog.showMessageBox({
       title: 'Prompter tablet server diagnostics', type: 'info', buttons: ['OK'],
       message: 'Tablet server diagnostics', detail: JSON.stringify(prompterServer?.diagnostics() ?? { enabled: false }, null, 2)
     }),
+    showLiveLog: () => liveTabletLog?.show(),
     quit: shutdownAndQuit
   });
   trayController.create(prompterServer.getStatus());
+  trayController.setWindowVisible(Boolean(mainWindow?.isVisible()));
   prompterServer.onStatus((status) => {
     trayController?.update(status);
     mainWindow?.webContents.send('tablet-server:status', status);
@@ -202,8 +274,21 @@ async function initializeTabletServer() {
   });
   serverSession.onState((state) => {
     if (serverSession.getAuthority() === 'tablet') mainWindow?.webContents.send('tablet-server:sessionState', {
-      origin: 'tablet', deviceId: serverSession.getControllerDeviceId(), state
+      origin: 'tablet', deviceId: serverSession.getControllerDeviceId(), state, movementSuppressedOnDesktop: true
     });
+  });
+  serverSession.onController((deviceId) => {
+    const status = prompterServer?.getStatus();
+    const deviceName = status?.connectedDevices.find((device) => device.deviceId === deviceId)?.displayName
+      ?? status?.pairedDevices.find((device) => device.deviceId === deviceId)?.displayName
+      ?? deviceId;
+    tabletModeController?.setController(deviceId, deviceName, deviceId ? 'Tablet acquired controller lease' : 'Controller lease released');
+    if (!deviceId) {
+      const state = serverSession.getState();
+      if (state) mainWindow?.webContents.send('tablet-server:sessionState', {
+        origin: 'tablet', deviceId: null, state, movementSuppressedOnDesktop: false
+      });
+    }
   });
 }
 
@@ -214,30 +299,61 @@ function restoreMainWindow() {
   mainWindow?.focus();
 }
 
+function installApplicationMenu() {
+  Menu.setApplicationMenu(Menu.buildFromTemplate([
+    {
+      label: 'File',
+      submenu: [
+        { label: 'Open Prompter', click: restoreMainWindow },
+        { type: 'separator' },
+        {
+          label: 'Quit Prompter',
+          accelerator: 'Ctrl+Q',
+          click: () => void shutdownAndQuit()
+        }
+      ]
+    },
+    {
+      label: 'View',
+      submenu: [
+        {
+          label: 'Full Screen',
+          accelerator: 'F11',
+          click: () => mainWindow?.setFullScreen(!mainWindow.isFullScreen())
+        }
+      ]
+    }
+  ]));
+}
+
 async function shutdownAndQuit() {
   if (quitting) return;
   quitting = true;
   try {
+    // Do this before sidecar stop: child exit is asynchronous and the renderer may already be gone.
+    whisperService.disposeStatusPublication();
+    whisperStatusPublisher.dispose();
     prompterServer?.stopPairing();
     await prompterServer?.shutdown();
     await whisperService.stop();
+    liveTabletLog?.close();
     trayController?.destroy();
   } finally {
     app.quit();
   }
 }
 
+const whisperStatusPublisher = new WhisperStatusPublisher(
+  () => mainWindow,
+  () => mainBridgeDiagnostics()
+);
+
 const whisperService = new WhisperTranscriptionService({
   runtimePathContext,
   getUserDataPath: () => app.getPath('userData'),
   getTempPath: () => app.getPath('temp'),
   appendDiagnosticLog,
-  publishStatus: (status) => {
-    mainWindow?.webContents.send('local-whisper:status', {
-      ...status,
-      bridge: mainBridgeDiagnostics()
-    });
-  }
+  publishStatus: (status) => whisperStatusPublisher.publish(status)
 });
 
 function runtimeDiagnostics(preloadPath: string): MainRuntimeDiagnostics {
@@ -505,6 +621,7 @@ function createMainWindow() {
     show: false,
     backgroundColor: '#101418',
     title: 'Narration Prompter',
+    icon: createPrompterIcon(),
     webPreferences: {
       preload: preloadPath,
       contextIsolation: true,
@@ -535,8 +652,15 @@ function createMainWindow() {
     lastKnownWindowMaximized = false;
   });
 
-  mainWindow.on('close', () => {
+  mainWindow.on('show', () => trayController?.setWindowVisible(true));
+  mainWindow.on('hide', () => trayController?.setWindowVisible(false));
+
+  mainWindow.on('close', (event) => {
     saveWindowStateSync();
+    if (tabletModeController?.shouldHideOnWindowClose(quitting)) {
+      event.preventDefault();
+      mainWindow?.hide();
+    }
   });
 
   // Ensure bounds are persisted on app quit paths (File → Exit, etc.)
@@ -563,7 +687,11 @@ function createMainWindow() {
     console.log(`[renderer-console:${levelName}] ${message} (${sourceId}:${lineNumber})`);
   });
 
-  mainWindow.webContents.on('did-finish-load', publishPreloadErrorToRenderer);
+  mainWindow.webContents.on('did-finish-load', () => {
+    publishPreloadErrorToRenderer();
+    if (tabletModeController) mainWindow?.webContents.send('tablet-server:mode', tabletModeController.getStatus());
+    if (prompterServer) mainWindow?.webContents.send('tablet-server:status', prompterServer.getStatus());
+  });
 
   mainWindow.once('ready-to-show', () => {
     mainWindow?.show();
@@ -580,6 +708,7 @@ app.on('second-instance', restoreMainWindow);
 
 if (hasSingleInstanceLock) app.whenReady().then(async () => {
   createMainWindow();
+  installApplicationMenu();
   await initializeTabletServer();
 
   app.on('activate', () => {
@@ -641,6 +770,11 @@ ipcMain.handle('window:toggleAlwaysOnTop', (event) => {
   if (!win) return false;
   win.setAlwaysOnTop(!win.isAlwaysOnTop(), 'screen-saver');
   return win.isAlwaysOnTop();
+});
+
+ipcMain.handle('app:quit', () => {
+  setImmediate(() => void shutdownAndQuit());
+  return true;
 });
 
 ipcMain.handle('openai-realtime:getConfigStatus', () => configuredRealtimeStatus());
@@ -779,6 +913,38 @@ ipcMain.handle('tablet-server:syncSession', (_event, sync: RendererSessionSync) 
 });
 ipcMain.handle('tablet-server:getStatus', () => prompterServer?.getStatus() ?? null);
 ipcMain.handle('tablet-server:getDiagnostics', () => prompterServer?.diagnostics() ?? null);
+ipcMain.handle('tablet-server:prepare', async () => {
+  if (!prompterServer) throw new Error('Tablet access is not available yet.');
+  if (!prompterServer.getStatus().enabled) await prompterServer.enable();
+  prompterServer.startPairing();
+  return prompterServer.getStatus();
+});
+ipcMain.handle('tablet-log:getEvents', () => tabletDiagnostics?.list() ?? []);
+ipcMain.handle('tablet-log:copy', (_event, events: StructuredDiagnosticEvent[]) => {
+  clipboard.writeText(tabletDiagnostics?.format(Array.isArray(events) ? events : []) ?? '');
+});
+ipcMain.handle('tablet-log:clearView', () => tabletDiagnostics?.clearView());
+ipcMain.handle('tablet-log:openFolder', async () => {
+  if (tabletDiagnostics) await shell.openPath(tabletDiagnostics.logDirectory);
+});
+ipcMain.handle('tablet-log:saveBundle', async () => {
+  if (!tabletDiagnostics) return null;
+  const result = await dialog.showSaveDialog({
+    title: 'Save tablet diagnostic bundle', defaultPath: path.join(tabletDiagnostics.logDirectory, `prompter-tablet-diagnostics-${Date.now()}.json`),
+    filters: [{ name: 'JSON diagnostic bundle', extensions: ['json'] }]
+  });
+  if (result.canceled || !result.filePath) return null;
+  const serverDiagnosticSnapshot = prompterServer?.diagnostics() ?? null;
+  const bundle = {
+    createdAt: new Date().toISOString(), appVersion: app.getVersion(), platform: process.platform,
+    runtime: { electron: process.versions.electron, node: process.versions.node, chrome: process.versions.chrome },
+    server: serverDiagnosticSnapshot ? { ...serverDiagnosticSnapshot, pairingCode: '[redacted]' } : null,
+    events: tabletDiagnostics.list(), persistedLogTail: tabletDiagnostics.recentPersistedText().slice(-1_000_000)
+  };
+  writeFileSync(result.filePath, JSON.stringify(bundle, null, 2), 'utf8');
+  tabletDiagnostics.record({ component: 'server.diagnostics', level: 'info', event: 'diagnostics.bundle.saved', message: 'Redacted diagnostic bundle saved.', details: { fileName: path.basename(result.filePath) } });
+  return result.filePath;
+});
 
 ipcMain.handle('local-whisper:getStatus', () => localWhisperStatusForRenderer());
 

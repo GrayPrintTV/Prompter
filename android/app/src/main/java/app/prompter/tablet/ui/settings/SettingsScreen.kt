@@ -17,10 +17,10 @@ fun SettingsScreen(state: MainUiState, viewModel: MainViewModel, onBack: () -> U
             val inherited = state.session.runtimeSettings?.display
             val effective = effectiveDisplaySettings(inherited, state.display)
             Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                Text("Use Windows display settings", Modifier.weight(1f))
+                Text("Match desktop display", Modifier.weight(1f))
                 Switch(state.display.useWindowsDisplaySettings, { value -> viewModel.updateDisplay { it.copy(useWindowsDisplaySettings = value) } })
             }
-            Text(if (state.display.useWindowsDisplaySettings && inherited != null) "Using live Windows values" else "Using tablet-local display values")
+            Text(if (state.display.useWindowsDisplaySettings && inherited != null) "Using the desktop appearance" else "Using a custom tablet appearance")
             Text("Font size: ${effective.fontSizeSp.toInt()} sp")
             Slider(state.display.fontSizeSp, { value -> viewModel.updateDisplay { it.copy(fontSizeSp = value) } }, valueRange = 22f..80f, enabled = !state.display.useWindowsDisplaySettings)
             Text("Line spacing: ${"%.2f".format(effective.lineSpacing)}")
@@ -29,7 +29,7 @@ fun SettingsScreen(state: MainUiState, viewModel: MainViewModel, onBack: () -> U
             Slider(state.display.contentWidthFraction, { value -> viewModel.updateDisplay { it.copy(contentWidthFraction = value) } }, valueRange = .52f..94f, enabled = !state.display.useWindowsDisplaySettings)
             Text("Reading band: ${(effective.readingBandFraction * 100).toInt()}%")
             Slider(state.display.readingBandPercent, { value -> viewModel.updateDisplay { it.copy(readingBandPercent = value) } }, valueRange = 20f..65f, enabled = !state.display.useWindowsDisplaySettings)
-            OutlinedButton(onClick = viewModel::resetDisplayToWindows, enabled = inherited != null) { Text("Reset to Windows values") }
+            OutlinedButton(onClick = viewModel::resetDisplayToWindows, enabled = inherited != null) { Text("Reset to desktop appearance") }
             Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                 Text("Dark theme", Modifier.weight(1f)); Switch(state.display.darkTheme, { value -> viewModel.updateDisplay { it.copy(darkTheme = value) } })
             }

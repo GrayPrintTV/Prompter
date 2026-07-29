@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, type CSSProperties } from 'react';
 import {
   DEFAULT_ASSIST_STALE_SLOW_MS,
   DEFAULT_ASSIST_STALE_STOP_MS,
@@ -18,7 +18,11 @@ import {
   type ReadingZoneGeometry
 } from '../domain/prompterScroll';
 import {
+  MANUAL_SCROLL_INTENT_MS,
+  MANUAL_SCROLL_SETTLE_MS,
+  manualScrollInputSourceForPointer,
   nearestVisibleTokenIndex,
+  type ManualScrollInputSource,
   type VisibleReacquireSource
 } from '../domain/manualFollow';
 import type { AssistStatusInfo } from '../domain/types';
@@ -57,6 +61,8 @@ type Props = {
     visibleTokenIndex: number;
     scrollTop: number;
     direction: 'backward' | 'forward' | 'stationary';
+    source: ManualScrollInputSource;
+    correctionCancelled: boolean;
   }) => void;
   onAnchorDebug?: (info: {
     confirmedToken: number;
@@ -166,6 +172,9 @@ export function PrompterView({
   const manualScrollDebounceRef = useRef<number | null>(null);
   const lastObservedScrollTopRef = useRef(0);
   const pendingManualDirectionRef = useRef<'backward' | 'forward' | 'stationary'>('stationary');
+  const pendingManualSourceRef = useRef<ManualScrollInputSource>('unknown');
+  const manualOverrideStartedRef = useRef(false);
+  const correctionCancelledForManualRef = useRef(false);
   const manualScrollHoldRef = useRef(false);
   const lastStartupVisibleAnchorRequestRef = useRef(0);
   const latestMotionRef = useRef({
@@ -871,11 +880,15 @@ export function PrompterView({
     lastObservedScrollTopRef.current = container.scrollTop;
 
     const now = () => window.performance?.now?.() ?? Date.now();
-    const markManualIntent = () => {
-      manualScrollIntentUntilRef.current = now() + 1200;
+    const markManualIntent = (source: ManualScrollInputSource) => {
+      manualScrollIntentUntilRef.current = now() + MANUAL_SCROLL_INTENT_MS;
+      pendingManualSourceRef.current = source;
     };
-    const stopAutomaticMotionForManualScroll = () => {
+    const stopAutomaticMotionForManualScroll = (source: ManualScrollInputSource) => {
+      const correctionCancelled = animationRef.current.active;
+      const cruiseCancelled = cruiseRef.current.frameId !== null;
       manualScrollHoldRef.current = true;
+      correctionCancelledForManualRef.current ||= correctionCancelled;
       cancelAnimation('manual scroll detected');
       cancelCruise('assist cruise stopped: manual scroll');
       assistAnchorRef.current = {
@@ -884,6 +897,14 @@ export function PrompterView({
         lastSentenceIndex: -1,
         estimatedVelocityPxPerMs: 0
       };
+      if (!manualOverrideStartedRef.current) {
+        manualOverrideStartedRef.current = true;
+        emitTrace(
+          currentSentenceIndexRef.current,
+          false,
+          `manual scroll detected source=${source}; auto-follow suppressed; active correction ${correctionCancelled ? 'cancelled' : 'not active'}; assist cruise ${cruiseCancelled ? 'cancelled' : 'not active'}`
+        );
+      }
     };
     const reportSettledManualScroll = () => {
       manualScrollDebounceRef.current = null;
@@ -898,18 +919,45 @@ export function PrompterView({
         });
       geometryRef.current = geometry;
       const visibleTokenIndex = visibleTokenAtReadingBand(container, geometry);
-      if (visibleTokenIndex === null) return;
+      if (visibleTokenIndex === null) {
+        emitTrace(
+          currentSentenceIndexRef.current,
+          false,
+          `manual scroll settled source=${pendingManualSourceRef.current}; visible anchor unavailable; auto-follow remains suppressed`
+        );
+        manualScrollIntentUntilRef.current = 0;
+        manualOverrideStartedRef.current = false;
+        correctionCancelledForManualRef.current = false;
+        pendingManualSourceRef.current = 'unknown';
+        return;
+      }
       const direction = pendingManualDirectionRef.current;
+      const source = pendingManualSourceRef.current;
       emitTrace(
         currentSentenceIndexRef.current,
         false,
-        `manual scroll detected direction=${direction} visible anchor token=${visibleTokenIndex}`
+        `manual scroll settled source=${source} direction=${direction}; visible anchor chosen token=${visibleTokenIndex}; manual anchor accepted/rebased`
       );
       onManualScrollRef.current?.({
         visibleTokenIndex,
         scrollTop: container.scrollTop,
-        direction
+        direction,
+        source,
+        correctionCancelled: correctionCancelledForManualRef.current
       });
+      manualScrollIntentUntilRef.current = 0;
+      manualOverrideStartedRef.current = false;
+      correctionCancelledForManualRef.current = false;
+      pendingManualSourceRef.current = 'unknown';
+    };
+    const scheduleManualScrollSettlement = () => {
+      if (manualScrollDebounceRef.current !== null) {
+        window.clearTimeout(manualScrollDebounceRef.current);
+      }
+      manualScrollDebounceRef.current = window.setTimeout(
+        reportSettledManualScroll,
+        MANUAL_SCROLL_SETTLE_MS
+      );
     };
     const handleScroll = () => {
       const currentScrollTop = container.scrollTop;
@@ -939,42 +987,96 @@ export function PrompterView({
         return;
       }
 
+      const source = manualIntentActive ? pendingManualSourceRef.current : 'unknown';
       pendingManualDirectionRef.current = direction;
-      stopAutomaticMotionForManualScroll();
-      manualScrollIntentUntilRef.current = 0;
-      if (manualScrollDebounceRef.current !== null) {
-        window.clearTimeout(manualScrollDebounceRef.current);
-      }
-      manualScrollDebounceRef.current = window.setTimeout(reportSettledManualScroll, 120);
+      stopAutomaticMotionForManualScroll(source);
+      scheduleManualScrollSettlement();
     };
-    const handleWheel = () => {
+    const handleWheel = (event: WheelEvent) => {
       if (!latestMotionRef.current.manualScrollTrackingEnabled) return;
-      markManualIntent();
-      stopAutomaticMotionForManualScroll();
+      markManualIntent('wheel');
+      pendingManualDirectionRef.current =
+        event.deltaY < 0 ? 'backward' : event.deltaY > 0 ? 'forward' : 'stationary';
+      stopAutomaticMotionForManualScroll('wheel');
+      scheduleManualScrollSettlement();
+      container.focus({ preventScroll: true });
     };
-    const handlePotentialManualIntent = () => {
-      if (latestMotionRef.current.manualScrollTrackingEnabled) markManualIntent();
+    const handleTouchStart = () => {
+      if (latestMotionRef.current.manualScrollTrackingEnabled) markManualIntent('touch');
     };
+    let pointerDragStartY: number | null = null;
     const handlePointerDown = (event: PointerEvent) => {
-      if (event.target === container) handlePotentialManualIntent();
+      if (!latestMotionRef.current.manualScrollTrackingEnabled) return;
+      const source = manualScrollInputSourceForPointer({
+        pointerType: event.pointerType,
+        targetIsScrollContainer: event.target === container,
+        offsetX: event.offsetX,
+        clientWidth: container.clientWidth
+      });
+      if (source === 'touch' || source === 'scrollbar') {
+        markManualIntent(source);
+      } else {
+        pointerDragStartY = event.clientY;
+      }
+      container.focus({ preventScroll: true });
+    };
+    const handlePointerMove = (event: PointerEvent) => {
+      if (
+        pointerDragStartY === null ||
+        event.buttons === 0 ||
+        Math.abs(event.clientY - pointerDragStartY) < 4
+      ) {
+        return;
+      }
+      markManualIntent(event.pointerType === 'touch' ? 'touch' : 'pointer');
+    };
+    const handlePointerEnd = () => {
+      pointerDragStartY = null;
     };
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) {
-        handlePotentialManualIntent();
+      if (
+        !event.altKey &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        ['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)
+      ) {
+        if (!latestMotionRef.current.manualScrollTrackingEnabled) return;
+        markManualIntent('keyboard');
+        pendingManualDirectionRef.current =
+          ['ArrowUp', 'PageUp', 'Home'].includes(event.key)
+            ? 'backward'
+            : ['ArrowDown', 'PageDown', 'End', ' '].includes(event.key)
+              ? 'forward'
+              : 'stationary';
+        stopAutomaticMotionForManualScroll('keyboard');
+        scheduleManualScrollSettlement();
       }
+    };
+    const handleScrollEnd = () => {
+      if (manualScrollDebounceRef.current === null) return;
+      window.clearTimeout(manualScrollDebounceRef.current);
+      reportSettledManualScroll();
     };
 
     container.addEventListener('scroll', handleScroll, { passive: true });
     container.addEventListener('wheel', handleWheel, { passive: true });
-    container.addEventListener('touchstart', handlePotentialManualIntent, { passive: true });
+    container.addEventListener('touchstart', handleTouchStart, { passive: true });
     container.addEventListener('pointerdown', handlePointerDown, { passive: true });
+    container.addEventListener('pointermove', handlePointerMove, { passive: true });
+    container.addEventListener('pointerup', handlePointerEnd, { passive: true });
+    container.addEventListener('pointercancel', handlePointerEnd, { passive: true });
     container.addEventListener('keydown', handleKeyDown);
+    container.addEventListener('scrollend', handleScrollEnd);
     return () => {
       container.removeEventListener('scroll', handleScroll);
       container.removeEventListener('wheel', handleWheel);
-      container.removeEventListener('touchstart', handlePotentialManualIntent);
+      container.removeEventListener('touchstart', handleTouchStart);
       container.removeEventListener('pointerdown', handlePointerDown);
+      container.removeEventListener('pointermove', handlePointerMove);
+      container.removeEventListener('pointerup', handlePointerEnd);
+      container.removeEventListener('pointercancel', handlePointerEnd);
       container.removeEventListener('keydown', handleKeyDown);
+      container.removeEventListener('scrollend', handleScrollEnd);
       if (manualScrollDebounceRef.current !== null) {
         window.clearTimeout(manualScrollDebounceRef.current);
         manualScrollDebounceRef.current = null;
@@ -992,6 +1094,8 @@ export function PrompterView({
   useEffect(() => {
     if (!visibleReacquireActive) {
       manualScrollHoldRef.current = false;
+      manualOverrideStartedRef.current = false;
+      correctionCancelledForManualRef.current = false;
     }
   }, [visibleReacquireActive]);
 
@@ -1246,9 +1350,19 @@ export function PrompterView({
   }, [scrollTestRequest?.id]);
 
   return (
-    <main className={`prompter-pane theme-${settings.theme}`} ref={paneRef}>
+    <main className={`prompter-pane theme-${settings.theme}`} ref={paneRef} style={{
+      background: settings.backgroundColor,
+      '--prompter-text-color': settings.textColor,
+      '--prompter-highlight-color': settings.highlightColor,
+      '--prompter-highlight-opacity': settings.highlightOpacity
+    } as CSSProperties}>
       <div className="reading-zone-band" aria-hidden="true" />
-      <div className="prompter-scroll" ref={scrollRef}>
+      <div
+        className="prompter-scroll"
+        ref={scrollRef}
+        tabIndex={0}
+        aria-label="Manuscript; scroll to manually reposition the reading area"
+      >
         <article
           className="manuscript-display"
           style={{

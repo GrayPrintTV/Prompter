@@ -28,7 +28,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.prompter.tablet.connection.ConnectionState
-import app.prompter.tablet.AppBuildIdentity
 import app.prompter.tablet.ui.MainUiState
 import app.prompter.tablet.ui.MainViewModel
 import app.prompter.tablet.ui.Screen
@@ -41,6 +40,32 @@ import kotlin.math.abs
 import kotlin.math.min
 import app.prompter.tablet.protocol.RuntimeFollowSettings
 import app.prompter.tablet.settings.effectiveDisplaySettings
+
+internal fun tabletNarrationStatus(
+    connected: Boolean,
+    reconnecting: Boolean,
+    controllerReady: Boolean,
+    streamRegistered: Boolean,
+    audioActive: Boolean
+) = when {
+    connected && audioActive -> "Following narration"
+    connected && streamRegistered -> "Microphone ready"
+    connected && controllerReady -> "Ready to start"
+    connected -> "Connected — preparing microphone"
+    reconnecting -> "Reconnecting…"
+    else -> "Disconnected"
+}
+
+internal fun manualFollowProductStatus(overrideState: String): String? = when (overrideState) {
+    "normal" -> null
+    "user scrolling" -> "Repositioning…"
+    "anchor selected", "anchor sent", "waiting for reacquire" -> "Finding your place…"
+    "holding wrong-section" -> "Holding at your chosen position"
+    "reacquired/resumed" -> "Following resumed"
+    "anchor queued during reconnect" -> "Position saved while reconnecting"
+    "anchor send failed" -> "Could not send the new position"
+    else -> "Manual position active"
+}
 
 @Composable
 fun PrompterScreen(state: MainUiState, viewModel: MainViewModel, requestMicrophone: () -> Unit) {
@@ -360,49 +385,30 @@ fun PrompterScreen(state: MainUiState, viewModel: MainViewModel, requestMicropho
             Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     AssistChip(onClick = viewModel::reconnect, label = {
-                        Text(
-                            if (
-                                state.connection is ConnectionState.Connected &&
-                                state.connectionDiagnostics.registeredAudioStreamId != null
-                            ) {
-                                "Microphone stream registered"
-                            } else if (state.connection is ConnectionState.Connected) {
-                                "Connected — ${state.connectionDiagnostics.controllerLeaseState.name.lowercase().replace('_', ' ')}"
-                            } else if (state.connection is ConnectionState.Reconnecting) {
-                                "Reconnecting"
-                            } else {
-                                "Disconnected"
-                            }
-                        )
+                        Text(tabletNarrationStatus(
+                            connected = state.connection is ConnectionState.Connected,
+                            reconnecting = state.connection is ConnectionState.Reconnecting,
+                            controllerReady = state.connectionDiagnostics.controllerLease,
+                            streamRegistered = state.connectionDiagnostics.registeredAudioStreamId != null,
+                            audioActive = state.audio.active
+                        ))
                     })
-                    Text("${(snapshot.currentConfidence * 100).toInt()}%", style = MaterialTheme.typography.labelMedium)
                     Spacer(Modifier.weight(1f))
                     IconButton(onClick = { viewModel.show(Screen.SETTINGS) }) { Icon(Icons.Default.Settings, "Display settings") }
                     IconButton(onClick = { viewModel.show(Screen.DIAGNOSTICS) }) { Icon(Icons.Default.Info, "Diagnostics") }
                 }
-                val serverProtocol = "${state.connectionDiagnostics.serverProtocolMajor ?: "?"}.${state.connectionDiagnostics.serverProtocolMinor ?: "?"}"
-                val protocolMatch = state.connectionDiagnostics.serverProtocolMajor == app.prompter.tablet.protocol.ProtocolVersion.MAJOR
-                Text(
-                    "Tablet ${AppBuildIdentity.payload.versionName} ${AppBuildIdentity.payload.gitHash}${if (AppBuildIdentity.payload.dirty == true) "-dirty" else ""} p${app.prompter.tablet.protocol.ProtocolVersion.MAJOR}.${app.prompter.tablet.protocol.ProtocolVersion.MINOR} | " +
-                        "Server ${state.connectionDiagnostics.serverBuild?.versionName ?: "unknown"} ${state.connectionDiagnostics.serverBuild?.gitHash ?: "no-hash"} p$serverProtocol ${if (protocolMatch) "MATCH" else "MISMATCH"}",
-                    maxLines = 1,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (protocolMatch) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error
-                )
-                Text(
-                    "Manual: ${state.manualFollow.overrideState} | anchor t${state.manualFollow.anchorTokenIndex ?: "—"}/s${state.manualFollow.anchorSentenceIndex ?: "—"}/p${state.manualFollow.anchorParagraphIndex ?: "—"} | " +
-                        "remote ${state.session.lastRemoteMovementStatus} | rev ${state.session.latestMovement?.sessionRevision ?: snapshot.sessionRevision} event ${state.session.latestMovementEventId ?: "—"}",
-                    maxLines = 1,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                state.session.latestTranscript?.takeIf { it.isNotBlank() }?.let { Text(it, maxLines = 1, style = MaterialTheme.typography.bodySmall) }
+                manualFollowProductStatus(state.manualFollow.overrideState)?.let {
+                    Text(it, maxLines = 1, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                }
+                state.session.latestTranscript?.takeIf { it.isNotBlank() }?.let {
+                    Text("Heard: $it", maxLines = 1, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
             }
         }
         ExtendedFloatingActionButton(
             onClick = { if (state.audio.active) viewModel.stopMicrophone() else requestMicrophone() },
             icon = { Icon(if (state.audio.active) Icons.Default.MicOff else Icons.Default.Mic, null) },
-            text = { Text(if (state.audio.active) "Pause microphone" else "Start microphone") },
+            text = { Text(if (state.audio.active) "Pause narration" else "Start narration") },
             containerColor = if (state.audio.active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer,
             modifier = Modifier.align(Alignment.BottomCenter).padding(24.dp)
         )

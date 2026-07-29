@@ -21,7 +21,14 @@ export const DEFAULT_DISPLAY_SETTINGS: DisplaySettings = {
   theme: 'dark',
   autoHideControlsOnStart: false,
   readingLookaheadTokens: 6,
-  addExtraSpacingOnImport: true
+  addExtraSpacingOnImport: true,
+  backgroundColor: '#111315',
+  textColor: '#F4EBDD',
+  highlightColor: '#80CBC4',
+  highlightOpacity: 0.14,
+  tabletFollowEnabled: true,
+  tabletFollowDeadZoneDp: 18,
+  tabletLargeCorrectionPolicy: 'animate'
 };
 
 export const LEGACY_LOW_READING_ZONE_PERCENT = 55;
@@ -73,6 +80,16 @@ export function resolveInitialDisplaySettings(
   if (typeof settings.addExtraSpacingOnImport !== 'boolean') {
     settings.addExtraSpacingOnImport = DEFAULT_DISPLAY_SETTINGS.addExtraSpacingOnImport;
   }
+
+  if (!/^#[0-9a-f]{6}$/i.test(settings.backgroundColor)) settings.backgroundColor = DEFAULT_DISPLAY_SETTINGS.backgroundColor;
+  if (!/^#[0-9a-f]{6}$/i.test(settings.textColor)) settings.textColor = DEFAULT_DISPLAY_SETTINGS.textColor;
+  if (!/^#[0-9a-f]{6}$/i.test(settings.highlightColor)) settings.highlightColor = DEFAULT_DISPLAY_SETTINGS.highlightColor;
+  if (!Number.isFinite(settings.highlightOpacity)) settings.highlightOpacity = DEFAULT_DISPLAY_SETTINGS.highlightOpacity;
+  else settings.highlightOpacity = Math.max(0, Math.min(1, settings.highlightOpacity));
+  if (typeof settings.tabletFollowEnabled !== 'boolean') settings.tabletFollowEnabled = DEFAULT_DISPLAY_SETTINGS.tabletFollowEnabled;
+  if (!Number.isFinite(settings.tabletFollowDeadZoneDp)) settings.tabletFollowDeadZoneDp = DEFAULT_DISPLAY_SETTINGS.tabletFollowDeadZoneDp;
+  else settings.tabletFollowDeadZoneDp = Math.max(0, Math.min(120, Math.round(settings.tabletFollowDeadZoneDp)));
+  if (settings.tabletLargeCorrectionPolicy !== 'snap' && settings.tabletLargeCorrectionPolicy !== 'animate') settings.tabletLargeCorrectionPolicy = DEFAULT_DISPLAY_SETTINGS.tabletLargeCorrectionPolicy;
 
   if (options.migrateLegacyNarrationDefaults && storedDisplaySettings) {
     if (

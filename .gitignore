@@ -2,6 +2,12 @@ node_modules/
 dist/
 dist-electron/
 dist-shared/
+android/.gradle/
+android/.gradle-local/
+android/local.properties
+android/**/build/
+android/.idea/
+*.iml
 out/
 build/
 release/

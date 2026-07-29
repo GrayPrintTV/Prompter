@@ -7,6 +7,7 @@ directories:
 asar: true
 files:
   - package.json
+  - assets/icons/**
   - dist/**/*
   - dist-electron/**/*.js
   - dist-electron/**/*.cjs
@@ -64,6 +65,10 @@ files:
   - '!**/test/**'
   - '!**/tests/**'
 extraResources:
+  - from: assets/icons
+    to: assets/icons
+    filter:
+      - '*.png'
   - from: shared/protocol/schemas
     to: protocol-schemas
     filter:
@@ -79,6 +84,7 @@ extraResources:
   - from: THIRD_PARTY_NOTICES.md
     to: THIRD_PARTY_NOTICES.md
 win:
+  icon: assets/icons/prompter.ico
   target:
     - target: dir
       arch:
@@ -87,6 +93,9 @@ win:
       arch:
         - x64
 nsis:
+  installerIcon: assets/icons/prompter.ico
+  uninstallerIcon: assets/icons/prompter.ico
+  installerHeaderIcon: assets/icons/prompter.ico
   oneClick: false
   perMachine: false
   allowElevation: false

@@ -7,7 +7,9 @@ type Props = {
   inputLevel: number;
   controlsVisible: boolean;
   startStopDisabled: boolean;
+  isPaused: boolean;
   onStartStop(): void;
+  onTogglePause(): void;
   onToggleControls(): void;
 };
 
@@ -18,7 +20,9 @@ export function NarrationBar({
   inputLevel,
   controlsVisible,
   startStopDisabled,
+  isPaused,
   onStartStop,
+  onTogglePause,
   onToggleControls
 }: Props) {
   return (
@@ -30,6 +34,14 @@ export function NarrationBar({
         disabled={startStopDisabled}
       >
         {isRunning ? 'Stop' : 'Start'}
+      </button>
+      <button
+        className="narration-secondary"
+        type="button"
+        onClick={onTogglePause}
+        disabled={!isRunning}
+      >
+        {isPaused ? 'Resume' : 'Pause'}
       </button>
       <div className="narration-status">
         <strong>{status.label}</strong>

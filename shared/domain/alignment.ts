@@ -31,6 +31,7 @@ type Candidate = {
   retakeBiasApplied: boolean;
   duplicateJumpPenaltyApplied: boolean;
   duplicateJumpCandidateRejected: boolean;
+  matchedFragmentIndexes: number[];
 };
 
 const DEFAULT_BACKWARD_WINDOW = 300;
@@ -105,9 +106,11 @@ function candidateScore(
   let bestConsecutive = 0;
   const matchedWords: string[] = [];
   const matchedTokenTexts: string[] = [];
+  const matchedFragmentIndexes: number[] = [];
   const totalWeight = fragment.reduce((sum, token) => sum + wordWeight(model, token), 0);
 
-  for (const fragmentToken of fragment) {
+  for (let fragmentIndex = 0; fragmentIndex < fragment.length; fragmentIndex += 1) {
+    const fragmentToken = fragment[fragmentIndex];
     let bestOffset = -1;
     let bestQuality = 0;
 
@@ -130,6 +133,7 @@ function candidateScore(
       matchedWeight += wordWeight(model, fragmentToken) * bestQuality;
       matchedWords.push(model.tokens[matchedIndex].originalText);
       matchedTokenTexts.push(model.tokens[matchedIndex].text);
+      matchedFragmentIndexes.push(fragmentIndex);
 
       gapPenalty += Math.max(0, bestOffset - 1) * 0.016;
       consecutive = bestOffset <= 1 ? consecutive + 1 : 1;
@@ -222,7 +226,8 @@ function candidateScore(
     spanDistance,
     retakeBiasApplied: false,
     duplicateJumpPenaltyApplied: false,
-    duplicateJumpCandidateRejected: false
+    duplicateJumpCandidateRejected: false,
+    matchedFragmentIndexes
   };
 }
 
@@ -333,6 +338,7 @@ export function alignTranscript(
   }
 
   let best: Candidate | null = null;
+  let runnerUp: Candidate | null = null;
   const candidates: Candidate[] = [];
 
   for (let startIndex = fromToken; startIndex < toToken; startIndex += 1) {
@@ -352,7 +358,10 @@ export function alignTranscript(
           (candidate.spanDistance === best.spanDistance &&
             Math.abs(candidate.endIndex - clampedCurrent) < Math.abs(best.endIndex - clampedCurrent))))
     ) {
+      runnerUp = best;
       best = candidate;
+    } else if (!runnerUp || candidate.confidence > runnerUp.confidence) {
+      runnerUp = candidate;
     }
   }
 
@@ -370,6 +379,11 @@ export function alignTranscript(
     };
   }
 
+  // Adjacent starts are alternate scans of the same phrase, not an ambiguous second location.
+  runnerUp = candidates
+    .filter((candidate) => Math.abs(candidate.startIndex - best!.startIndex) > 4)
+    .sort((a, b) => b.confidence - a.confidence)[0] ?? null;
+
   const sentenceIndex = findSentenceIndexForToken(model, best.endIndex);
   const paragraphIndex = findParagraphIndexForSentence(model, sentenceIndex);
   const confidence = fragment.length <= 2 ? Math.min(best.confidence, 0.54) : best.confidence;
@@ -385,7 +399,11 @@ export function alignTranscript(
       retakeBiasApplied: best.retakeBiasApplied,
       duplicateJumpPenaltyApplied: candidates.some((candidate) => candidate.duplicateJumpPenaltyApplied),
       duplicateJumpCandidateRejected: best.duplicateJumpCandidateRejected,
-      selectedDirection: best.direction
+      selectedDirection: best.direction,
+      selectedCandidateStartTokenIndex: best.startIndex,
+      selectedCandidateEndTokenIndex: best.endIndex,
+      selectedTranscriptTokenIndexes: best.matchedFragmentIndexes
+      ,runnerUpConfidence: runnerUp?.confidence ?? null
     },
     searchWindow: { fromToken, toToken }
   };
