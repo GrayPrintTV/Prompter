@@ -57,6 +57,27 @@ describe('SessionCoordinator characterization', () => {
     expect(result.state.alignmentBufferDebug.moveDecision).toContain('auto-backward candidate held');
   });
 
+  it('does not refresh a stale anchor and reaches existing lost progression after repeated stale local candidates', () => {
+    const text = 'Alpha beacon opens the first scripted sentence clearly. This sentence is deliberately skipped entirely by the narrator. Later orchard lantern harbor violet quartz follows with distinctive exact words. Finally the closing sentence ends.';
+    const coordinator = createCoordinator(text);
+    const first = coordinator.processTranscript(delta('Alpha beacon opens the first scripted sentence clearly'));
+    const anchored = first.state.currentTokenIndex;
+    let state = first.state;
+    for (const chunk of ['Later orchard lantern', 'harbor violet quartz', 'follows with distinctive exact words']) {
+      state = coordinator.processTranscript(delta(chunk)).state;
+    }
+    expect(state.currentTokenIndex).toBe(anchored);
+    expect(state.followState).toBe('lost');
+    expect(state.alignmentBufferDebug.commitRejectedReason).toContain('selected candidate');
+    expect(state.alignmentBufferDebug.lowConfidenceCount).toBeGreaterThanOrEqual(3);
+
+    const reacquired = coordinator.processTranscript(delta('Later orchard lantern harbor violet quartz follows with distinctive exact words')).state;
+    expect(reacquired.currentTokenIndex).toBeGreaterThan(anchored);
+    expect(reacquired.followState).toBe('following');
+    expect(reacquired.movementDecision?.classification).toBe('bounded forward reacquired');
+    expect(reacquired.alignmentBufferDebug.reacquireEvent).toBe('accepted');
+  });
+
   it('reacquires near a manual visible anchor and clears the anchor', () => {
     const model = buildManuscript(SAMPLE_MANUSCRIPT);
     const visible = searchManuscript(model, 'By noon the manuscript', 1) ?? 0;
@@ -71,6 +92,27 @@ describe('SessionCoordinator characterization', () => {
     expect(result.state.followState).toBe('following');
     expect(result.state.manualReacquireAnchor).toBeNull();
     expect(result.state.movementDecision?.classification).toBe('manual scroll reacquired');
+  });
+
+  it('holds the manually chosen region when fresh speech points back to the old anchor', () => {
+    const model = buildManuscript(SAMPLE_MANUSCRIPT);
+    const oldAnchor = searchManuscript(model, 'The studio light blinked once', 1) ?? 0;
+    const visible = searchManuscript(model, 'By noon the manuscript', 1) ?? 0;
+    const coordinator = createCoordinator(SAMPLE_MANUSCRIPT, oldAnchor);
+    coordinator.setVisibleReacquireAnchor({
+      source: 'manual-scroll', visibleTokenIndex: visible, detectedAtMs: 9_000,
+      direction: 'forward', hadFreshConfirmedAnchor: true
+    }, 'manual');
+
+    const result = coordinator.processTranscript(
+      delta('The studio light blinked once and Mara settled her eyes', 'mock')
+    );
+
+    expect(result.state.currentTokenIndex).toBe(oldAnchor);
+    expect(result.state.followState).toBe('holding');
+    expect(result.state.manualReacquireAnchor?.visibleTokenIndex).toBe(visible);
+    expect(result.traces.some((trace) => trace.includes('manual anchor rejected / held'))).toBe(true);
+    expect(result.traces.some((trace) => trace.includes('auto-follow remains suppressed'))).toBe(true);
   });
 
   it('resets transcript evidence and revisions when the manuscript changes', () => {

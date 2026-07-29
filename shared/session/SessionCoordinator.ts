@@ -24,7 +24,7 @@ import {
   type MovementDecisionInfo,
   type MovementDecisionOutcome
 } from '../domain/movementDiagnostics.js';
-import { transcriptToTokens } from '../domain/normalize.js';
+import { COMMON_WORDS, transcriptToTokens } from '../domain/normalize.js';
 import { HIGH_CONFIDENCE, stateFromAlignment } from '../domain/scrollModel.js';
 import type {
   AlignmentBufferDebug,
@@ -155,6 +155,8 @@ export class SessionCoordinator {
   private alignment: AlignmentResult;
   private transcriptBuffer: string[] = [];
   private localAlignmentBuffer: AlignmentBufferState = createAlignmentBufferState();
+  private reacquireEvidenceTokens: string[] = [];
+  private manualAnchorHoldReason: string | null = null;
   private resyncArmed = false;
   private lowConfidenceCount = 0;
   private manualAnchor: VisibleReacquireAnchor | null = null;
@@ -304,11 +306,14 @@ export class SessionCoordinator {
     this.resyncArmed = false;
     this.lastFreshAnchor = null;
     this.manualAnchor = null;
+    this.reacquireEvidenceTokens = [];
+    this.manualAnchorHoldReason = null;
     this.alignmentBufferDebug = { ...EMPTY_SESSION_ALIGNMENT_DEBUG };
   }
 
   armResync() {
     this.manualAnchor = null;
+    this.manualAnchorHoldReason = null;
     this.resyncArmed = true;
     this.lowConfidenceCount = 0;
     this.followState = 'resyncing';
@@ -328,6 +333,8 @@ export class SessionCoordinator {
     this.manualAnchor = { ...anchor };
     this.localAlignmentBuffer = createAlignmentBufferState();
     this.transcriptBuffer = [];
+    this.reacquireEvidenceTokens = [];
+    this.manualAnchorHoldReason = null;
     this.lowConfidenceCount = 0;
     this.resyncArmed = false;
     if (kind === 'manual' && this.followState !== 'manual' && this.followState !== 'paused') this.followState = 'holding';
@@ -347,6 +354,7 @@ export class SessionCoordinator {
 
   clearVisibleReacquireAnchor() {
     this.manualAnchor = null;
+    this.manualAnchorHoldReason = null;
   }
 
   recordMovement(params: RecordMovementParams): MovementDecisionInfo {
@@ -426,11 +434,29 @@ export class SessionCoordinator {
   private processLocalWhisper(delta: TranscriptDelta, words: string[], traces: string[]) {
     const previousToken = this.currentTokenIndex;
     const wasResyncing = this.resyncArmed;
+    const wasLost = this.followState === 'lost';
     const manualAnchor = this.manualAnchor;
+    if (wasLost && !manualAnchor) {
+      this.reacquireEvidenceTokens = [...this.reacquireEvidenceTokens, ...words].slice(-28);
+      const attempt = this.tryBoundedForwardReacquire(previousToken);
+      traces.push(`bounded reacquire evidence=${this.reacquireEvidenceTokens.length} ${attempt.reason}`);
+      if (attempt.result) {
+        this.alignment = attempt.result;
+        this.currentTokenIndex = this.clampToken(attempt.result.tokenIndex);
+        this.followState = 'following';
+        this.lowConfidenceCount = 0;
+        this.localAlignmentBuffer = { committedTokens: transcriptToTokens(attempt.result.matchedText).slice(-28), provisionalTokens: [], consecutiveOffScriptDeltas: 0 };
+        this.transcriptBuffer = alignmentBufferTokens(this.localAlignmentBuffer);
+        this.reacquireEvidenceTokens = [];
+        this.recordMovement({ source: delta.source, previousTokenIndex: previousToken, result: attempt.result, followState: 'following', finalMovement: 'accepted', engineReason: attempt.result.reason, alignmentContext: 'bounded forward reacquired from recent Local Whisper evidence', markFreshAnchor: true });
+        this.alignmentBufferDebug = this.reacquireDebug(delta, words, attempt.result, 'accepted', attempt.reason);
+        return;
+      }
+    }
     const decision = evaluateProvisionalAlignmentBuffer(
       this.model, this.localAlignmentBuffer, words, manualAnchor?.visibleTokenIndex ?? previousToken,
       {
-        widenWindow: !manualAnchor && (wasResyncing || this.followState === 'lost'),
+        widenWindow: !manualAnchor && wasResyncing,
         backwardWindow: manualAnchor ? MANUAL_REACQUIRE_BACKWARD_WINDOW : undefined,
         forwardWindow: manualAnchor ? MANUAL_REACQUIRE_FORWARD_WINDOW : undefined
       }
@@ -473,9 +499,10 @@ export class SessionCoordinator {
         } else {
           moveDecision = `reacquired after manual scroll at token ${decision.result.tokenIndex}`;
           movementContext = `reacquired after manual scroll; visible anchor token=${manualAnchor.visibleTokenIndex}`;
-          traces.push(`reacquired after manual scroll visibleT=${manualAnchor.visibleTokenIndex} matchedT=${decision.result.tokenIndex}`);
+          traces.push(`transcript matched near manual anchor visibleT=${manualAnchor.visibleTokenIndex} matchedT=${decision.result.tokenIndex}; auto-follow resumed`);
         }
         this.manualAnchor = null;
+        this.manualAnchorHoldReason = null;
       } else {
         this.followState = 'holding'; movementFollowState = 'holding';
         if (startupBackwardBlocked) {
@@ -489,6 +516,7 @@ export class SessionCoordinator {
           movementContext = `manual scroll reacquire pending; visible anchor token=${manualAnchor.visibleTokenIndex}`;
         }
         traces.push(`moveToToken called: NO (${moveDecision})`);
+        this.traceManualAnchorHold(traces, manualAnchor, moveDecision);
       }
     } else if (freshHighConfidenceMatch && autoBackwardCandidate) {
       this.followState = 'holding'; movementFollowState = 'holding';
@@ -506,7 +534,14 @@ export class SessionCoordinator {
     } else {
       this.lowConfidenceCount += 1;
       const staleHighConfidence = decision.result.confidence >= HIGH_CONFIDENCE && !decision.moveRecommended;
-      const nextState = staleHighConfidence ? 'holding' : stateFromAlignment(decision.result, previousToken, wasResyncing, this.lowConfidenceCount);
+      // A high score from old committed context is not a fresh alignment. Let the existing
+      // low-confidence/lost progression handle it instead of refreshing the anchor forever.
+      const nextState = stateFromAlignment(
+        staleHighConfidence ? { ...decision.result, confidence: 0 } : decision.result,
+        previousToken,
+        wasResyncing,
+        this.lowConfidenceCount
+      );
       this.followState = nextState; movementFollowState = nextState;
       moveDecision = staleHighConfidence ? 'held: current delta did not contribute a manuscript anchor' : `held state=${nextState} confidence below threshold`;
       movementContext = moveDecision;
@@ -525,8 +560,35 @@ export class SessionCoordinator {
       provisionalBufferTokens: decision.state.provisionalTokens, evaluationBufferTokens: decision.evaluationTokens,
       matchedText: decision.result.matchedText, confidence: decision.result.confidence,
       moveDecision, moveToTokenCalled: moved,
-      retentionDecision: decision.retainedDelta ? 'retained' : 'discarded', retentionReason: decision.retentionReason
+      retentionDecision: decision.retainedDelta ? 'retained' : 'discarded', retentionReason: decision.retentionReason,
+      selectedCandidateStartTokenIndex: decision.selectedCandidateStartTokenIndex,
+      selectedCandidateEndTokenIndex: decision.selectedCandidateEndTokenIndex,
+      newDeltaMatchedWordCount: decision.newDeltaMatchedWordCount,
+      newDeltaDistinctiveMatchedWordCount: decision.newDeltaDistinctiveMatchedWordCount,
+      commitRejectedReason: decision.commitRejectedReason ?? undefined,
+      lowConfidenceCount: this.lowConfidenceCount,
+      lostOrResyncing: this.followState === 'lost' || this.followState === 'resyncing'
     };
+    if (wasLost) Object.assign(this.alignmentBufferDebug, this.reacquireDebug(delta, words, decision.result, 'rejected', 'bounded forward candidate did not meet strong evidence requirements'));
+  }
+
+  private tryBoundedForwardReacquire(anchorToken: number): { result: AlignmentResult | null; reason: string } {
+    if (this.reacquireEvidenceTokens.length < 8) return { result: null, reason: 'waiting for at least 8 recent evidence tokens' };
+    const result = alignTranscript(this.model, this.reacquireEvidenceTokens, anchorToken, { backwardWindow: 80, forwardWindow: 360, maxTranscriptTokens: 28 });
+    const indexes = result.diagnostics?.selectedTranscriptTokenIndexes ?? [];
+    const matched = indexes.length;
+    const distinctive = indexes.map((index) => this.reacquireEvidenceTokens[index]).filter((token) => token && token.length >= 4 && !COMMON_WORDS.has(token)).length;
+    const start = result.diagnostics?.selectedCandidateStartTokenIndex ?? result.tokenIndex;
+    const separation = result.confidence - (result.diagnostics?.runnerUpConfidence ?? 0);
+    const valid = result.confidence >= .84 && matched >= 4 && distinctive >= 3 && start >= anchorToken + 8 && result.tokenIndex <= anchorToken + 360 && separation >= .08;
+    if (!valid) return { result: null, reason: `rejected candidate t${start}-${result.tokenIndex} conf=${result.confidence.toFixed(2)} matched=${matched} distinctive=${distinctive} separation=${separation.toFixed(2)}` };
+    return { result, reason: `accepted candidate t${start}-${result.tokenIndex} conf=${result.confidence.toFixed(2)} matched=${matched} distinctive=${distinctive} separation=${separation.toFixed(2)}` };
+  }
+
+  private reacquireDebug(delta: TranscriptDelta, words: string[], result: AlignmentResult, event: 'accepted' | 'rejected', reason: string): AlignmentBufferDebug {
+    const indexes = result.diagnostics?.selectedTranscriptTokenIndexes ?? [];
+    const distinctive = indexes.map((index) => this.reacquireEvidenceTokens[index]).filter((token) => token && token.length >= 4 && !COMMON_WORDS.has(token)).length;
+    return { ...EMPTY_SESSION_ALIGNMENT_DEBUG, source: delta.source, rawTranscript: delta.text, normalizedTokens: words, evaluationBufferTokens: [...this.reacquireEvidenceTokens], matchedText: result.matchedText, confidence: result.confidence, moveDecision: event === 'accepted' ? `bounded forward reacquired at token ${result.tokenIndex}` : 'bounded forward reacquire held', moveToTokenCalled: event === 'accepted', retentionDecision: event, retentionReason: reason, selectedCandidateStartTokenIndex: result.diagnostics?.selectedCandidateStartTokenIndex, selectedCandidateEndTokenIndex: result.diagnostics?.selectedCandidateEndTokenIndex, newDeltaMatchedWordCount: indexes.length, newDeltaDistinctiveMatchedWordCount: distinctive, commitRejectedReason: event === 'rejected' ? reason : undefined, lowConfidenceCount: this.lowConfidenceCount, lostOrResyncing: this.followState === 'lost' || this.followState === 'resyncing', reacquireEvent: event, reacquireReason: reason };
   }
 
   private processStandardProvider(delta: TranscriptDelta, words: string[], traces: string[]) {
@@ -569,8 +631,9 @@ export class SessionCoordinator {
           moveDecision = startup ? `cold-start reacquired from visible text at token ${result.tokenIndex}` : `reacquired after manual scroll at token ${result.tokenIndex}`;
           movementContext = startup ? `cold-start reacquired from visible text; startup visible anchor token=${manualAnchor.visibleTokenIndex}` : `reacquired after manual scroll; visible anchor token=${manualAnchor.visibleTokenIndex}`;
           retentionReason = startup ? 'fresh high-confidence match near startup visible anchor' : 'fresh high-confidence match near visible manual anchor';
-          traces.push(startup ? `cold-start reacquired from visible text visibleT=${manualAnchor.visibleTokenIndex} matchedT=${result.tokenIndex}` : `reacquired after manual scroll visibleT=${manualAnchor.visibleTokenIndex} matchedT=${result.tokenIndex}`);
+          traces.push(startup ? `cold-start reacquired from visible text visibleT=${manualAnchor.visibleTokenIndex} matchedT=${result.tokenIndex}` : `transcript matched near manual anchor visibleT=${manualAnchor.visibleTokenIndex} matchedT=${result.tokenIndex}; auto-follow resumed`);
           this.manualAnchor = null;
+          this.manualAnchorHoldReason = null;
         } else {
           this.followState = 'holding'; movementState = 'holding';
           moveDecision = startupBackwardBlocked
@@ -581,6 +644,7 @@ export class SessionCoordinator {
           movementContext = startupBackwardBlocked ? 'auto-backward candidate held after startup; possible rollback/reread' : manualAnchor.source === 'startup' ? highConfidence ? `held because startup match was outside visible neighborhood; startup visible anchor token=${manualAnchor.visibleTokenIndex}` : `startup visible anchor reacquire pending; visible anchor token=${manualAnchor.visibleTokenIndex}` : `manual scroll reacquire pending; visible anchor token=${manualAnchor.visibleTokenIndex}`;
           retentionReason = manualAnchor.source === 'startup' ? 'waiting for fresh high-confidence match near startup visible anchor' : 'waiting for fresh high-confidence match near visible manual anchor';
           traces.push(`action: HELD (${moveDecision})`);
+          this.traceManualAnchorHold(traces, manualAnchor, moveDecision);
         }
       } else if (highConfidence && autoBackwardCandidate) {
         this.followState = 'holding'; movementState = 'holding';
@@ -620,6 +684,21 @@ export class SessionCoordinator {
 
   private clampToken(tokenIndex: number) {
     return clamp(tokenIndex, 0, Math.max(this.model.tokens.length - 1, 0));
+  }
+
+  private traceManualAnchorHold(
+    traces: string[],
+    anchor: VisibleReacquireAnchor,
+    reason: string
+  ) {
+    if (
+      (anchor.source !== 'manual-scroll' && anchor.source !== 'tablet-manual-scroll') ||
+      reason === this.manualAnchorHoldReason
+    ) return;
+    this.manualAnchorHoldReason = reason;
+    traces.push(
+      `manual anchor rejected / held visibleT=${anchor.visibleTokenIndex}; ${reason}; auto-follow remains suppressed`
+    );
   }
 
   private bumpRevision() {

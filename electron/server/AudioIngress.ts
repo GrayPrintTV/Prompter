@@ -22,6 +22,7 @@ export type AudioIngressDiagnostics = {
 
 type Stream = {
   deviceId: string;
+  connectionId: string | null;
   start: AudioStreamStartPayload;
   expectedSequence: number;
   frames: Array<{ metadata: AudioFrameMetadata; pcm: Buffer }>;
@@ -42,20 +43,30 @@ export class AudioIngress {
     private readonly maxBufferedMs = 6_000
   ) {}
 
-  start(deviceId: string, payload: AudioStreamStartPayload) {
+  start(deviceId: string, payload: AudioStreamStartPayload, connectionId: string | null = null) {
     if (!this.ownsController(deviceId)) throw new Error('Device does not own the controller lease.');
     if (![16000, 48000].includes(payload.sampleRate) || payload.channels !== 1 || payload.encoding !== 'pcm-s16le') {
       throw new Error('Audio must be mono PCM16 little-endian at 16 kHz or 48 kHz.');
     }
     if (payload.frameDurationMs < 100 || payload.frameDurationMs > 250) throw new Error('Audio frames must represent 100-250 ms.');
-    this.stream = { deviceId, start: payload, expectedSequence: payload.sequenceStart, frames: [], sampleCount: 0 };
+    this.stream = { deviceId, connectionId, start: payload, expectedSequence: payload.sequenceStart, frames: [], sampleCount: 0 };
   }
 
-  async accept(deviceId: string, metadata: AudioFrameMetadata, pcm: Buffer) {
+  metadataRejectionReason(deviceId: string, metadata: AudioFrameMetadata, connectionId: string | null = null): string | null {
     const stream = this.stream;
-    if (!stream || stream.deviceId !== deviceId || !this.ownsController(deviceId)) throw new Error('No active audio stream for this controller.');
-    if (metadata.streamId !== stream.start.streamId || metadata.sampleRate !== stream.start.sampleRate ||
-        metadata.channels !== 1 || metadata.encoding !== 'pcm-s16le') throw new Error('Audio frame metadata does not match the active stream.');
+    if (!stream) return 'server metadata missing: no active audio stream';
+    if (stream.deviceId !== deviceId || !this.ownsController(deviceId)) return 'controller lease does not own the active audio stream';
+    if (stream.connectionId !== connectionId) return `stale connection generation ${connectionId ?? 'none'}; active connection is ${stream.connectionId ?? 'none'}`;
+    if (metadata.streamId !== stream.start.streamId) return `stale streamId ${metadata.streamId}; active stream is ${stream.start.streamId}`;
+    if (metadata.sampleRate !== stream.start.sampleRate ||
+        metadata.channels !== 1 || metadata.encoding !== 'pcm-s16le') return 'audio frame format does not match the active stream';
+    return null;
+  }
+
+  async accept(deviceId: string, metadata: AudioFrameMetadata, pcm: Buffer, connectionId: string | null = null) {
+    const rejection = this.metadataRejectionReason(deviceId, metadata, connectionId);
+    if (rejection) throw new Error(rejection);
+    const stream = this.stream!;
     if (pcm.byteLength !== metadata.sampleCount * 2) {
       this.diagnosticsState.framesDropped++;
       throw new Error('PCM frame length does not match sampleCount.');
@@ -88,8 +99,10 @@ export class AudioIngress {
     if (stream.sampleCount >= targetSamples) await this.produceChunk(targetSamples);
   }
 
-  stop(deviceId?: string) {
+  stop(deviceId?: string, streamId?: string, connectionId?: string | null) {
     if (deviceId && this.stream?.deviceId !== deviceId) return;
+    if (streamId && this.stream?.start.streamId !== streamId) return;
+    if (connectionId !== undefined && this.stream?.connectionId !== connectionId) return;
     this.stream = null;
     this.diagnosticsState.queueDurationMs = 0;
   }
