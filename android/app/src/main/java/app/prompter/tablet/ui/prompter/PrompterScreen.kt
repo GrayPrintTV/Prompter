@@ -33,6 +33,8 @@ import app.prompter.tablet.ui.MainViewModel
 import app.prompter.tablet.ui.Screen
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.withFrameNanos
 import kotlin.math.roundToInt
 import kotlin.math.max
@@ -74,6 +76,8 @@ fun PrompterScreen(state: MainUiState, viewModel: MainViewModel, requestMicropho
     val chunks = remember(snapshot.manuscript.contentHash) { manuscriptChunks(snapshot) }
     val paragraphs = remember(snapshot.manuscript.contentHash) { visualParagraphs(snapshot, chunks) }
     val listState = rememberLazyListState()
+    val fastScrollScope = rememberCoroutineScope()
+    val fastScrollJob = remember { arrayOfNulls<Job>(1) }
     val followController = remember { MovementFollowController() }
     val assistCruise = remember { AssistCruiseController() }
     val runtime = state.session.runtimeSettings
@@ -86,6 +90,7 @@ fun PrompterScreen(state: MainUiState, viewModel: MainViewModel, requestMicropho
     var manualScrollObserved by remember { mutableStateOf(false) }
     var manualDetectedAtMs by remember { mutableLongStateOf(0L) }
     var manualInputSource by remember { mutableStateOf("unknown") }
+    var fastScrollDragging by remember { mutableStateOf(false) }
     val movement = state.session.latestMovement
     val manualRepositionResult = state.session.manualRepositionResult
     val snapshotAnchor = state.session.snapshotAnchor
@@ -122,9 +127,10 @@ fun PrompterScreen(state: MainUiState, viewModel: MainViewModel, requestMicropho
             manualTouchGeneration += 1
         }
     }
-    LaunchedEffect(listState.isScrollInProgress, manualTouchGeneration) {
+    LaunchedEffect(listState.isScrollInProgress, fastScrollDragging, manualTouchGeneration) {
         if (manualTouchGeneration <= 0 || !followController.isManualHoldActive()) return@LaunchedEffect
-        if (listState.isScrollInProgress) {
+        if (listState.isScrollInProgress || fastScrollDragging) {
+            if (fastScrollDragging) return@LaunchedEffect
             followController.recordScrollObserved()
             if (!manualScrollObserved) viewModel.logTabletScrollObserved()
             manualScrollObserved = true
@@ -132,7 +138,7 @@ fun PrompterScreen(state: MainUiState, viewModel: MainViewModel, requestMicropho
         }
         if (!manualScrollObserved || viewportHeight <= 0) return@LaunchedEffect
         delay(180)
-        if (listState.isScrollInProgress) return@LaunchedEffect
+        if (listState.isScrollInProgress || fastScrollDragging) return@LaunchedEffect
         viewModel.logTabletMomentumSettled()
         val layoutInfo = listState.layoutInfo
         val readingBandY = (viewportHeight * effectiveDisplay.readingBandFraction).roundToInt()
@@ -351,6 +357,7 @@ fun PrompterScreen(state: MainUiState, viewModel: MainViewModel, requestMicropho
     val sideMargins = with(density) {
         ((viewportWidth * (1f - effectiveDisplay.contentWidthFraction) / 2f).roundToInt()).toDp()
     }
+    val manuscriptLength = snapshot.manuscript.normalizedContent?.length ?: 0
     Box(Modifier.fillMaxSize().background(background).onSizeChanged { viewportHeight = it.height; viewportWidth = it.width }) {
         LazyColumn(
             state = listState,
@@ -381,6 +388,64 @@ fun PrompterScreen(state: MainUiState, viewModel: MainViewModel, requestMicropho
         }
         Box(Modifier.fillMaxWidth().height(with(density) { bandHeightPx.toDp() }).align(Alignment.TopCenter).offset { IntOffset(0, bandY - (bandHeightPx / 2).roundToInt()) }
             .background(highlight.copy(alpha = opacity)))
+        ManuscriptFastScrollThumb(
+            listState = listState,
+            paragraphs = paragraphs,
+            manuscriptLength = manuscriptLength,
+            dragging = fastScrollDragging,
+            color = text,
+            onDragStart = {
+                manualDetectedAtMs = System.currentTimeMillis()
+                manualInputSource = "fast-scroll"
+                manualScrollObserved = false
+                fastScrollDragging = true
+                val replaced = followController.recordUserTouch()
+                viewModel.logManualScrollStarted(manualInputSource, "prompter-lazy-column")
+                if (replaced) viewModel.logTabletManualOverrideReplaced()
+                manualTouchGeneration += 1
+            },
+            onFractionChanged = { fraction ->
+                if (!manualScrollObserved) viewModel.logTabletScrollObserved()
+                manualScrollObserved = true
+                followController.recordScrollObserved()
+                fastScrollJob[0]?.cancel()
+                fastScrollJob[0] = fastScrollScope.launch {
+                    fastScrollTargetForFraction(fraction, paragraphs, manuscriptLength)?.let { target ->
+                        listState.scrollToItem(target.itemIndex)
+                        withFrameNanos { }
+                        val paragraph = paragraphs[target.itemIndex]
+                        val layout = paragraphLayouts[paragraph.key]
+                        val item = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == target.itemIndex }
+                        if (layout != null && item != null) {
+                            val safeOffset = target.localCharacterOffset.coerceAtMost((paragraph.text.length - 1).coerceAtLeast(0))
+                            val line = layout.getLineForOffset(safeOffset)
+                            val lineCenter = (layout.getLineTop(line) + layout.getLineBottom(line)) / 2f
+                            val layoutInfo = listState.layoutInfo
+                            val geometry = ViewportTargetGeometry(
+                                itemOffset = item.offset,
+                                viewportStartOffset = layoutInfo.viewportStartOffset,
+                                beforeContentPadding = layoutInfo.beforeContentPadding,
+                                lineCenterInsideParagraph = lineCenter,
+                                readingBandCenter = bandY
+                            )
+                            listState.dispatchRawDelta(geometry.desiredScrollDelta)
+                        }
+                    }
+                }
+            },
+            onDragEnd = {
+                val finalJump = fastScrollJob[0]
+                fastScrollScope.launch {
+                    finalJump?.join()
+                    fastScrollDragging = false
+                    manualTouchGeneration += 1
+                }
+            },
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .fillMaxHeight()
+                .padding(top = 72.dp, bottom = 96.dp)
+        )
         Surface(Modifier.align(Alignment.TopCenter).fillMaxWidth(), tonalElevation = 4.dp) {
             Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
