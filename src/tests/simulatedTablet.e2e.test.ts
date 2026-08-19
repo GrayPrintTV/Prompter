@@ -215,7 +215,7 @@ describe('Windows-only simulated tablet', () => {
     await observer.receive('sessionSnapshot');
     observer.socket.send(Buffer.alloc(6400));
     observer.socket.send(envelope('requestSnapshot', { action: 'requestSnapshot' }, 1));
-    expect((await observer.receive('sessionSnapshot')).payload.manuscript.manuscriptId).toBe('spoken-fixture');
+    expect((await observer.receive('sessionState')).payload.manuscript).toEqual(expect.objectContaining({ manuscriptId: 'spoken-fixture' }));
 
     second.socket.send(envelope('manualFollowDiagnostic', {
       action: 'manualFollowDiagnostic',
@@ -249,10 +249,10 @@ describe('Windows-only simulated tablet', () => {
       reason: expect.stringContaining('another tablet')
     }));
     observer.socket.send(envelope('requestSnapshot', { action: 'requestSnapshot' }, 3));
-    expect((await observer.receive('sessionSnapshot')).payload.manuscript.manuscriptId).toBe('spoken-fixture');
+    expect((await observer.receive('sessionState')).payload.manuscript).toEqual(expect.objectContaining({ manuscriptId: 'spoken-fixture' }));
     second.socket.send(Buffer.alloc(6400));
     second.socket.send(envelope('requestSnapshot', { action: 'requestSnapshot' }, 3));
-    expect((await second.receive('sessionSnapshot')).payload.manuscript.manuscriptId).toBe('spoken-fixture');
+    expect((await second.receive('sessionState')).payload.manuscript).toEqual(expect.objectContaining({ manuscriptId: 'spoken-fixture' }));
     second.socket.send(envelope('audioStreamStart', {
       action: 'start', streamId: 'stream-1', sampleRate: 16000, channels: 1, encoding: 'pcm-s16le',
       sequenceStart: 0, captureTimestampMs: Date.now(), frameDurationMs: 200
@@ -289,7 +289,8 @@ describe('Windows-only simulated tablet', () => {
     reconnected.socket.send(envelope('authenticate', {
       action: 'authenticate', deviceId: 'tablet-1', clientNonce: nonce, timestampMs: Date.now(),
       proof: AuthenticationService.createProof(credential, reconnectChallenge.payload.nonce, nonce, 'server-1', 'tablet-1', PROTOCOL_MAJOR),
-      protocolMajor: PROTOCOL_MAJOR, protocolMinor: PROTOCOL_MINOR
+      protocolMajor: PROTOCOL_MAJOR, protocolMinor: PROTOCOL_MINOR,
+      cachedManuscriptHash: snapshot.payload.manuscript.contentHash
     }));
     await reconnected.receive('authenticated');
     expect((await reconnected.receive('controllerLease')).payload).toEqual(expect.objectContaining({
@@ -297,7 +298,7 @@ describe('Windows-only simulated tablet', () => {
       resumed: true,
       streamRegistered: false
     }));
-    expect((await reconnected.receive('sessionSnapshot')).payload.manuscript.manuscriptId).toBe('spoken-fixture');
+    expect((await reconnected.receive('sessionState')).payload.manuscript).toEqual(expect.objectContaining({ manuscriptId: 'spoken-fixture' }));
     reconnected.socket.send(envelope('audioStreamStart', {
       action: 'start', streamId: 'stream-1', sampleRate: 16000, channels: 1, encoding: 'pcm-s16le',
       sequenceStart: 0, captureTimestampMs: Date.now(), frameDurationMs: 200

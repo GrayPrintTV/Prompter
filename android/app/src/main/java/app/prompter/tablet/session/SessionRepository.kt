@@ -8,6 +8,7 @@ import app.prompter.tablet.protocol.ProtocolEnvelope
 import app.prompter.tablet.protocol.SessionSnapshot
 import app.prompter.tablet.protocol.TranscriptEvent
 import app.prompter.tablet.protocol.RuntimeSettings
+import app.prompter.tablet.protocol.SessionState
 import java.io.File
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -55,7 +56,9 @@ class SessionRepository private constructor(private val cacheDir: File, private 
         require(snapshot.manuscript.normalizedContent != null || snapshot.manuscript.contentReference != null)
         snapshot.manuscript.normalizedContent?.let { content ->
             val file = cacheFile(snapshot.manuscript.contentHash)
-            if (!file.exists() || file.readText() != content) file.writeText(content)
+            // The cache filename is content-addressed. Avoid reading a second full
+            // manuscript String into the tablet heap just to compare it.
+            if (!file.exists()) file.writeText(content)
         }
         val current = _state.value
         val restored = restoreCachedContent(snapshot)
@@ -89,6 +92,29 @@ class SessionRepository private constructor(private val cacheDir: File, private 
             manualRepositionResult = current.manualRepositionResult
         )
     }
+
+    fun applyState(envelope: ProtocolEnvelope, state: SessionState) {
+        val manuscript = _state.value.snapshot?.manuscript
+        require(manuscript != null && manuscript.contentHash == state.manuscript.contentHash) {
+            "Server sent state for a manuscript that is not cached in memory."
+        }
+        applySnapshot(envelope, SessionSnapshot(
+            sessionRevision = state.sessionRevision,
+            manuscriptRevision = state.manuscriptRevision,
+            manuscript = manuscript.copy(manuscriptId = state.manuscript.manuscriptId),
+            acceptedPosition = state.acceptedPosition,
+            followState = state.followState,
+            currentConfidence = state.currentConfidence,
+            latestTranscript = state.latestTranscript,
+            controllerLease = state.controllerLease,
+            displayHints = state.displayHints,
+            runtimeSettings = state.runtimeSettings,
+            narrationSessionId = state.narrationSessionId,
+            movementDecision = state.movementDecision
+        ))
+    }
+
+    fun cachedManuscriptHash(): String? = _state.value.snapshot?.manuscript?.contentHash
 
     fun acceptIncremental(envelope: ProtocolEnvelope): Boolean = evaluateIncremental(envelope).accepted
 

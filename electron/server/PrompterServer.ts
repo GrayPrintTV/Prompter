@@ -29,6 +29,13 @@ import type {
 import type { ProtocolValidator } from './ProtocolValidator.js';
 import type { DiagnosticSink } from './DiagnosticLogService.js';
 import { diagnosticError } from './DiagnosticLogService.js';
+import {
+  compactSessionState,
+  tabletSnapshotMessages,
+  TABLET_MESSAGE_MAX_BYTES,
+  TABLET_MESSAGE_WARN_BYTES,
+  type TabletSnapshot
+} from './TabletSnapshotTransport.js';
 import type { IncomingMessage } from 'node:http';
 
 type Client = {
@@ -46,6 +53,7 @@ type Client = {
   alive: boolean;
   firstFrameSeen: boolean;
   audioFramesReceived: number;
+  knownManuscriptHash: string | null;
 };
 
 export type PrompterServerOptions = {
@@ -205,7 +213,7 @@ export class PrompterServer {
     if (released) {
       for (const client of this.clients.values()) if (client.authenticated) {
         this.send(client, 'controllerLease', { granted: false, deviceId: controller, reason });
-        this.send(client, 'sessionSnapshot', this.options.session.getSnapshot());
+        this.sendSnapshot(client);
       }
       this.log({ component: 'server.mode', level: 'info', event: 'mode.tablet.control_released', message: reason, deviceId: controller, details: { narrationSessionEnded: Boolean(narration) } });
       this.emitStatus();
@@ -240,7 +248,7 @@ export class PrompterServer {
   broadcastSnapshot() {
     const snapshot = this.options.session.getSnapshot();
     if (!snapshot) return;
-    for (const client of this.clients.values()) if (client.authenticated) this.send(client, 'sessionSnapshot', snapshot);
+    for (const client of this.clients.values()) if (client.authenticated) this.sendSnapshot(client, snapshot as TabletSnapshot);
   }
 
   getStatus(): ServerStatusSummary {
@@ -297,7 +305,7 @@ export class PrompterServer {
 
   private listen(host: string, port: number) {
     return new Promise<WebSocketServer>((resolve, reject) => {
-      const listener = new WebSocketServer({ host, port });
+      const listener = new WebSocketServer({ host, port, maxPayload: TABLET_MESSAGE_MAX_BYTES });
       listener.once('listening', () => resolve(listener));
       listener.once('error', reject);
       listener.on('connection', (socket, request) => this.accept(socket, request));
@@ -321,6 +329,7 @@ export class PrompterServer {
     const client: Client = {
       socket, connectionId, remoteAddress, authenticated: false, deviceId: null, displayName: null,
       sequence: -1, outgoingSequence: 0, pendingAudioMetadata: null, audioStreamId: null, alive: true,
+      knownManuscriptHash: null,
       authenticationTimer: setTimeout(() => {
         this.log({ component: 'server.authentication', level: 'warn', event: 'authentication.timeout', message: 'Client did not pair or authenticate before timeout.', connectionId, remoteAddress });
         this.closeClient(client, 1008, 'Authentication timeout');
@@ -523,6 +532,9 @@ export class PrompterServer {
         client.authenticated = true;
         client.deviceId = result.device.deviceId;
         client.displayName = result.device.displayName;
+        client.knownManuscriptHash = typeof authentication.cachedManuscriptHash === 'string'
+          ? authentication.cachedManuscriptHash
+          : null;
         clearTimeout(client.authenticationTimer);
         this.send(client, 'authenticated', { deviceId: client.deviceId });
         if (this.options.session.getControllerDeviceId() === client.deviceId) {
@@ -536,7 +548,7 @@ export class PrompterServer {
             reason: 'Controller lease resumed; audio stream registration is required.'
           });
         }
-        this.send(client, 'sessionSnapshot', this.options.session.getSnapshot());
+        this.sendSnapshot(client);
         this.log({ component: 'server.authentication', level: 'info', event: 'authentication.accepted', message: 'Paired device authenticated.', connectionId: client.connectionId, remoteAddress: client.remoteAddress, deviceId: client.deviceId });
         this.manualFollowLog('Authentication/controller lease result.', {
           connectionId: client.connectionId,
@@ -579,9 +591,9 @@ export class PrompterServer {
         }
         return;
       }
-      if (client.sequence >= 0 && sequence > client.sequence + 1) this.send(client, 'sessionSnapshot', this.options.session.getSnapshot());
+      if (client.sequence >= 0 && sequence > client.sequence + 1) this.sendSnapshot(client);
       client.sequence = sequence;
-      if (action === 'requestSnapshot') this.send(client, 'sessionSnapshot', this.options.session.getSnapshot());
+      if (action === 'requestSnapshot') this.sendSnapshot(client);
       else if (action === 'manualFollowDiagnostic') {
         this.options.protocolValidator?.assert('manualFollowDiagnostic', payload);
         const diagnostic = payload as unknown as TabletManualFollowDiagnosticPayload;
@@ -734,7 +746,7 @@ export class PrompterServer {
             connectionGeneration: client.connectionId,
             narrationSessionId: narration.narrationSessionId
           });
-          this.send(client, 'sessionSnapshot', this.options.session.getSnapshot());
+          this.sendSnapshot(client);
           this.emitStatus();
         } catch (error) {
           const reason = error instanceof Error ? error.message : String(error);
@@ -874,7 +886,8 @@ export class PrompterServer {
               });
             this.log({ component: 'server.movement', level: 'info', event: 'server.movement.sent', message: 'Semantic movement event sent to authenticated client.', connectionId: client.connectionId, deviceId: client.deviceId ?? undefined, details: { sessionRevision: processed.state.sessionRevision, manuscriptRevision: processed.state.manuscriptRevision, targetTokenIndex: processed.state.currentTokenIndex, classification: processed.movement.classification } });
           }
-          this.send(client, 'sessionSnapshot', this.options.session.getSnapshot());
+          // Transcript and movement events already carry the incremental state.
+          // Do not replay the manuscript after every transcription.
         }
       }
     } catch (error) {
@@ -882,6 +895,24 @@ export class PrompterServer {
     } finally {
       this.transcriptionActive = false;
     }
+  }
+
+  private sendSnapshot(client: Client, provided?: TabletSnapshot | null) {
+    const snapshot = provided ?? this.options.session.getSnapshot() as TabletSnapshot | null;
+    if (!snapshot) return;
+    if (client.knownManuscriptHash === snapshot.manuscript.contentHash) {
+      this.send(client, 'sessionState', compactSessionState(snapshot));
+      return;
+    }
+    const messages = tabletSnapshotMessages(snapshot);
+    for (const message of messages) this.send(client, message.type, message.payload);
+    client.knownManuscriptHash = snapshot.manuscript.contentHash;
+    this.log({
+      component: 'server.protocol', level: 'info', event: 'server.manuscript.sync.sent',
+      message: messages.length === 1 ? 'Tablet manuscript sent in one bounded snapshot.' : 'Tablet manuscript sent as bounded snapshot chunks.',
+      connectionId: client.connectionId, deviceId: client.deviceId ?? undefined,
+      details: { contentHash: snapshot.manuscript.contentHash, messageCount: messages.length, chunked: messages.length > 1 }
+    });
   }
 
   private send(client: Client, type: string, payload: unknown) {
@@ -898,9 +929,18 @@ export class PrompterServer {
       sentAtMs: Date.now(),
       payload
     };
-    client.socket.send(JSON.stringify(envelope));
-    this.log({ component: 'server.protocol', level: 'debug', event: 'server.message.sent', message: 'Protocol envelope sent.', connectionId: client.connectionId, remoteAddress: client.remoteAddress,
-      protocolMessageType: type, details: { bytes: Buffer.byteLength(JSON.stringify(envelope)), sequence: envelope.sequence } });
+    const encoded = JSON.stringify(envelope);
+    const bytes = Buffer.byteLength(encoded, 'utf8');
+    if (bytes > TABLET_MESSAGE_MAX_BYTES) {
+      this.log({ component: 'server.protocol', level: 'error', event: 'server.message.oversize_rejected', message: 'Tablet-bound message exceeded the hard outbound budget and was not sent.', connectionId: client.connectionId, remoteAddress: client.remoteAddress,
+        protocolMessageType: type, details: { bytes, maxBytes: TABLET_MESSAGE_MAX_BYTES, sequence: envelope.sequence } });
+      this.closeClient(client, 1011, 'Outbound message exceeded safety limit');
+      return;
+    }
+    client.socket.send(encoded);
+    const large = bytes >= TABLET_MESSAGE_WARN_BYTES;
+    this.log({ component: 'server.protocol', level: large ? 'warn' : 'debug', event: large ? 'server.message.large_sent' : 'server.message.sent', message: large ? 'Large tablet-bound protocol envelope sent within the safety budget.' : 'Protocol envelope sent.', connectionId: client.connectionId, remoteAddress: client.remoteAddress,
+      protocolMessageType: type, details: { bytes, sequence: envelope.sequence, maxBytes: TABLET_MESSAGE_MAX_BYTES } });
   }
 
   private semanticMovement(

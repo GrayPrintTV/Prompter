@@ -47,7 +47,22 @@ class WebSocketClient(private val diagnostics: DiagnosticLogger) {
                 }
                 if (active) { diagnostics.record("websocket", "info", "android.websocket.open", "WebSocket upgrade succeeded (HTTP ${response.code}).", remoteAddress = request.url.toString(), webSocketState = "OPEN", details = mapOf("generation" to activeGeneration.toString())); events.onOpen() }
             }
-            override fun onMessage(webSocket: WebSocket, text: String) { if (activeGeneration == generation) { diagnostics.record("websocket", "debug", "android.message.received", "Text frame received (${text.toByteArray().size} bytes).", webSocketState = "OPEN"); events.onText(text) } }
+            override fun onMessage(webSocket: WebSocket, text: String) { if (activeGeneration == generation) {
+                val bytes = utf8Length(text)
+                if (bytes > MAX_INBOUND_TEXT_BYTES) {
+                    synchronized(this@WebSocketClient) {
+                        generation++
+                        openGeneration = null
+                        if (socket === webSocket) socket = null
+                    }
+                    diagnostics.record("websocket", "error", "android.message.oversize_rejected", "Inbound text frame exceeded the tablet safety budget.", webSocketState = "CLOSING", closeCode = 1009, closeReason = "Message too large", details = mapOf("bytes" to bytes.toString(), "maxBytes" to MAX_INBOUND_TEXT_BYTES.toString()))
+                    events.onFailure("Inbound WebSocket message exceeded $MAX_INBOUND_TEXT_BYTES bytes.", "MessageTooLarge", null, null)
+                    webSocket.close(1009, "Message too large")
+                } else {
+                    diagnostics.record("websocket", "debug", "android.message.received", "Text frame received ($bytes bytes).", webSocketState = "OPEN")
+                    events.onText(text)
+                }
+            } }
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) { if (activeGeneration == generation) { diagnostics.record("websocket", "warn", "android.websocket.closing", "Server initiated WebSocket close.", webSocketState = "CLOSING", closeCode = code, closeReason = reason); events.onClosing(code, reason) }; webSocket.close(code, reason) }
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) { if (activeGeneration == generation) { synchronized(this@WebSocketClient) { if (openGeneration == activeGeneration) openGeneration = null }; diagnostics.record("websocket", "warn", "android.websocket.closed", "WebSocket closed.", webSocketState = "CLOSED", closeCode = code, closeReason = reason, details = mapOf("generation" to activeGeneration.toString())); events.onClosed(code, reason) } }
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) { if (activeGeneration == generation) {
@@ -98,5 +113,34 @@ class WebSocketClient(private val diagnostics: DiagnosticLogger) {
             active.close(1000, reason)
         }
         socket = null
+    }
+
+    @Synchronized
+    fun rejectProtocolMessage(reason: String) {
+        generation++
+        openGeneration = null
+        val active = socket
+        socket = null
+        active?.close(1009, reason.take(120))
+    }
+
+    companion object {
+        const val MAX_INBOUND_TEXT_BYTES = 256 * 1024
+
+        fun utf8Length(value: String): Int {
+            var bytes = 0
+            var index = 0
+            while (index < value.length) {
+                val character = value[index]
+                bytes += when {
+                    character.code < 0x80 -> 1
+                    character.code < 0x800 -> 2
+                    character.isHighSurrogate() && index + 1 < value.length && value[index + 1].isLowSurrogate() -> { index++; 4 }
+                    else -> 3
+                }
+                index++
+            }
+            return bytes
+        }
     }
 }

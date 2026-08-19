@@ -8,6 +8,7 @@ import app.prompter.tablet.security.Authentication
 import app.prompter.tablet.security.CredentialStore
 import app.prompter.tablet.security.PairedServerStore
 import app.prompter.tablet.session.SessionRepository
+import app.prompter.tablet.session.SnapshotSyncAssembler
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.util.UUID
@@ -60,6 +61,7 @@ class PrompterConnectionRepository(
     @Volatile private var activeAudioGeneration: Int? = null
     private val streamRegistration = AudioStreamRegistrationTracker()
     private val pendingManualReposition = PendingManualRepositionTracker()
+    private val snapshotSync = SnapshotSyncAssembler()
 
     fun pair(target: DiscoveredServer, request: PairRequest) {
         log.record("pairing", "info", "pairing.user.requested", "User requested pairing.", deviceId = request.deviceId, serverId = target.serverId, remoteAddress = target.endpoint, details = mapOf("source" to if (target.manual) "manual" else "discovery", "hasCode" to (request.pairingCode != null).toString()))
@@ -82,6 +84,7 @@ class PrompterConnectionRepository(
         activeAudioGeneration = null
         streamRegistration.clear()
         pendingManualReposition.clear()
+        snapshotSync.clear()
         transition(ConnectionState.Disconnected, "user requested disconnect")
         _diagnostics.value = _diagnostics.value.copy(
             controllerLease = false,
@@ -242,9 +245,11 @@ class PrompterConnectionRepository(
     }
 
     override fun onText(text: String) {
+      try {
         runCatching { codec.decodeEnvelope(text) }.onFailure {
             log.record("protocol", "error", "protocol.message.invalid", "Incoming JSON/envelope could not be decoded.", connectionId = connectionId, throwable = it)
             transition(ConnectionState.Error(it.message ?: "Invalid protocol message."), "incoming protocol decode failed")
+            throw it
         }.onSuccess { envelope ->
             _diagnostics.value = _diagnostics.value.copy(
                 serverProtocolMajor = envelope.protocolMajor,
@@ -286,6 +291,12 @@ class PrompterConnectionRepository(
                     sendControllerRequestIfReady("authentication completed")
                 }
                 "sessionSnapshot" -> sessions.applySnapshot(envelope, codec.decodePayload(envelope))
+                "sessionState" -> sessions.applyState(envelope, codec.decodePayload(envelope))
+                "sessionSnapshotStart" -> snapshotSync.begin(codec.decodePayload<SessionSnapshotStart>(envelope))
+                "manuscriptContentChunk" -> snapshotSync.append(codec.decodePayload<ManuscriptContentChunk>(envelope))
+                "manuscriptParagraphChunk" -> snapshotSync.append(codec.decodePayload<ManuscriptParagraphChunk>(envelope))
+                "manuscriptTokenChunk" -> snapshotSync.append(codec.decodePayload<ManuscriptTokenChunk>(envelope))
+                "sessionSnapshotComplete" -> sessions.applySnapshot(envelope, snapshotSync.complete(codec.decodePayload<SessionSnapshotComplete>(envelope)))
                 "runtimeSettings" -> {
                     val settings = codec.decodePayload<RuntimeSettings>(envelope)
                     if (sessions.applyRuntimeSettings(settings)) log.record("settings", "info", "android.runtime_settings.received", "Live Windows runtime settings received.", connectionId = envelope.connectionId, details = mapOf("settingsRevision" to settings.settingsRevision.toString()))
@@ -425,6 +436,13 @@ class PrompterConnectionRepository(
                 "serverShutdown" -> { sessions.markDisconnected(); _diagnostics.value = _diagnostics.value.copy(lastError = "Windows server was disabled.") }
             }
         }
+      } catch (error: Exception) {
+          snapshotSync.clear()
+          val reason = error.message ?: "Unsupported inbound protocol message."
+          log.record("protocol", "error", "protocol.message.rejected", "Inbound message was rejected without further parsing.", connectionId = connectionId, throwable = error, details = mapOf("reason" to reason.take(200)))
+          transition(ConnectionState.Error(reason), "incoming protocol message rejected")
+          socket.rejectProtocolMessage("Unsupported or oversized message")
+      }
     }
 
     override fun onClosing(code: Int, reason: String) {
@@ -482,6 +500,7 @@ class PrompterConnectionRepository(
         }
         server = target
         manualDisconnect = false; authenticated = false; socketOpen = false; outgoingSequence.set(0); incomingSequence = -1
+        snapshotSync.clear()
         registeredAudioStreamId = null
         activeAudioGeneration = null
         streamRegistrationTimeout?.cancel()
@@ -554,7 +573,8 @@ class PrompterConnectionRepository(
         send("authenticate", Authenticate(
             deviceId = deviceId(), clientNonce = nonce, timestampMs = System.currentTimeMillis(),
             proof = Authentication.proof(credential, challenge.nonce, nonce, challenge.serverId, deviceId(), ProtocolVersion.MAJOR),
-            clientBuild = AppBuildIdentity.payload
+            clientBuild = AppBuildIdentity.payload,
+            cachedManuscriptHash = sessions.cachedManuscriptHash()
         ), Authenticate.serializer(), challenge.serverId)
     }
 
@@ -595,6 +615,7 @@ class PrompterConnectionRepository(
             pendingManualAnchorReason = pendingManualReposition.reason
         )
         sessions.markDisconnected()
+        snapshotSync.clear()
         if (suppressReconnectOnce) { suppressReconnectOnce = false; return }
         if (manualDisconnect || server == null) { transition(ConnectionState.Disconnected, reason); return }
         if (pendingPair != null) { pendingPair = null; transition(ConnectionState.Error("Pairing connection failed: $reason"), "pairing connection lost"); return }

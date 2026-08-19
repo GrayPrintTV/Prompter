@@ -69,6 +69,66 @@ data class SessionSnapshot(
 )
 
 @Serializable
+data class ManuscriptSyncManifest(
+    val manuscriptId: String,
+    val contentHash: String,
+    val contentLength: Int,
+    val paragraphCount: Int,
+    val tokenCount: Int
+)
+
+@Serializable data class SnapshotChunkCounts(val content: Int, val paragraphs: Int, val tokens: Int)
+
+@Serializable
+data class SessionSnapshotStart(
+    val syncId: String,
+    val sessionRevision: Long,
+    val manuscriptRevision: Long,
+    val manuscript: ManuscriptSyncManifest,
+    val chunkCounts: SnapshotChunkCounts,
+    val acceptedPosition: Position,
+    val followState: String,
+    val currentConfidence: Double,
+    val latestTranscript: String? = null,
+    val controllerLease: ControllerLease? = null,
+    val displayHints: DisplayHints,
+    val runtimeSettings: RuntimeSettings? = null,
+    val narrationSessionId: String? = null,
+    val movementDecision: JsonObject? = null
+)
+
+@Serializable data class ManuscriptContentChunk(val syncId: String, val chunkIndex: Int, val chunkCount: Int, val text: String)
+@Serializable data class ManuscriptParagraphChunk(val syncId: String, val chunkIndex: Int, val chunkCount: Int, val paragraphs: List<ParagraphAnchor>)
+@Serializable data class ManuscriptTokenChunk(
+    val syncId: String,
+    val chunkIndex: Int,
+    val chunkCount: Int,
+    val firstTokenIndex: Int,
+    val sentenceIndexes: IntArray,
+    val paragraphIndexes: IntArray,
+    val characterStarts: IntArray,
+    val characterEnds: IntArray
+)
+@Serializable data class SessionSnapshotComplete(val syncId: String)
+
+@Serializable
+data class SessionState(
+    val sessionRevision: Long,
+    val manuscriptRevision: Long,
+    val manuscript: CachedManuscriptIdentity,
+    val acceptedPosition: Position,
+    val followState: String,
+    val currentConfidence: Double,
+    val latestTranscript: String? = null,
+    val controllerLease: ControllerLease? = null,
+    val displayHints: DisplayHints,
+    val runtimeSettings: RuntimeSettings? = null,
+    val narrationSessionId: String? = null,
+    val movementDecision: JsonObject? = null
+)
+@Serializable data class CachedManuscriptIdentity(val manuscriptId: String, val contentHash: String)
+
+@Serializable
 data class TranscriptEvent(
     val sessionRevision: Long,
     val manuscriptRevision: Long,
@@ -147,7 +207,8 @@ data class Authenticate(
     val proof: String,
     val protocolMajor: Int = ProtocolVersion.MAJOR,
     val protocolMinor: Int = ProtocolVersion.MINOR,
-    val clientBuild: BuildIdentityPayload? = null
+    val clientBuild: BuildIdentityPayload? = null,
+    val cachedManuscriptHash: String? = null
 )
 
 @Serializable

@@ -100,6 +100,7 @@ export type AuthenticatePayload = {
   protocolMajor: number;
   protocolMinor: number;
   clientBuild?: BuildIdentityPayload;
+  cachedManuscriptHash?: string;
 };
 
 export type AudioStreamStartPayload = {
