@@ -60,13 +60,13 @@ npm run package:portable
 
 `package:self-contained` runs `package:dir`, validates the packaged sidecar/model resources, and runs the sidecar JSONL smoke test. `package:portable` creates `release/Prompter-win-unpacked.zip` from that unpacked directory. The installer command is reserved as `npm run package:win` for a later packaging pass.
 
-## Daily UI and Developer mode
+## Daily UI and Advanced mode
 
-Fresh sessions open with Developer mode off. The normal Controls area is meant for narration work: project title, compact Listening status, Start Listening / Stop Listening, Local Whisper or Manual provider selection, manuscript import/editing, sentence/paragraph navigation, Resync, font size, text width, Focus Bar position/height, theme, always-on-top, and Assist Scroll on/off plus speed.
+Fresh sessions open with Advanced mode off. The normal Controls area follows a narrator workflow: open or edit a manuscript, choose a narration mode, use Start / Pause / Stop, optionally pair a tablet, recover the spoken position, and adjust the reading display.
 
 Local Whisper is the intended live provider and is the default when its basic Python/model settings are present. Mock and OpenAI Realtime are hidden from the normal provider list. OpenAI Realtime remains parked and only appears when its experimental flag is enabled and Developer mode is on.
 
-Use the `Developer` button in the header or `Ctrl+Shift+D` to reveal troubleshooting controls. Developer mode contains Mock playback, Manual transcript injection, Local Whisper draft settings, bridge/sidecar/chunk counters, transcript history, raw confidence and penalty diagnostics, Movement decision history, scroll proof controls, Reading Lookahead, Correction feel, shortcuts, torture tests, and the Debug panel. `Ctrl+`` toggles the dense Debug panel after Developer mode is enabled.
+Use `Open Advanced` at the bottom of the controls or `Ctrl+Shift+D` to reveal troubleshooting controls. Advanced mode contains Mock playback, Manual transcript injection, Local Whisper draft settings, bridge/sidecar/chunk counters, transcript history, raw confidence and penalty diagnostics, Movement decision history, scroll proof controls, Reading Lookahead, Correction feel, shortcuts, torture tests, and the Debug panel. `Ctrl+`` toggles the dense Debug panel after Advanced mode is enabled.
 
 ## Experimental OpenAI Realtime
 

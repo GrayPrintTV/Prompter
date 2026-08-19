@@ -105,7 +105,7 @@ Normal mode shows Local Whisper and Manual in the provider selector. Mock and Op
 1. Stop `npm run dev`, close all Electron windows, then run `npm run dev`.
 2. Confirm the normal provider is `Local Whisper` or select it if a previous session restored another provider.
 3. Confirm normal status says `Local Whisper ready`, `Starting`, `Listening`, `Mic not detected`, or a clear error instead of raw internals.
-4. Turn on Developer mode with the header button or `Ctrl+Shift+D`.
+4. Turn on Advanced mode with `Open Advanced` at the bottom of the controls or `Ctrl+Shift+D`.
 5. Confirm bridge diagnostics show Electron bridge Yes, Whisper bridge Yes, IPC handlers Yes, `prompterApi` object, and `ping` pong.
 6. Click `Start Monitor`.
 7. Confirm mic state becomes Stream Active and the level meter moves.
