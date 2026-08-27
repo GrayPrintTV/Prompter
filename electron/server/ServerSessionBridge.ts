@@ -57,6 +57,7 @@ export type TabletNarrationStartResult = {
   estimatedCharacter: number;
   paragraphIndex: number;
   lastAcceptedTranscriptAtMs: number | null;
+  creationReason: string;
 };
 
 export class ServerSessionBridge {
@@ -181,9 +182,15 @@ export class ServerSessionBridge {
     const manuscriptHash = this.currentManuscriptHash();
     const active = this.tabletNarration;
     if (active && active.deviceId === deviceId && active.manuscriptHash === manuscriptHash) {
-      return this.narrationResult(active, true, 'preserved');
+      active.streamId = streamId;
+      return this.narrationResult(active, true, 'preserved', 'active same-device same-manuscript narration session');
     }
     const policy = forcedPolicy ?? this.nextTabletStartPolicy;
+    const creationReason = !active
+      ? `no active narration session; applying ${policy} policy`
+      : active.deviceId !== deviceId
+        ? `controller changed from ${active.deviceId} to ${deviceId}`
+        : 'manuscript content changed';
     this.pendingTabletManualReposition = null;
     const selection = this.selectStartingToken(policy, manuscriptHash);
     this.coordinator.setPosition(selection.tokenIndex, 'following');
@@ -201,7 +208,7 @@ export class ServerSessionBridge {
     this.nextTabletStartPolicy = 'beginning';
     this.nextWindowsViewTokenIndex = null;
     this.emit();
-    return this.narrationResult(this.tabletNarration, false, selection.positionSource);
+    return this.narrationResult(this.tabletNarration, false, selection.positionSource, creationReason);
   }
 
   endTabletNarration(reason: string) {
@@ -457,7 +464,12 @@ export class ServerSessionBridge {
     return { tokenIndex: 0, positionSource: 'reset' as const };
   }
 
-  private narrationResult(narration: TabletNarrationSession, continued: boolean, positionSource: TabletNarrationStartResult['positionSource']): TabletNarrationStartResult {
+  private narrationResult(
+    narration: TabletNarrationSession,
+    continued: boolean,
+    positionSource: TabletNarrationStartResult['positionSource'],
+    creationReason: string
+  ): TabletNarrationStartResult {
     const state = this.coordinator!.getState();
     return {
       narrationSessionId: narration.id, continued, policy: narration.policy, positionSource,
@@ -465,7 +477,8 @@ export class ServerSessionBridge {
       manuscriptHash: narration.manuscriptHash, acceptedCharacter: state.currentCharacter,
       estimatedCharacter: state.alignment.tokenIndex >= 0 ? state.currentCharacter : 0,
       paragraphIndex: state.currentParagraphIndex,
-      lastAcceptedTranscriptAtMs: narration.lastAcceptedTranscriptAtMs
+      lastAcceptedTranscriptAtMs: narration.lastAcceptedTranscriptAtMs,
+      creationReason
     };
   }
 

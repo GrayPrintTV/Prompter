@@ -457,7 +457,7 @@ class PrompterConnectionRepository(
             audioSocketGeneration = null,
             serverAudioConnectionGeneration = null
         )
-        log.record("connection", "warn", "android.connection.websocket_closing", concrete, connectionId = connectionId, webSocketState = "CLOSING", closeCode = code, closeReason = reason, details = mapOf("appLifecycle" to if (appForeground) "foreground" else "background"))
+        log.record("connection", "warn", "android.connection.websocket_closing", concrete, connectionId = connectionId, webSocketState = "CLOSING", closeCode = code, closeReason = reason, details = reconnectSessionDetails() + mapOf("appLifecycle" to if (appForeground) "foreground" else "background"))
     }
     override fun onClosed(code: Int, reason: String) = lost("Server closed: $code ${reason.ifBlank { "(no reason)" }}")
     override fun onFailure(message: String, exceptionClass: String, httpCode: Int?, responseSummary: String?) {
@@ -602,7 +602,7 @@ class PrompterConnectionRepository(
         activeAudioGeneration = null
         streamRegistrationTimeout?.cancel()
         streamRegistration.connectionChanged()
-        log.record("connection", "error", "connection.lost", reason, connectionId = connectionId, serverId = server?.serverId, remoteAddress = server?.endpoint, webSocketState = "CLOSED", details = mapOf("appLifecycle" to if (appForeground) "foreground" else "background", "manualAnchorPending" to (pendingManualReposition.payload != null).toString()))
+        log.record("connection", "error", "connection.lost", reason, connectionId = connectionId, serverId = server?.serverId, remoteAddress = server?.endpoint, webSocketState = "CLOSED", details = reconnectSessionDetails() + mapOf("appLifecycle" to if (appForeground) "foreground" else "background", "manualAnchorPending" to (pendingManualReposition.payload != null).toString()))
         pendingManualReposition.retain("connection lost; waiting to resend after reconnect")
         authTimeout?.cancel(); authenticated = false; _diagnostics.value = _diagnostics.value.copy(
             controllerLease = false,
@@ -626,6 +626,21 @@ class PrompterConnectionRepository(
         _diagnostics.value = _diagnostics.value.copy(reconnectCount = _diagnostics.value.reconnectCount + 1)
         reconnectJob?.cancel()
         reconnectJob = scope.launch { delay(delayMs); server?.let { connectInternal(it, "scheduled reconnect attempt $attempt") } }
+    }
+
+    private fun reconnectSessionDetails(): Map<String, String> {
+        val session = sessions.state.value
+        val snapshot = session.snapshot
+        return mapOf(
+            "transportSessionId" to (session.sessionId ?: sessionId),
+            "narrationSessionId" to (snapshot?.narrationSessionId ?: "none"),
+            "manuscriptRevision" to (snapshot?.manuscriptRevision?.toString() ?: "none"),
+            "acceptedTokenIndex" to (snapshot?.acceptedPosition?.tokenIndex?.toString() ?: "none"),
+            "acceptedCharacter" to (snapshot?.acceptedPosition?.character?.toString() ?: "none"),
+            "controllerLeaseState" to _diagnostics.value.controllerLeaseState.name,
+            "controllerLease" to _diagnostics.value.controllerLease.toString(),
+            "awaitingSnapshot" to session.awaitingSnapshot.toString()
+        )
     }
 
     @Synchronized

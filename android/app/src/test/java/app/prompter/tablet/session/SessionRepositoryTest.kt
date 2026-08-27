@@ -105,6 +105,69 @@ class SessionRepositoryTest {
         assertEquals(8, repository.state.value.latestMovement?.targetCharacter)
     }
 
+    @Test fun `stale same-narration snapshot cannot overwrite a newer movement position`() {
+        val repository = SessionRepository(Files.createTempDirectory("prompter-session").toFile())
+        val position = Position(0, 8, 0, 0)
+        repository.applySnapshot(envelope(1), snapshot(3).copy(
+            acceptedPosition = position,
+            narrationSessionId = "narration-a"
+        ))
+        repository.consumeSnapshotAnchor(repository.state.value.snapshotAnchor!!.identity)
+        repository.applyMovement(MovementEvent(4, 3, 0, 0, 8, 0, 0, .9, 500, "on-track", "newer target"))
+        repository.markDisconnected()
+
+        repository.applySnapshot(envelope(2), snapshot(2).copy(
+            manuscriptRevision = 3,
+            narrationSessionId = "narration-a"
+        ))
+
+        assertEquals(position, repository.state.value.snapshot?.acceptedPosition)
+        assertEquals(8, repository.state.value.latestMovement?.targetCharacter)
+        assertTrue(repository.state.value.snapshotAnchor!!.consumed)
+    }
+
+    @Test fun `position-zero bootstrap during reconnect retains known narration identity and position`() {
+        val repository = SessionRepository(Files.createTempDirectory("prompter-session").toFile())
+        val position = Position(0, 8, 0, 0)
+        repository.applySnapshot(envelope(1), snapshot(5).copy(
+            acceptedPosition = position,
+            narrationSessionId = "narration-a"
+        ))
+        val identity = repository.state.value.snapshotAnchor!!.identity
+        repository.consumeSnapshotAnchor(identity)
+        repository.markDisconnected()
+
+        repository.applySnapshot(envelope(2), snapshot(6).copy(
+            manuscriptRevision = 5,
+            narrationSessionId = null
+        ))
+
+        assertEquals(position, repository.state.value.snapshot?.acceptedPosition)
+        assertEquals("narration-a", repository.state.value.snapshot?.narrationSessionId)
+        assertEquals(identity, repository.state.value.snapshotAnchor?.identity)
+        assertTrue(repository.state.value.snapshotAnchor!!.consumed)
+    }
+
+    @Test fun `explicit new narration identity still applies start-from-beginning reset`() {
+        val repository = SessionRepository(Files.createTempDirectory("prompter-session").toFile())
+        repository.applySnapshot(envelope(1), snapshot(5).copy(
+            acceptedPosition = Position(0, 8, 0, 0),
+            narrationSessionId = "narration-a"
+        ))
+        repository.consumeSnapshotAnchor(repository.state.value.snapshotAnchor!!.identity)
+        repository.applyMovement(MovementEvent(5, 5, 0, 0, 8, 0, 0, .9, 500, "on-track", "current target"))
+
+        repository.applySnapshot(envelope(2), snapshot(6).copy(
+            manuscriptRevision = 5,
+            narrationSessionId = "narration-b"
+        ))
+
+        assertEquals(Position(0, 0, 0, 0), repository.state.value.snapshot?.acceptedPosition)
+        assertEquals("narration-b", repository.state.value.snapshot?.narrationSessionId)
+        assertNull(repository.state.value.latestMovement)
+        assertFalse(repository.state.value.snapshotAnchor!!.consumed)
+    }
+
     @Test fun `manual reposition acknowledgement survives the confirming snapshot`() {
         val repository = SessionRepository(Files.createTempDirectory("prompter-session").toFile())
         repository.applySnapshot(envelope(1), snapshot())

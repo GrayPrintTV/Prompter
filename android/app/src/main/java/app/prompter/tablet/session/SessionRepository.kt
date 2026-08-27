@@ -5,6 +5,7 @@ import app.prompter.tablet.diagnostics.DiagnosticLogger
 import app.prompter.tablet.protocol.MovementEvent
 import app.prompter.tablet.protocol.ManualRepositionResult
 import app.prompter.tablet.protocol.ProtocolEnvelope
+import app.prompter.tablet.protocol.Position
 import app.prompter.tablet.protocol.SessionSnapshot
 import app.prompter.tablet.protocol.TranscriptEvent
 import app.prompter.tablet.protocol.RuntimeSettings
@@ -62,23 +63,62 @@ class SessionRepository private constructor(private val cacheDir: File, private 
         }
         val current = _state.value
         val restored = restoreCachedContent(snapshot)
-        val anchorIdentity = "${envelope.sessionId}:${snapshot.manuscriptRevision}:${snapshot.narrationSessionId ?: "legacy"}"
+        val currentSnapshot = current.snapshot
+        val currentAcceptedPosition = currentSnapshot?.acceptedPosition
+        val currentNarrationSessionId = currentSnapshot?.narrationSessionId
+        val currentSessionRevision = currentSnapshot?.sessionRevision
+        val sameTransport = current.sessionId == envelope.sessionId
+        val sameManuscript = sameTransport && currentSnapshot != null &&
+            currentSnapshot.manuscriptRevision == restored.manuscriptRevision &&
+            currentSnapshot.manuscript.contentHash == restored.manuscript.contentHash
+        val knownPosition = current.latestMovement
+            ?.takeIf { sameManuscript && it.manuscriptRevision == restored.manuscriptRevision }
+            ?.let { Position(it.targetTokenIndex, it.targetCharacter, it.sentenceIndex, it.paragraphIndex) }
+            ?: currentAcceptedPosition
+        val sameNarration = currentNarrationSessionId == restored.narrationSessionId
+        val staleSameNarrationSnapshot = sameManuscript && sameNarration &&
+            restored.sessionRevision < (currentSessionRevision ?: Long.MIN_VALUE)
+        val bootstrapDuringReconnect = current.awaitingSnapshot && sameManuscript &&
+            knownPosition != null && (knownPosition.tokenIndex > 0 || knownPosition.character > 0) &&
+            restored.acceptedPosition.tokenIndex == 0 && restored.acceptedPosition.character == 0 &&
+            (restored.narrationSessionId == null || sameNarration)
+        val preserveKnownPosition = staleSameNarrationSnapshot || bootstrapDuringReconnect
+        val semanticSnapshot = if (preserveKnownPosition) restored.copy(
+            sessionRevision = maxOf(restored.sessionRevision, currentSessionRevision ?: restored.sessionRevision),
+            acceptedPosition = requireNotNull(knownPosition),
+            narrationSessionId = currentNarrationSessionId
+        ) else restored
+        if (preserveKnownPosition) diagnostics?.record(
+            "anchor", "warn", "android.snapshot_position.retained",
+            "Reconnect snapshot could not overwrite the newer known same-manuscript position.",
+            details = mapOf(
+                "reason" to if (bootstrapDuringReconnect) "bootstrap position zero during reconnect" else "stale session revision",
+                "transportSessionId" to envelope.sessionId,
+                "narrationSessionId" to (currentNarrationSessionId ?: "none"),
+                "manuscriptRevision" to semanticSnapshot.manuscriptRevision.toString(),
+                "incomingSessionRevision" to restored.sessionRevision.toString(),
+                "retainedSessionRevision" to semanticSnapshot.sessionRevision.toString(),
+                "incomingCharacter" to restored.acceptedPosition.character.toString(),
+                "retainedCharacter" to semanticSnapshot.acceptedPosition.character.toString()
+            )
+        )
+        val anchorIdentity = "${envelope.sessionId}:${semanticSnapshot.manuscriptRevision}:${semanticSnapshot.narrationSessionId ?: "legacy"}"
         val previousAnchor = current.snapshotAnchor
         val anchor = if (previousAnchor?.identity == anchorIdentity) previousAnchor else SnapshotAnchor(
-            identity = anchorIdentity, sessionId = envelope.sessionId, manuscriptRevision = snapshot.manuscriptRevision,
-            tokenIndex = snapshot.acceptedPosition.tokenIndex, character = snapshot.acceptedPosition.character,
-            sentenceIndex = snapshot.acceptedPosition.sentenceIndex, paragraphIndex = snapshot.acceptedPosition.paragraphIndex
+            identity = anchorIdentity, sessionId = envelope.sessionId, manuscriptRevision = semanticSnapshot.manuscriptRevision,
+            tokenIndex = semanticSnapshot.acceptedPosition.tokenIndex, character = semanticSnapshot.acceptedPosition.character,
+            sentenceIndex = semanticSnapshot.acceptedPosition.sentenceIndex, paragraphIndex = semanticSnapshot.acceptedPosition.paragraphIndex
         )
         if (previousAnchor?.identity != anchorIdentity) diagnostics?.record("anchor", "info", "android.snapshot_anchor.received", "New snapshot anchor received.", details = mapOf("identity" to anchorIdentity.take(80), "character" to anchor.character.toString(), "paragraphIndex" to anchor.paragraphIndex.toString()))
         // A snapshot is recovery/state confirmation, not a command to discard a newer-or-equal
         // live semantic target. Keep it until the next movement event replaces it.
-        val preserveMovement = current.sessionId == envelope.sessionId &&
-            current.latestMovement?.manuscriptRevision == snapshot.manuscriptRevision &&
-            (current.latestMovement?.sessionRevision ?: Long.MAX_VALUE) <= snapshot.sessionRevision
+        val preserveMovement = sameManuscript &&
+            current.latestMovement?.manuscriptRevision == semanticSnapshot.manuscriptRevision &&
+            currentNarrationSessionId == semanticSnapshot.narrationSessionId
         _state.value = TabletSessionState(
             sessionId = envelope.sessionId,
-            snapshot = restored,
-            latestTranscript = snapshot.latestTranscript,
+            snapshot = semanticSnapshot,
+            latestTranscript = semanticSnapshot.latestTranscript,
             latestMovement = current.latestMovement.takeIf { preserveMovement },
             latestMovementEventId = current.latestMovementEventId.takeIf { preserveMovement },
             lastRemoteMovementStatus = current.lastRemoteMovementStatus,
@@ -90,6 +130,19 @@ class SessionRepository private constructor(private val cacheDir: File, private 
             runtimeSettings = chooseSettings(current.runtimeSettings, restored.runtimeSettings),
             snapshotAnchor = anchor,
             manualRepositionResult = current.manualRepositionResult
+        )
+        diagnostics?.record(
+            "session", "info", "android.snapshot.applied", "Authoritative Windows snapshot applied.",
+            details = mapOf(
+                "transportSessionId" to envelope.sessionId,
+                "narrationSessionId" to (semanticSnapshot.narrationSessionId ?: "none"),
+                "sessionRevision" to semanticSnapshot.sessionRevision.toString(),
+                "manuscriptRevision" to semanticSnapshot.manuscriptRevision.toString(),
+                "acceptedTokenIndex" to semanticSnapshot.acceptedPosition.tokenIndex.toString(),
+                "acceptedCharacter" to semanticSnapshot.acceptedPosition.character.toString(),
+                "controllerLeaseState" to (semanticSnapshot.controllerLease?.let { "granted:${it.deviceId}" } ?: "released"),
+                "positionRetained" to preserveKnownPosition.toString()
+            )
         )
     }
 

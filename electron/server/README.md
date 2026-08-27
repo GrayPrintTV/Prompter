@@ -19,7 +19,7 @@ Typography uses presentation units instead of copying desktop CSS units: Windows
 
 ## Tablet narration starts
 
-Controller leases and WebSocket connections are not narration sessions. A fresh tablet audio stream starts a new narration session at the manuscript beginning by default, arms a startup alignment anchor in that beginning region, and clears transcript context. The tray can explicitly choose Resume from a preserved same-manuscript position or use the current Windows view before the stream starts. A reconnect inside the controller grace period keeps the active narration session; a deliberate stop or lease release ends it. New manuscript content always starts from the beginning.
+Controller leases and WebSocket connections are not narration sessions. A fresh tablet audio stream starts a new narration session at the manuscript beginning by default, arms a startup alignment anchor in that beginning region, and clears transcript context. The tray can explicitly choose Resume from a preserved same-manuscript position or use the current Windows view before the stream starts. An involuntary disconnect keeps the active narration session both during and after the controller grace period; expiry releases only the controller lease and Tablet Mode. A deliberate stop or explicit lease release ends narration. New manuscript content always starts from the beginning.
 
 Renderer synchronization remains available while the listener is disabled, is revisioned and deduplicated, and does not replace desktop localStorage. Pixel positions and visual line numbers never cross the protocol boundary.
 

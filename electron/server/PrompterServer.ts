@@ -203,19 +203,26 @@ export class PrompterServer {
     }
   }
 
-  releaseTabletControl(deviceId?: string, reason = 'Tablet control released') {
+  releaseTabletControl(deviceId?: string, reason = 'Tablet control released', endNarration = true) {
     this.clearControllerDisconnectTimer();
     const controller = this.options.session.getControllerDeviceId();
     if (!controller || (deviceId && controller !== deviceId)) return false;
     this.audio.stop(controller);
-    const narration = this.options.session.endTabletNarration(reason);
+    const narration = endNarration ? this.options.session.endTabletNarration(reason) : null;
     const released = this.options.session.releaseController(controller);
     if (released) {
       for (const client of this.clients.values()) if (client.authenticated) {
         this.send(client, 'controllerLease', { granted: false, deviceId: controller, reason });
         this.sendSnapshot(client);
       }
-      this.log({ component: 'server.mode', level: 'info', event: 'mode.tablet.control_released', message: reason, deviceId: controller, details: { narrationSessionEnded: Boolean(narration) } });
+      this.log({
+        component: 'server.mode', level: 'info', event: 'mode.tablet.control_released', message: reason, deviceId: controller,
+        details: {
+          narrationSessionEnded: Boolean(narration),
+          narrationSessionRetained: !endNarration,
+          ...this.sessionDiagnosticDetails()
+        }
+      });
       this.emitStatus();
     }
     return released;
@@ -340,11 +347,15 @@ export class PrompterServer {
     socket.on('pong', () => { client.alive = true; });
     socket.on('message', (data, binary) => void this.handleMessage(client, data, binary));
     socket.on('close', (code, reason) => {
-      this.log({ component: 'server.websocket', level: 'info', event: 'server.websocket.close.received', message: 'WebSocket closed.', connectionId, remoteAddress, websocketState: 'CLOSED', closeCode: code, closeReason: reason.toString() });
+      this.log({
+        component: 'server.websocket', level: 'info', event: 'server.websocket.close.received', message: 'WebSocket closed.',
+        connectionId, remoteAddress, websocketState: 'CLOSED', closeCode: code, closeReason: reason.toString(),
+        details: this.sessionDiagnosticDetails()
+      });
       this.removeClient(client);
     });
     socket.on('error', (error) => {
-      this.log({ component: 'server.websocket', level: 'error', event: 'server.websocket.error', message: 'WebSocket emitted an error.', connectionId, remoteAddress, ...diagnosticError(error) });
+      this.log({ component: 'server.websocket', level: 'error', event: 'server.websocket.error', message: 'WebSocket emitted an error.', connectionId, remoteAddress, ...diagnosticError(error), details: this.sessionDiagnosticDetails() });
       this.removeClient(client);
     });
     const challenge = this.auth.issue(connectionId);
@@ -716,8 +727,8 @@ export class PrompterServer {
         this.clearControllerDisconnectTimer();
         try {
           const narration = this.options.session.startTabletNarration(client.deviceId, audioStart.streamId);
-          this.log({ component: 'server.session', level: 'info', event: 'session.position.initialized', message: narration.continued ? 'Tablet narration session retained its active start position.' : `Tablet narration start position selected from ${narration.positionSource}.`, connectionId: client.connectionId, deviceId: client.deviceId, details: { manuscriptHash: narration.manuscriptHash, acceptedCharacter: narration.acceptedCharacter, estimatedCharacter: narration.estimatedCharacter, paragraphIndex: narration.paragraphIndex, lastAcceptedTranscriptAtMs: narration.lastAcceptedTranscriptAtMs, narrationSessionId: narration.narrationSessionId, policy: narration.policy, streamId: narration.streamId, leaseId: narration.leaseId } });
-          this.log({ component: 'server.session', level: 'info', event: narration.continued ? 'session.position.preserved' : narration.positionSource === 'restored' ? 'session.position.restored' : 'session.position.reset', message: narration.continued ? 'Existing narration session preserved across reconnect.' : `Tablet narration position initialized from ${narration.positionSource}.`, connectionId: client.connectionId, deviceId: client.deviceId, details: { manuscriptHash: narration.manuscriptHash, acceptedCharacter: narration.acceptedCharacter, estimatedCharacter: narration.estimatedCharacter, paragraphIndex: narration.paragraphIndex, lastAcceptedTranscriptAtMs: narration.lastAcceptedTranscriptAtMs, narrationSessionId: narration.narrationSessionId, policy: narration.policy, streamId: narration.streamId, leaseId: narration.leaseId } });
+          this.log({ component: 'server.session', level: 'info', event: 'session.position.initialized', message: narration.continued ? 'Tablet narration session retained its active start position.' : `Tablet narration start position selected from ${narration.positionSource}.`, connectionId: client.connectionId, deviceId: client.deviceId, details: { manuscriptHash: narration.manuscriptHash, acceptedCharacter: narration.acceptedCharacter, estimatedCharacter: narration.estimatedCharacter, paragraphIndex: narration.paragraphIndex, lastAcceptedTranscriptAtMs: narration.lastAcceptedTranscriptAtMs, narrationSessionId: narration.narrationSessionId, policy: narration.policy, streamId: narration.streamId, leaseId: narration.leaseId, creationReason: narration.creationReason, transportSessionId: this.options.session.getSessionId(), manuscriptRevision: this.options.session.getState()?.manuscriptRevision ?? null } });
+          this.log({ component: 'server.session', level: 'info', event: narration.continued ? 'session.position.preserved' : narration.positionSource === 'restored' ? 'session.position.restored' : 'session.position.reset', message: narration.continued ? 'Existing narration session preserved across reconnect.' : `Tablet narration position initialized from ${narration.positionSource}.`, connectionId: client.connectionId, deviceId: client.deviceId, details: { manuscriptHash: narration.manuscriptHash, acceptedCharacter: narration.acceptedCharacter, estimatedCharacter: narration.estimatedCharacter, paragraphIndex: narration.paragraphIndex, lastAcceptedTranscriptAtMs: narration.lastAcceptedTranscriptAtMs, narrationSessionId: narration.narrationSessionId, policy: narration.policy, streamId: narration.streamId, leaseId: narration.leaseId, creationReason: narration.creationReason, transportSessionId: this.options.session.getSessionId(), manuscriptRevision: this.options.session.getState()?.manuscriptRevision ?? null } });
           this.log({ component: 'server.audio', level: 'info', event: 'audio.stream.narration_started', message: narration.continued ? 'Tablet audio stream resumed the active narration session.' : 'Tablet audio stream started a new narration session.', connectionId: client.connectionId, deviceId: client.deviceId, details: { streamId: narration.streamId, narrationSessionId: narration.narrationSessionId, leaseId: narration.leaseId, acceptedCharacter: narration.acceptedCharacter } });
           this.log({ component: 'server.session', level: 'info', event: 'session.position.starting_anchor', message: 'Startup alignment anchor armed for tablet narration.', connectionId: client.connectionId, deviceId: client.deviceId, details: { tokenIndex: this.options.session.getState()?.currentTokenIndex ?? 0, acceptedCharacter: narration.acceptedCharacter, policy: narration.policy } });
           client.pendingAudioMetadata = null;
@@ -1039,11 +1050,24 @@ export class PrompterServer {
   private scheduleControllerRelease(deviceId: string) {
     this.clearControllerDisconnectTimer();
     const delayMs = this.options.controllerDisconnectTimeoutMs ?? 10_000;
-    this.log({ component: 'server.mode', level: 'warn', event: 'mode.tablet.disconnect_timeout_started', message: 'Controller disconnected; retaining Tablet Mode during reconnect grace period.', deviceId, details: { delayMs } });
+    this.log({ component: 'server.mode', level: 'warn', event: 'mode.tablet.disconnect_timeout_started', message: 'Controller disconnected; retaining Tablet Mode during reconnect grace period.', deviceId, details: { delayMs, ...this.sessionDiagnosticDetails() } });
     this.controllerDisconnectTimer = setTimeout(() => {
       this.controllerDisconnectTimer = null;
-      this.releaseTabletControl(deviceId, 'Tablet disconnect timeout expired');
+      this.releaseTabletControl(deviceId, 'Tablet disconnect timeout expired; active narration retained', false);
     }, delayMs);
+  }
+
+  private sessionDiagnosticDetails() {
+    const snapshot = this.options.session.getSnapshot();
+    const controllerDeviceId = this.options.session.getControllerDeviceId();
+    return {
+      transportSessionId: this.options.session.getSessionId(),
+      narrationSessionId: snapshot?.narrationSessionId ?? null,
+      manuscriptRevision: snapshot?.manuscriptRevision ?? null,
+      acceptedTokenIndex: snapshot?.acceptedPosition.tokenIndex ?? null,
+      acceptedCharacter: snapshot?.acceptedPosition.character ?? null,
+      controllerLeaseState: controllerDeviceId ? `granted:${controllerDeviceId}` : 'released'
+    };
   }
 
   private clearControllerDisconnectTimer() {

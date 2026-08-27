@@ -109,7 +109,7 @@ describe('Windows-only simulated tablet', () => {
       pairing, devices, discovery: discovery as never, session,
       protocolValidator: new ProtocolValidator(path.join(process.cwd(), 'shared', 'protocol', 'schemas')),
       diagnostics: { record(input) { diagnosticEvents.push({ event: input.event }); return {} as never; } },
-      controllerDisconnectTimeoutMs: 50,
+      controllerDisconnectTimeoutMs: 200,
       enumerateAddresses: () => ['127.0.0.1'],
       whisperSettings: { pythonExecutablePath: 'python', modelName: 'base.en', device: 'cpu', computeType: 'int8', chunkDurationSeconds: 2 },
       transcribe: async (chunk) => {
@@ -283,6 +283,16 @@ describe('Windows-only simulated tablet', () => {
       'tablet.manual_follow.trace', 'coordinator.transcript.processed', 'coordinator.position.accepted',
       'coordinator.movement.produced', 'server.movement.sent'
     ]));
+    const narrationBeforeReconnect = session.getTabletNarrationStatus();
+    expect(narrationBeforeReconnect).toEqual(expect.objectContaining({
+      active: true,
+      narrationSessionId: expect.any(String)
+    }));
+    expect(narrationBeforeReconnect.acceptedCharacter).toBeGreaterThan(0);
+    const secondClosed = new Promise<void>((resolve) => second.socket.once('close', () => resolve()));
+    second.socket.close();
+    await secondClosed;
+
     const reconnected = client(`ws://127.0.0.1:${status.port}`);
     await reconnected.opened;
     const reconnectChallenge = await reconnected.receive('serverChallenge');
@@ -298,7 +308,12 @@ describe('Windows-only simulated tablet', () => {
       resumed: true,
       streamRegistered: false
     }));
-    expect((await reconnected.receive('sessionState')).payload.manuscript).toEqual(expect.objectContaining({ manuscriptId: 'spoken-fixture' }));
+    const withinGraceState = await reconnected.receive('sessionState');
+    expect(withinGraceState.payload).toEqual(expect.objectContaining({
+      narrationSessionId: narrationBeforeReconnect.narrationSessionId,
+      acceptedPosition: expect.objectContaining({ character: narrationBeforeReconnect.acceptedCharacter }),
+      manuscript: expect.objectContaining({ manuscriptId: 'spoken-fixture' })
+    }));
     reconnected.socket.send(envelope('audioStreamStart', {
       action: 'start', streamId: 'stream-1', sampleRate: 16000, channels: 1, encoding: 'pcm-s16le',
       sequenceStart: 0, captureTimestampMs: Date.now(), frameDurationMs: 200
@@ -310,15 +325,53 @@ describe('Windows-only simulated tablet', () => {
         streamRegistered: true,
         connectionGeneration: expect.any(String)
       }));
+    expect(session.getTabletNarrationStatus()).toEqual(expect.objectContaining({
+      active: true,
+      narrationSessionId: narrationBeforeReconnect.narrationSessionId,
+      acceptedCharacter: narrationBeforeReconnect.acceptedCharacter
+    }));
 
-    const secondClosed = new Promise<void>((resolve) => second.socket.once('close', () => resolve()));
     observer.socket.close();
-    second.socket.close();
-    await secondClosed;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    expect(server.getStatus()).toEqual(expect.objectContaining({ operatingMode: 'tablet', controllerDeviceId: 'tablet-1' }));
-    expect(diagnosticEvents.map((event) => event.event)).toContain('mode.tablet.replacement_connection_retained');
     reconnected.socket.close();
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(server.getStatus()).toEqual(expect.objectContaining({ operatingMode: 'desktop', controllerDeviceId: null }));
+    expect(session.getTabletNarrationStatus()).toEqual(expect.objectContaining({
+      active: true,
+      narrationSessionId: narrationBeforeReconnect.narrationSessionId,
+      acceptedCharacter: narrationBeforeReconnect.acceptedCharacter
+    }));
+
+    const afterGrace = client(`ws://127.0.0.1:${status.port}`);
+    await afterGrace.opened;
+    const afterGraceChallenge = await afterGrace.receive('serverChallenge');
+    afterGrace.socket.send(envelope('authenticate', {
+      action: 'authenticate', deviceId: 'tablet-1', clientNonce: nonce, timestampMs: Date.now(),
+      proof: AuthenticationService.createProof(credential, afterGraceChallenge.payload.nonce, nonce, 'server-1', 'tablet-1', PROTOCOL_MAJOR),
+      protocolMajor: PROTOCOL_MAJOR, protocolMinor: PROTOCOL_MINOR,
+      cachedManuscriptHash: snapshot.payload.manuscript.contentHash
+    }));
+    await afterGrace.receive('authenticated');
+    const afterGraceState = await afterGrace.receive('sessionState');
+    expect(afterGraceState.payload).toEqual(expect.objectContaining({
+      narrationSessionId: narrationBeforeReconnect.narrationSessionId,
+      acceptedPosition: expect.objectContaining({ character: narrationBeforeReconnect.acceptedCharacter }),
+      controllerLease: null
+    }));
+    afterGrace.socket.send(envelope('audioStreamStart', {
+      action: 'start', streamId: 'stream-after-grace', sampleRate: 16000, channels: 1, encoding: 'pcm-s16le',
+      sequenceStart: 0, captureTimestampMs: Date.now(), frameDurationMs: 200
+    }, 1));
+    expect((await afterGrace.receive('controllerLease')).payload).toEqual(expect.objectContaining({
+      granted: true,
+      streamId: 'stream-after-grace',
+      streamRegistered: true
+    }));
+    expect(session.getTabletNarrationStatus()).toEqual(expect.objectContaining({
+      active: true,
+      narrationSessionId: narrationBeforeReconnect.narrationSessionId,
+      acceptedCharacter: narrationBeforeReconnect.acceptedCharacter
+    }));
+    afterGrace.socket.close();
 
     await server.forgetDevice('tablet-1');
     expect(server.getStatus()).toEqual(expect.objectContaining({ operatingMode: 'desktop', controllerDeviceId: null }));
