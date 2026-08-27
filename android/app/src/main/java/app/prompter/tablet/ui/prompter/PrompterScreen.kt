@@ -75,6 +75,9 @@ fun PrompterScreen(state: MainUiState, viewModel: MainViewModel, requestMicropho
     if (snapshot == null) { LaunchedEffect(Unit) { viewModel.show(Screen.CONNECTION) }; return }
     val chunks = remember(snapshot.manuscript.contentHash) { manuscriptChunks(snapshot) }
     val paragraphs = remember(snapshot.manuscript.contentHash) { visualParagraphs(snapshot, chunks) }
+    val navigationIndex = remember(snapshot.manuscript.contentHash) {
+        ManuscriptNavigationIndex.build(paragraphs, snapshot.manuscript.normalizedContent?.length ?: 0)
+    }
     val listState = rememberLazyListState()
     val fastScrollScope = rememberCoroutineScope()
     val fastScrollJob = remember { arrayOfNulls<Job>(1) }
@@ -392,6 +395,7 @@ fun PrompterScreen(state: MainUiState, viewModel: MainViewModel, requestMicropho
             listState = listState,
             paragraphs = paragraphs,
             manuscriptLength = manuscriptLength,
+            navigationIndex = navigationIndex,
             dragging = fastScrollDragging,
             color = text,
             onDragStart = {
