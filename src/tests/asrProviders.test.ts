@@ -874,11 +874,141 @@ describe('Local Whisper ASR provider', () => {
       sampleRate: 16000,
       durationSeconds: 1,
       headerSignature: 'RIFF/WAVE',
+      telemetry: {
+        capturedAtMs: 123,
+        audioDurationMs: 1000,
+        rendererDispatchedAtMs: 123
+      },
       settings: LOCAL_WHISPER_SETTINGS
     });
     expect(deltas.at(-1)?.source).toBe('local-whisper');
 
     await provider.stop();
+  });
+
+  it('timestamps transcript evidence from audio capture rather than sidecar return', async () => {
+    const bridge = localWhisperBridge({
+      transcribeLocalWhisperChunk: vi.fn(async () => ({
+        text: 'The room did not answer.',
+        telemetry: {
+          requestId: 'telemetry-1',
+          mainReceivedAtMs: 13_000,
+          mainDispatchedAtMs: 13_010,
+          sidecarStartedAtMs: 13_020,
+          sidecarInferenceMs: 100,
+          mainCompletedAtMs: 13_120,
+          mainQueueDepthAtReceive: 0,
+          mainQueueDepthAtDispatch: 1,
+          mainQueueDepthAtCompletion: 0
+        }
+      }))
+    });
+    const pcm = fakePcmRecorder();
+    const telemetryEvents: unknown[] = [];
+    const provider = new LocalWhisperAsrProvider(LOCAL_WHISPER_SETTINGS, {
+      bridge,
+      getUserMedia: vi.fn(async () => fakeMediaStream()),
+      createPcmChunkRecorder: pcm.create,
+      now: () => 50_000,
+      onTelemetryEvent: (event) => telemetryEvents.push(event)
+    });
+    const deltas: TranscriptDelta[] = [];
+    provider.onDelta((item) => deltas.push(item));
+    await provider.start();
+
+    await provider.acceptPcmAudioChunk({ ...wavChunk(), capturedAtMs: 12_345 });
+
+    expect(deltas.at(-1)?.timestampMs).toBe(12_345);
+    expect(deltas.at(-1)?.telemetry).toMatchObject({
+      requestId: 'telemetry-1',
+      capturedAtMs: 12_345,
+      rendererReceivedAtMs: 50_000,
+      sidecarInferenceMs: 100
+    });
+    expect(telemetryEvents).toContainEqual(expect.objectContaining({ type: 'result', empty: false }));
+    await provider.stop();
+  });
+
+  it('serializes Stop/Start while an earlier sidecar startup is still in flight', async () => {
+    let resolveFirstStart!: (status: typeof DEFAULT_LOCAL_WHISPER_STATUS) => void;
+    const startLocalWhisper = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise<typeof DEFAULT_LOCAL_WHISPER_STATUS>((resolve) => {
+        resolveFirstStart = resolve;
+      }))
+      .mockResolvedValue({
+        ...DEFAULT_LOCAL_WHISPER_STATUS,
+        sidecarRunning: true,
+        modelPhase: 'ready' as const,
+        status: 'listening' as const,
+        listening: true
+      });
+    const bridge = localWhisperBridge({ startLocalWhisper });
+    const pcm = fakePcmRecorder();
+    const getUserMedia = vi.fn(async () => fakeMediaStream());
+    const provider = new LocalWhisperAsrProvider(LOCAL_WHISPER_SETTINGS, {
+      bridge,
+      getUserMedia,
+      createPcmChunkRecorder: pcm.create
+    });
+
+    const firstStart = provider.start();
+    await vi.waitFor(() => expect(startLocalWhisper).toHaveBeenCalledTimes(1));
+    await provider.stop();
+    const restarted = provider.start();
+
+    resolveFirstStart({
+      ...DEFAULT_LOCAL_WHISPER_STATUS,
+      sidecarRunning: true,
+      modelPhase: 'ready',
+      status: 'listening',
+      listening: true
+    });
+    await firstStart;
+    await restarted;
+
+    expect(startLocalWhisper).toHaveBeenCalledTimes(2);
+    expect(getUserMedia).toHaveBeenCalledTimes(1);
+    expect(provider.getStatus()).toBe('listening');
+    await provider.stop();
+  });
+
+  it('ignores an old in-flight result after Stop/Start advances the provider generation', async () => {
+    vi.useFakeTimers();
+    try {
+      let resolveOld!: (result: { text: string }) => void;
+      const bridge = localWhisperBridge({
+        transcribeLocalWhisperChunk: vi.fn(
+          () => new Promise<{ text: string }>((resolve) => { resolveOld = resolve; })
+        )
+      });
+      const pcm = fakePcmRecorder();
+      const telemetryEvents: unknown[] = [];
+      const provider = new LocalWhisperAsrProvider(LOCAL_WHISPER_SETTINGS, {
+        bridge,
+        getUserMedia: vi.fn(async () => fakeMediaStream()),
+        createPcmChunkRecorder: pcm.create,
+        onTelemetryEvent: (event) => telemetryEvents.push(event)
+      });
+      const deltas: TranscriptDelta[] = [];
+      provider.onDelta((item) => deltas.push(item));
+      await provider.start();
+      const oldRequest = provider.acceptPcmAudioChunk({ ...wavChunk(), capturedAtMs: 1_000 });
+
+      await provider.stop();
+      await provider.start();
+      await vi.advanceTimersByTimeAsync(16_000);
+      expect(provider.getConnectionStatus().chunk.warningMessage).toBeNull();
+      resolveOld({ text: 'stale speech from before restart' });
+      await oldRequest;
+
+      expect(deltas).toEqual([]);
+      expect(telemetryEvents).toContainEqual({ type: 'generation-fenced' });
+      expect(provider.getStatus()).toBe('listening');
+      await provider.stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('records empty Whisper transcripts without emitting an aligner delta', async () => {
@@ -899,6 +1029,7 @@ describe('Local Whisper ASR provider', () => {
 
   it('warns when a sidecar response does not return before the timeout', async () => {
     vi.useFakeTimers();
+    vi.setSystemTime(100_000);
     let resolveTranscript!: (result: { text: string }) => void;
     const bridge = localWhisperBridge({
       transcribeLocalWhisperChunk: vi.fn(
@@ -916,13 +1047,21 @@ describe('Local Whisper ASR provider', () => {
     });
 
     await provider.start();
-    const pending = provider.acceptPcmAudioChunk(wavChunk());
+    const pending = provider.acceptPcmAudioChunk({ ...wavChunk(), capturedAtMs: 99_000 });
 
     await vi.advanceTimersByTimeAsync(55);
     expect(provider.getConnectionStatus().chunk.warningMessage).toContain('no sidecar response');
 
     resolveTranscript({ text: 'The room did not answer.' });
     await pending;
+    expect(provider.getConnectionStatus().chunk).toMatchObject({
+      activeRequestStartedAtMs: 0,
+      activeRequestCapturedAtMs: 0,
+      lastNonSilentCapturedAtMs: 99_000,
+      lastUsableTranscriptCapturedAtMs: 99_000,
+      lastRequestCompletedCaptureAtMs: 99_000,
+      lastRequestWasDelayed: true
+    });
     await provider.stop();
     vi.useRealTimers();
   });

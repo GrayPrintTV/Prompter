@@ -77,6 +77,7 @@ try {
     startLocalWhisper: (settings: unknown) => ipcRenderer.invoke('local-whisper:start', settings),
     stopLocalWhisper: () => ipcRenderer.invoke('local-whisper:stop'),
     transcribeLocalWhisperChunk: (payload: unknown) => ipcRenderer.invoke('local-whisper:transcribeChunk', payload),
+    recordLocalWhisperTelemetry: (aggregate: unknown) => ipcRenderer.invoke('local-whisper:recordTelemetry', aggregate),
     syncServerSession: (payload: unknown) => ipcRenderer.invoke('tablet-server:syncSession', payload),
     getServerStatus: () => ipcRenderer.invoke('tablet-server:getStatus'),
     getServerDiagnostics: () => ipcRenderer.invoke('tablet-server:getDiagnostics'),

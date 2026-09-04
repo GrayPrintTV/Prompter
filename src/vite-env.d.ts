@@ -5,6 +5,7 @@ import type {
   LiveAsrConfigStatus,
   LocalWhisperSettings,
   LocalWhisperStatus,
+  LocalWhisperTelemetryAggregate,
   LocalWhisperTranscriptResult,
   MainPreloadError,
   OpenAiRealtimeSdpAnswer
@@ -49,6 +50,7 @@ declare global {
       getLocalWhisperStatus(): Promise<LocalWhisperStatus>;
       startLocalWhisper(settings: LocalWhisperSettings): Promise<LocalWhisperStatus>;
       stopLocalWhisper(): Promise<LocalWhisperStatus>;
+      recordLocalWhisperTelemetry(aggregate: LocalWhisperTelemetryAggregate): Promise<boolean>;
       transcribeLocalWhisperChunk(payload: {
         audioData: ArrayBuffer;
         mimeType: string;
@@ -57,6 +59,11 @@ declare global {
         sampleRate?: number;
         durationSeconds?: number;
         headerSignature?: string;
+        telemetry?: {
+          capturedAtMs: number;
+          audioDurationMs: number;
+          rendererDispatchedAtMs: number;
+        };
         settings: LocalWhisperSettings;
       }): Promise<LocalWhisperTranscriptResult>;
       syncServerSession(payload: RendererSessionSync): Promise<RendererSyncResult>;

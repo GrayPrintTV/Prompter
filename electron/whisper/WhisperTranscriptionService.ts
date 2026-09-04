@@ -1,10 +1,11 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
-import { mkdir, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, stat, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type {
   LocalWhisperServiceStatus as LocalWhisperStatus,
-  LocalWhisperSettings
+  LocalWhisperSettings,
+  LocalWhisperTranscriptResult
 } from '#prompter-shared/domain/types.js';
 import {
   REQUIRED_WHISPER_MODEL_FILES,
@@ -36,14 +37,30 @@ export type WhisperTranscriptionPayload = {
   sampleRate?: number;
   durationSeconds?: number;
   headerSignature?: string;
+  telemetry?: {
+    capturedAtMs: number;
+    audioDurationMs: number;
+    rendererDispatchedAtMs: number;
+    mainReceivedAtMs?: number;
+  };
   settings: LocalWhisperSettings;
 };
 
 type PendingRequest = {
-  resolve(result: { text: string; durationSeconds?: number }): void;
+  resolve(result: LocalWhisperTranscriptResult): void;
   reject(error: Error): void;
   audioPath: string;
-  timeout: NodeJS.Timeout;
+  softTimeout: NodeJS.Timeout;
+  hardTimeout: NodeJS.Timeout;
+  generation: number;
+  startedAtMs: number;
+  softTimedOut: boolean;
+  hardTimedOut: boolean;
+  mainReceivedAtMs: number;
+  mainDispatchedAtMs: number;
+  mainQueueDepthAtReceive: number;
+  mainQueueDepthAtDispatch: number;
+  sidecarStartedAtMs?: number;
 };
 
 type ReadyWaiter = {
@@ -64,6 +81,8 @@ export type WhisperServiceDependencies = {
   mkdir?: typeof mkdir;
   writeFile?: typeof writeFile;
   unlink?: typeof unlink;
+  readdir?: typeof readdir;
+  stat?: typeof stat;
   setTimeout?: typeof setTimeout;
   clearTimeout?: typeof clearTimeout;
   now?: () => number;
@@ -73,6 +92,8 @@ export type WhisperServiceDependencies = {
 const DEFAULT_PROCESS_READY_TIMEOUT_MS = 30000;
 const DEFAULT_MODEL_READY_TIMEOUT_MS = 180000;
 const DEFAULT_TRANSCRIPTION_TIMEOUT_MS = 15000;
+const DEFAULT_TRANSCRIPTION_HARD_TIMEOUT_MS = 120000;
+const ABANDONED_TEMP_FILE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_SETTINGS: LocalWhisperSettings = {
   pythonExecutablePath: 'python',
   modelName: 'base.en',
@@ -103,7 +124,12 @@ function createInitialStatus(): LocalWhisperStatus {
       staleChunksDropped: 0, silenceChunksSuppressed: 0, lastChunkBytes: 0, lastChunkFormat: '',
       lastMimeType: '', lastFileExtension: '', lastHeaderSignature: '', lastSampleRate: 0,
       lastChunkDurationSeconds: 0, lastTranscriptText: '', lastSidecarError: null,
-      warningMessage: null, pendingResponses: 0
+      warningMessage: null, pendingResponses: 0,
+      activeRequestStartedAtMs: 0, activeRequestCapturedAtMs: 0,
+      lastNonSilentCapturedAtMs: 0, unusableSpeechStartedAtMs: 0,
+      lastUsableTranscriptCapturedAtMs: 0,
+      lastRequestCompletedAtMs: 0, lastRequestCompletedCaptureAtMs: 0,
+      lastRequestWasDelayed: false
     },
     transcriptHistory: []
   };
@@ -111,19 +137,24 @@ function createInitialStatus(): LocalWhisperStatus {
 
 export class WhisperTranscriptionService {
   private process: ChildProcessWithoutNullStreams | null = null;
-  private stdoutBuffer = '';
+  private readonly stdoutBuffers = new Map<number, string>();
   private settings: LocalWhisperSettings | null = null;
   private processReady = false;
   private modelReady = false;
   private modelConfigKey = '';
   private generation = 0;
   private intentionallyStoppingGeneration: number | null = null;
+  private restartAfterExitGeneration: number | null = null;
   private nextRequestId = 1;
   private readonly pending = new Map<string, PendingRequest>();
   private readonly processWaiters = new Set<ReadyWaiter>();
   private readonly modelWaiters = new Set<ReadyWaiter>();
   private readonly finalizedProcesses = new WeakSet<object>();
   private statusPublicationDisposed = false;
+  private startupCleanupDone = false;
+  private startPromise: Promise<LocalWhisperStatus> | null = null;
+  private lifecycleRevision = 0;
+  private telemetryMaxPendingDepth = 0;
   private status = createInitialStatus();
 
   constructor(private readonly deps: WhisperServiceDependencies) {}
@@ -166,13 +197,30 @@ export class WhisperTranscriptionService {
 
   async start(settings: LocalWhisperSettings): Promise<LocalWhisperStatus> {
     this.settings = settings;
+    if (this.startPromise) return this.startPromise;
+    const operation = this.startInternal(settings, this.lifecycleRevision);
+    this.startPromise = operation;
+    try {
+      return await operation;
+    } finally {
+      if (this.startPromise === operation) this.startPromise = null;
+    }
+  }
+
+  takeQueueTelemetry() {
+    const current = this.pending.size;
+    const result = { current, max: Math.max(current, this.telemetryMaxPendingDepth) };
+    this.telemetryMaxPendingDepth = current;
+    return result;
+  }
+
+  private async startInternal(settings: LocalWhisperSettings, lifecycleRevision: number): Promise<LocalWhisperStatus> {
     const plan = this.launchPlan(settings);
     const requestedModelKey = this.settingsKey(settings, plan);
     if (this.modelConfigKey && this.modelConfigKey !== requestedModelKey) this.modelReady = false;
     this.validatePlan(plan);
 
     if (!this.process) {
-      this.stdoutBuffer = '';
       this.processReady = false;
       this.modelReady = false;
       this.modelConfigKey = '';
@@ -182,6 +230,10 @@ export class WhisperTranscriptionService {
         chunk: { ...this.status.chunk, lastTranscriptText: '', lastSidecarError: null, warningMessage: null, pendingResponses: 0 }
       });
       (this.deps.mkdirSync ?? mkdirSync)(plan.workingDirectory, { recursive: true });
+      await this.cleanupAbandonedTempFiles();
+      if (lifecycleRevision !== this.lifecycleRevision) {
+        throw new Error('Local Whisper sidecar stopped during startup.');
+      }
       const ready = this.waitForProcessReady();
       this.deps.appendDiagnosticLog?.('local-whisper-spawn', {
         executablePath: plan.executablePath, args: plan.args, scriptPath: plan.scriptPath,
@@ -189,14 +241,22 @@ export class WhisperTranscriptionService {
         bundled: plan.bundled, workingDirectory: plan.workingDirectory
       });
       const spawned = (this.deps.spawnProcess ?? spawn)(plan.executablePath, plan.args, {
-        cwd: plan.workingDirectory, stdio: 'pipe', windowsHide: true
+        cwd: plan.workingDirectory,
+        stdio: 'pipe',
+        windowsHide: true,
+        env: {
+          ...(this.deps.env ?? process.env),
+          PYTHONUTF8: '1',
+          PYTHONIOENCODING: 'utf-8'
+        }
       });
       this.process = spawned;
       const thisGeneration = ++this.generation;
+      this.stdoutBuffers.set(thisGeneration, '');
       Object.assign(spawned, { _generation: thisGeneration });
-      spawned.stdout.on('data', (chunk) => this.handleStdout(chunk));
-      spawned.stderr.on('data', (chunk) => this.handleStderr(chunk, plan));
-      spawned.on('error', (error: NodeJS.ErrnoException) => this.handleProcessError(spawned, error, plan));
+      spawned.stdout.on('data', (chunk) => this.handleStdout(chunk, thisGeneration));
+      spawned.stderr.on('data', (chunk) => this.handleStderr(chunk, thisGeneration, plan));
+      spawned.on('error', (error: NodeJS.ErrnoException) => this.handleProcessError(spawned, thisGeneration, error, plan));
       spawned.on('exit', (code, signal) => this.handleProcessExit(spawned, thisGeneration, code, signal, plan));
       await ready;
     } else if (!this.processReady) {
@@ -221,7 +281,9 @@ export class WhisperTranscriptionService {
     return this.getStatus();
   }
 
-  async transcribe(payload: WhisperTranscriptionPayload): Promise<{ text: string; durationSeconds?: number }> {
+  async transcribe(payload: WhisperTranscriptionPayload): Promise<LocalWhisperTranscriptResult> {
+    const mainReceivedAtMs = payload.telemetry?.mainReceivedAtMs ?? this.now();
+    const mainQueueDepthAtReceive = this.pending.size;
     await this.start(payload.settings);
     const plan = this.launchPlan(payload.settings);
     const tempDirectory = path.join(this.deps.getTempPath(), 'narration-prompter-local-whisper');
@@ -233,16 +295,49 @@ export class WhisperTranscriptionService {
     const requestId = String(this.nextRequestId++);
     const audioPath = path.join(tempDirectory, `chunk-${this.now()}-${requestId}.${extension}`);
     await (this.deps.writeFile ?? writeFile)(audioPath, audioBuffer);
+    const generation = this.generation;
+    const startedAtMs = this.now();
+    const mainQueueDepthAtDispatch = this.pending.size + 1;
 
-    return new Promise<{ text: string; durationSeconds?: number }>((resolve, reject) => {
-      const timeout = this.timerSet(() => {
+    return new Promise<LocalWhisperTranscriptResult>((resolve, reject) => {
+      const softTimeout = this.timerSet(() => {
         const request = this.pending.get(requestId);
-        if (!request) return;
-        this.pending.delete(requestId);
-        void this.removeFile(request.audioPath);
-        reject(new Error('Local Whisper transcription timed out.'));
+        if (
+          !request ||
+          request.generation !== generation ||
+          this.intentionallyStoppingGeneration === generation
+        ) return;
+        request.softTimedOut = true;
+        const elapsedMs = Math.max(0, this.now() - request.startedAtMs);
+        const warningMessage = `Local Whisper transcription is delayed (${Math.round(elapsedMs / 1000)}s); still waiting.`;
+        this.deps.appendDiagnosticLog?.('local-whisper-soft-timeout', { requestId, generation, elapsedMs });
+        this.patch({
+          chunk: {
+            ...this.status.chunk,
+            lastSidecarError: null,
+            warningMessage
+          }
+        });
       }, this.configuredTimeout('LOCAL_WHISPER_TRANSCRIPTION_TIMEOUT_MS', DEFAULT_TRANSCRIPTION_TIMEOUT_MS));
-      this.pending.set(requestId, { resolve, reject, audioPath, timeout });
+      const hardTimeout = this.timerSet(() => {
+        this.handleHardTranscriptionTimeout(requestId, generation);
+      }, this.configuredTimeout('LOCAL_WHISPER_TRANSCRIPTION_HARD_TIMEOUT_MS', DEFAULT_TRANSCRIPTION_HARD_TIMEOUT_MS));
+      this.pending.set(requestId, {
+        resolve,
+        reject,
+        audioPath,
+        softTimeout,
+        hardTimeout,
+        generation,
+        startedAtMs,
+        softTimedOut: false,
+        hardTimedOut: false,
+        mainReceivedAtMs,
+        mainDispatchedAtMs: startedAtMs,
+        mainQueueDepthAtReceive,
+        mainQueueDepthAtDispatch
+      });
+      this.telemetryMaxPendingDepth = Math.max(this.telemetryMaxPendingDepth, this.pending.size);
       try {
         this.send({
           type: 'transcribe', requestId, audioPath, audioFormat: format, mimeType: payload.mimeType,
@@ -253,7 +348,8 @@ export class WhisperTranscriptionService {
         });
       } catch (error) {
         this.pending.delete(requestId);
-        this.timerClear(timeout);
+        this.timerClear(softTimeout);
+        this.timerClear(hardTimeout);
         void this.removeFile(audioPath);
         reject(error);
         return;
@@ -272,18 +368,35 @@ export class WhisperTranscriptionService {
   }
 
   async stop(): Promise<LocalWhisperStatus> {
+    this.lifecycleRevision += 1;
     const current = this.process;
     if (current) {
       this.intentionallyStoppingGeneration = Number((current as ChildProcessWithoutNullStreams & { _generation?: number })._generation ?? 0);
+      if (this.restartAfterExitGeneration === this.intentionallyStoppingGeneration) {
+        this.restartAfterExitGeneration = null;
+      }
       if (current.stdin?.writable) {
         try { this.send({ type: 'shutdown' }); } catch { /* forced termination below is authoritative */ }
       }
+      const exited = new Promise<void>((resolve, reject) => {
+        const onExit = () => {
+          this.timerClear(timeout);
+          resolve();
+        };
+        const timeout = this.timerSet(() => {
+          current.removeListener('exit', onExit);
+          reject(new Error('Local Whisper sidecar did not acknowledge termination; temporary audio was retained.'));
+        }, 5000);
+        current.once('exit', onExit);
+      });
       current.kill();
-      this.process = null;
-      this.processReady = false;
-      this.modelReady = false;
-      this.modelConfigKey = '';
-      this.resolvePendingAsStopped();
+      try {
+        await exited;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Local Whisper sidecar did not stop.';
+        this.patch({ modelPhase: 'error', status: 'error', errorMessage: message });
+        throw error;
+      }
     }
     this.patch({
       sidecarRunning: false, modelPhase: 'stopped', listening: false, status: 'stopped', errorMessage: null,
@@ -364,37 +477,42 @@ export class WhisperTranscriptionService {
     set.clear();
   }
 
-  private rejectPending(error: Error) {
-    for (const request of this.pending.values()) {
-      this.timerClear(request.timeout); request.reject(error); void this.removeFile(request.audioPath);
+  private settleGenerationAfterExit(generation: number, error: Error, intentional: boolean) {
+    let settledCount = 0;
+    for (const [requestId, request] of this.pending) {
+      if (request.generation !== generation) continue;
+      this.pending.delete(requestId);
+      this.clearRequestTimers(request);
+      if (intentional) request.resolve({ text: '' });
+      else request.reject(error);
+      void this.removeFile(request.audioPath);
+      settledCount += 1;
     }
-    this.pending.clear();
+    if (settledCount > 0) this.patch({ chunk: { ...this.status.chunk, pendingResponses: Math.max(0, this.status.chunk.pendingResponses - settledCount) } });
   }
 
-  private resolvePendingAsStopped() {
-    for (const request of this.pending.values()) {
-      this.timerClear(request.timeout); request.resolve({ text: '' }); void this.removeFile(request.audioPath);
-    }
-    this.pending.clear();
-  }
-
-  private handleStdout(chunk: Buffer) {
-    this.stdoutBuffer += chunk.toString('utf8');
-    let newline = this.stdoutBuffer.indexOf('\n');
+  private handleStdout(chunk: Buffer, generation: number) {
+    if (generation !== this.generation) return;
+    let buffer = (this.stdoutBuffers.get(generation) ?? '') + chunk.toString('utf8');
+    let newline = buffer.indexOf('\n');
     while (newline >= 0) {
-      const line = this.stdoutBuffer.slice(0, newline).trim();
-      this.stdoutBuffer = this.stdoutBuffer.slice(newline + 1);
+      const line = buffer.slice(0, newline).trim();
+      buffer = buffer.slice(newline + 1);
       if (line) {
-        try { this.handleMessage(JSON.parse(line) as Record<string, unknown>); }
+        try { this.handleMessage(JSON.parse(line) as Record<string, unknown>, generation); }
         catch {
           this.patch({ modelPhase: 'error', status: 'error', errorMessage: 'Invalid Local Whisper sidecar response.', chunk: { ...this.status.chunk, lastSidecarError: 'Invalid Local Whisper sidecar response.', warningMessage: 'Invalid Local Whisper sidecar response.' } });
         }
       }
-      newline = this.stdoutBuffer.indexOf('\n');
+      newline = buffer.indexOf('\n');
     }
+    this.stdoutBuffers.set(generation, buffer);
   }
 
-  private handleMessage(message: Record<string, unknown>) {
+  private handleMessage(message: Record<string, unknown>, generation: number) {
+    if (generation !== this.generation) return;
+    if (this.intentionallyStoppingGeneration === generation) return;
+    if (this.restartAfterExitGeneration === generation) return;
     const type = message.type;
     if (type === 'ready') {
       this.processReady = true; this.resolveWaiters(this.processWaiters);
@@ -411,6 +529,13 @@ export class WhisperTranscriptionService {
       this.patch({ modelPhase: 'ready', status: 'listening', sidecarRunning: true }); return;
     }
     if (type === 'transcribe-start') {
+      const request = this.pending.get(String(message.requestId ?? ''));
+      if (request && request.generation === generation) {
+        const sidecarStartedAtMs = Number(message.inferenceStartedAtMs);
+        request.sidecarStartedAtMs = Number.isFinite(sidecarStartedAtMs)
+          ? sidecarStartedAtMs
+          : this.now();
+      }
       this.patch({ modelPhase: 'transcribing', chunk: { ...this.status.chunk, lastChunkBytes: Number(message.fileSizeBytes ?? this.status.chunk.lastChunkBytes) || this.status.chunk.lastChunkBytes, lastChunkFormat: String(message.audioFormat ?? this.status.chunk.lastChunkFormat), lastMimeType: String(message.mimeType ?? this.status.chunk.lastMimeType), lastHeaderSignature: String(message.headerSignature ?? this.status.chunk.lastHeaderSignature), warningMessage: null } });
       return;
     }
@@ -418,7 +543,8 @@ export class WhisperTranscriptionService {
       const requestId = String(message.requestId ?? '');
       const request = this.pending.get(requestId);
       if (!request) return;
-      this.pending.delete(requestId); this.timerClear(request.timeout);
+      if (request.generation !== this.generation || this.intentionallyStoppingGeneration === request.generation || request.hardTimedOut) return;
+      this.pending.delete(requestId); this.clearRequestTimers(request);
       const text = String(message.text ?? '');
       const ignoredStatus = PROVIDER_STATUS_TEXT.has(text.trim().replace(/\.$/, '').toLowerCase());
       const trimmed = ignoredStatus ? '' : text.trim();
@@ -429,7 +555,30 @@ export class WhisperTranscriptionService {
         chunk: { ...this.status.chunk, chunksReturnedFromSidecar: ignoredStatus ? this.status.chunk.chunksReturnedFromSidecar : this.status.chunk.chunksReturnedFromSidecar + 1, lastTranscriptText: ignoredStatus ? this.status.chunk.lastTranscriptText : item.displayText, lastSidecarError: null, warningMessage: null, pendingResponses: Math.max(0, this.status.chunk.pendingResponses - 1) },
         transcriptHistory: ignoredStatus ? this.status.transcriptHistory : [...this.status.transcriptHistory, item].slice(-25)
       });
-      request.resolve({ text: trimmed, durationSeconds: typeof message.durationSeconds === 'number' ? message.durationSeconds : undefined });
+      const mainCompletedAtMs = this.now();
+      const sidecarInferenceMs = Number(message.inferenceDurationMs);
+      request.resolve({
+        text: trimmed,
+        durationSeconds: typeof message.durationSeconds === 'number' ? message.durationSeconds : undefined,
+        telemetry: {
+          requestId,
+          mainReceivedAtMs: request.mainReceivedAtMs,
+          mainDispatchedAtMs: request.mainDispatchedAtMs,
+          ...(request.sidecarStartedAtMs === undefined ? {} : { sidecarStartedAtMs: request.sidecarStartedAtMs }),
+          ...(Number.isFinite(sidecarInferenceMs) ? { sidecarInferenceMs } : {}),
+          mainCompletedAtMs,
+          mainQueueDepthAtReceive: request.mainQueueDepthAtReceive,
+          mainQueueDepthAtDispatch: request.mainQueueDepthAtDispatch,
+          mainQueueDepthAtCompletion: this.pending.size
+        }
+      });
+      if (request.softTimedOut) {
+        this.deps.appendDiagnosticLog?.('local-whisper-delayed-complete', {
+          requestId,
+          generation: request.generation,
+          elapsedMs: Math.max(0, this.now() - request.startedAtMs)
+        });
+      }
       void this.removeFile(request.audioPath); return;
     }
     if (type === 'error') this.handleSidecarError(message);
@@ -439,51 +588,112 @@ export class WhisperTranscriptionService {
     const requestId = String(message.requestId ?? '');
     const request = requestId ? this.pending.get(requestId) : undefined;
     if (this.intentionallyStoppingGeneration != null) {
-      if (request) { this.pending.delete(requestId); this.timerClear(request.timeout); request.resolve({ text: '' }); void this.removeFile(request.audioPath); }
       this.patch({ modelPhase: 'stopped', status: 'stopped', errorMessage: null, chunk: { ...this.status.chunk, pendingResponses: Math.max(0, this.status.chunk.pendingResponses - 1) } });
       return;
     }
     const error = new Error(String(message.message ?? 'Local Whisper sidecar error.'));
     if (request) {
-      this.pending.delete(requestId); this.timerClear(request.timeout); request.reject(error); void this.removeFile(request.audioPath);
+      if (request.generation !== this.generation || request.hardTimedOut) return;
+      this.pending.delete(requestId); this.clearRequestTimers(request); request.reject(error); void this.removeFile(request.audioPath);
       this.patch({ modelPhase: 'error', status: 'error', errorMessage: error.message, chunk: { ...this.status.chunk, chunksReturnedFromSidecar: this.status.chunk.chunksReturnedFromSidecar + 1, lastSidecarError: error.message, warningMessage: error.message, pendingResponses: Math.max(0, this.status.chunk.pendingResponses - 1) } });
       return;
     }
     this.patch({ modelPhase: 'error', status: 'error', errorMessage: error.message, chunk: { ...this.status.chunk, lastSidecarError: error.message, warningMessage: error.message, pendingResponses: 0 } });
-    this.rejectWaiters(this.processWaiters, error); this.rejectWaiters(this.modelWaiters, error); this.rejectPending(error);
+    this.rejectWaiters(this.processWaiters, error); this.rejectWaiters(this.modelWaiters, error);
+    // A process-level sidecar error has no request acknowledgement. Terminate the
+    // owning generation and let its exit event reject work and release temp files.
+    this.process?.kill();
   }
 
-  private handleStderr(chunk: Buffer, plan: LocalWhisperLaunchPlan) {
-    const message = String(chunk).trim();
+  private handleStderr(chunk: Buffer, generation: number, plan: LocalWhisperLaunchPlan) {
+    if (generation !== this.generation) return;
+    const message = chunk.toString('utf8').trim();
     if (!message) return;
     const errorMessage = message.slice(0, 500);
     this.deps.appendDiagnosticLog?.('local-whisper-stderr', { message: errorMessage, bundled: plan.bundled });
     this.patch({ errorMessage, chunk: { ...this.status.chunk, lastSidecarError: errorMessage } });
   }
 
-  private handleProcessError(processInstance: ChildProcessWithoutNullStreams, error: NodeJS.ErrnoException, plan: LocalWhisperLaunchPlan) {
+  private handleProcessError(processInstance: ChildProcessWithoutNullStreams, generation: number, error: NodeJS.ErrnoException, plan: LocalWhisperLaunchPlan) {
     if (this.finalizedProcesses.has(processInstance)) return;
-    this.finalizedProcesses.add(processInstance);
     const spawnError = new Error(localWhisperSpawnErrorMessage(error, plan.executablePath, plan.bundled));
-    if (this.process === processInstance) this.process = null;
-    this.intentionallyStoppingGeneration = null;
+    if (generation !== this.generation) return;
     this.patch({ sidecarRunning: false, modelPhase: 'error', listening: false, status: 'error', errorMessage: spawnError.message });
-    this.rejectWaiters(this.processWaiters, spawnError); this.rejectWaiters(this.modelWaiters, spawnError); this.rejectPending(spawnError);
+    this.rejectWaiters(this.processWaiters, spawnError); this.rejectWaiters(this.modelWaiters, spawnError);
+    // Child-process exit is the cleanup acknowledgement. Do not settle requests or
+    // remove their audio before that event confirms the process no longer owns it.
+    if (this.process === processInstance) processInstance.kill();
   }
 
   private handleProcessExit(processInstance: ChildProcessWithoutNullStreams, generation: number, code: number | null, signal: NodeJS.Signals | null, plan: LocalWhisperLaunchPlan) {
     if (this.finalizedProcesses.has(processInstance)) return;
     this.finalizedProcesses.add(processInstance);
     if (this.process === processInstance) this.process = null;
+    this.stdoutBuffers.delete(generation);
     this.processReady = false; this.modelReady = false; this.modelConfigKey = '';
     const intentional = this.intentionallyStoppingGeneration === generation;
-    this.intentionallyStoppingGeneration = null;
+    if (intentional) this.intentionallyStoppingGeneration = null;
+    const shouldRestart = this.restartAfterExitGeneration === generation;
+    if (shouldRestart) this.restartAfterExitGeneration = null;
     this.deps.appendDiagnosticLog?.('local-whisper-exit', { code, signal, intentional, bundled: plan.bundled });
     this.patch({ sidecarRunning: false, modelPhase: 'stopped', listening: false, status: 'stopped', errorMessage: intentional ? null : 'Local Whisper sidecar stopped unexpectedly.', chunk: { ...this.status.chunk, pendingResponses: 0 } });
-    if (intentional) this.resolvePendingAsStopped();
-    else {
-      const error = new Error('Local Whisper sidecar stopped.');
-      this.rejectWaiters(this.processWaiters, error); this.rejectWaiters(this.modelWaiters, error); this.rejectPending(error);
+    const error = new Error(shouldRestart
+      ? 'Local Whisper transcription exceeded the hard watchdog; sidecar restarted.'
+      : 'Local Whisper sidecar stopped.');
+    this.settleGenerationAfterExit(generation, error, intentional);
+    this.rejectWaiters(this.processWaiters, error); this.rejectWaiters(this.modelWaiters, error);
+    if (shouldRestart && this.settings) {
+      void this.start(this.settings).catch((restartError) => {
+        const message = restartError instanceof Error ? restartError.message : 'Local Whisper sidecar restart failed.';
+        this.patch({ sidecarRunning: false, modelPhase: 'error', listening: false, status: 'error', errorMessage: message });
+      });
+    }
+  }
+
+  private handleHardTranscriptionTimeout(requestId: string, generation: number) {
+    const request = this.pending.get(requestId);
+    if (
+      !request ||
+      request.generation !== generation ||
+      request.hardTimedOut ||
+      this.intentionallyStoppingGeneration === generation
+    ) return;
+    request.hardTimedOut = true;
+    const elapsedMs = Math.max(0, this.now() - request.startedAtMs);
+    const error = new Error('Local Whisper transcription exceeded the hard watchdog; sidecar restarted.');
+    this.restartAfterExitGeneration = generation;
+    this.deps.appendDiagnosticLog?.('local-whisper-hard-timeout', { requestId, generation, elapsedMs });
+    this.patch({
+      modelPhase: 'error',
+      status: 'error',
+      errorMessage: error.message,
+      chunk: { ...this.status.chunk, lastSidecarError: error.message, warningMessage: error.message }
+    });
+    const currentGeneration = Number((this.process as (ChildProcessWithoutNullStreams & { _generation?: number }) | null)?._generation ?? -1);
+    if (this.process && currentGeneration === generation) this.process.kill();
+  }
+
+  private clearRequestTimers(request: PendingRequest) {
+    this.timerClear(request.softTimeout);
+    this.timerClear(request.hardTimeout);
+  }
+
+  private async cleanupAbandonedTempFiles() {
+    if (this.startupCleanupDone) return;
+    this.startupCleanupDone = true;
+    const tempDirectory = path.join(this.deps.getTempPath(), 'narration-prompter-local-whisper');
+    try {
+      await (this.deps.mkdir ?? mkdir)(tempDirectory, { recursive: true });
+      const entries = await (this.deps.readdir ?? readdir)(tempDirectory, { withFileTypes: true });
+      const cutoff = this.now() - ABANDONED_TEMP_FILE_MAX_AGE_MS;
+      for (const entry of entries) {
+        if (!entry.isFile() || !/^chunk-\d+-\d+\.[a-z0-9]+$/i.test(entry.name)) continue;
+        const filePath = path.join(tempDirectory, entry.name);
+        const details = await (this.deps.stat ?? stat)(filePath).catch(() => null);
+        if (details && details.mtimeMs <= cutoff) await this.removeFile(filePath);
+      }
+    } catch {
+      // Startup cleanup is best-effort; active request ownership remains authoritative.
     }
   }
 

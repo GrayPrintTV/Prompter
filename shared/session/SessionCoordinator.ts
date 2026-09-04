@@ -64,6 +64,7 @@ export type SessionCoordinatorState = {
   latestTranscript: string;
   alignmentBufferDebug: AlignmentBufferDebug;
   manualReacquireAnchor: VisibleReacquireAnchor | null;
+  transcriptNotBeforeMs: number;
   movementDecision: MovementDecisionInfo | null;
   movementDecisionHistory: MovementDecisionInfo[];
   sessionRevision: number;
@@ -160,6 +161,7 @@ export class SessionCoordinator {
   private resyncArmed = false;
   private lowConfidenceCount = 0;
   private manualAnchor: VisibleReacquireAnchor | null = null;
+  private transcriptNotBeforeMs = 0;
   private lastFreshAnchor: { tokenIndex: number; timestampMs: number } | null = null;
   private movementDecision: MovementDecisionInfo | null = null;
   private movementHistory: MovementDecisionInfo[] = [];
@@ -207,6 +209,7 @@ export class SessionCoordinator {
         evaluationBufferTokens: [...this.alignmentBufferDebug.evaluationBufferTokens]
       },
       manualReacquireAnchor: this.manualAnchor ? { ...this.manualAnchor } : null,
+      transcriptNotBeforeMs: this.transcriptNotBeforeMs,
       movementDecision: this.movementDecision ? { ...this.movementDecision } : null,
       movementDecisionHistory: this.movementHistory.map((decision) => ({ ...decision })),
       sessionRevision: this.sessionRevision,
@@ -286,6 +289,7 @@ export class SessionCoordinator {
     this.latestTranscript = state.latestTranscript;
     this.alignmentBufferDebug = { ...state.alignmentBufferDebug };
     this.manualAnchor = state.manualReacquireAnchor ? { ...state.manualReacquireAnchor } : null;
+    this.transcriptNotBeforeMs = Math.max(0, state.transcriptNotBeforeMs ?? 0);
     this.movementDecision = state.movementDecision ? { ...state.movementDecision } : null;
     this.movementHistory = state.movementDecisionHistory.map((decision) => ({ ...decision }));
     this.sessionRevision = Math.max(this.sessionRevision, state.sessionRevision);
@@ -306,6 +310,7 @@ export class SessionCoordinator {
     this.resyncArmed = false;
     this.lastFreshAnchor = null;
     this.manualAnchor = null;
+    this.transcriptNotBeforeMs = 0;
     this.reacquireEvidenceTokens = [];
     this.manualAnchorHoldReason = null;
     this.alignmentBufferDebug = { ...EMPTY_SESSION_ALIGNMENT_DEBUG };
@@ -331,6 +336,12 @@ export class SessionCoordinator {
 
   setVisibleReacquireAnchor(anchor: VisibleReacquireAnchor, kind: 'startup' | 'manual') {
     this.manualAnchor = { ...anchor };
+    if (kind === 'manual') {
+      this.transcriptNotBeforeMs = Math.max(this.transcriptNotBeforeMs, anchor.detectedAtMs);
+      this.currentTokenIndex = this.clampToken(anchor.visibleTokenIndex);
+      this.alignment = emptyAlignment(this.model, this.currentTokenIndex);
+      this.lastFreshAnchor = null;
+    }
     this.localAlignmentBuffer = createAlignmentBufferState();
     this.transcriptBuffer = [];
     this.reacquireEvidenceTokens = [];
@@ -402,6 +413,37 @@ export class SessionCoordinator {
     const raw = delta.text;
     const words = transcriptToTokens(raw);
     const traces = [`recv ${delta.source}: raw="${raw}"`, `norm tokens: [${words.join(' ')}]`];
+    if (delta.timestampMs <= this.transcriptNotBeforeMs) {
+      const activeManualAnchor = this.manualAnchor;
+      const nextState = activeManualAnchor
+        ? this.followState === 'manual' ? 'manual' : 'holding'
+        : this.followState;
+      this.followState = nextState;
+      const reason = `captured before manual anchor (${delta.timestampMs} <= ${this.transcriptNotBeforeMs})`;
+      this.alignmentBufferDebug = {
+        ...EMPTY_SESSION_ALIGNMENT_DEBUG,
+        source: delta.source,
+        rawTranscript: raw,
+        normalizedTokens: words,
+        moveDecision: 'ignored stale pre-anchor transcript',
+        retentionDecision: 'discarded',
+        retentionReason: reason
+      };
+      this.recordMovement({
+        source: delta.source,
+        previousTokenIndex: this.currentTokenIndex,
+        confirmedTokenIndex: this.currentTokenIndex,
+        followState: nextState,
+        finalMovement: 'ignored',
+        confidence: 0,
+        engineReason: reason,
+        alignmentContext: 'manual anchor generation fence',
+        visibleAnchorTokenIndex: activeManualAnchor?.visibleTokenIndex
+      });
+      traces.push(`stale transcript ignored: ${reason}`);
+      this.bumpRevision();
+      return { state: this.getState(), traces, inputLevel: 0 };
+    }
     this.latestTranscript = raw;
     if (words.length === 0) {
       const nextState = this.followState === 'manual' ? 'manual' : 'holding';

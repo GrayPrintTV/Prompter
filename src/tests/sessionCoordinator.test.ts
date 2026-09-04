@@ -14,8 +14,8 @@ function createCoordinator(text = SAMPLE_MANUSCRIPT, tokenIndex = 0) {
   });
 }
 
-function delta(text: string, source: 'manual' | 'mock' | 'local-whisper' = 'local-whisper') {
-  return { text, source, isFinal: true, timestampMs: 10_000 } as const;
+function delta(text: string, source: 'manual' | 'mock' | 'local-whisper' = 'local-whisper', timestampMs = 10_000) {
+  return { text, source, isFinal: true, timestampMs } as const;
 }
 
 describe('SessionCoordinator characterization', () => {
@@ -86,6 +86,7 @@ describe('SessionCoordinator characterization', () => {
       source: 'manual-scroll', visibleTokenIndex: visible, detectedAtMs: 9_000,
       direction: 'forward', hadFreshConfirmedAnchor: false
     }, 'manual');
+    expect(coordinator.getState().currentTokenIndex).toBe(visible);
     const result = coordinator.processTranscript(delta('By noon the manuscript had become less like a stack of pages', 'mock'));
 
     expect(result.state.currentTokenIndex).toBeGreaterThanOrEqual(visible);
@@ -108,11 +109,53 @@ describe('SessionCoordinator characterization', () => {
       delta('The studio light blinked once and Mara settled her eyes', 'mock')
     );
 
-    expect(result.state.currentTokenIndex).toBe(oldAnchor);
+    expect(result.state.currentTokenIndex).toBe(visible);
     expect(result.state.followState).toBe('holding');
     expect(result.state.manualReacquireAnchor?.visibleTokenIndex).toBe(visible);
     expect(result.traces.some((trace) => trace.includes('manual anchor rejected / held'))).toBe(true);
     expect(result.traces.some((trace) => trace.includes('auto-follow remains suppressed'))).toBe(true);
+  });
+
+  it('preserves a manual anchor through Stop/Start follow-state changes', () => {
+    const model = buildManuscript(SAMPLE_MANUSCRIPT);
+    const visible = searchManuscript(model, 'By noon the manuscript', 1) ?? 0;
+    const coordinator = createCoordinator();
+    coordinator.setVisibleReacquireAnchor({
+      source: 'manual-scroll', visibleTokenIndex: visible, detectedAtMs: 9_000,
+      direction: 'forward', hadFreshConfirmedAnchor: false
+    }, 'manual');
+
+    coordinator.setFollowState('manual');
+    coordinator.setFollowState('following');
+
+    expect(coordinator.getState()).toMatchObject({
+      currentTokenIndex: visible,
+      manualReacquireAnchor: { visibleTokenIndex: visible, detectedAtMs: 9_000 }
+    });
+  });
+
+  it('permanently fences pre-anchor audio even after fresh nearby speech reacquires', () => {
+    const model = buildManuscript(SAMPLE_MANUSCRIPT);
+    const visible = searchManuscript(model, 'By noon the manuscript', 1) ?? 0;
+    const coordinator = createCoordinator();
+    coordinator.setVisibleReacquireAnchor({
+      source: 'manual-scroll', visibleTokenIndex: visible, detectedAtMs: 9_000,
+      direction: 'forward', hadFreshConfirmedAnchor: false
+    }, 'manual');
+
+    const reacquired = coordinator.processTranscript(
+      delta('By noon the manuscript had become less like a stack of pages', 'local-whisper', 10_000)
+    ).state;
+    expect(reacquired.manualReacquireAnchor).toBeNull();
+    const authoritativeToken = reacquired.currentTokenIndex;
+
+    const stale = coordinator.processTranscript(
+      delta('The studio light blinked once and Mara settled her eyes', 'local-whisper', 8_500)
+    );
+    expect(stale.state.currentTokenIndex).toBe(authoritativeToken);
+    expect(stale.state.manualReacquireAnchor).toBeNull();
+    expect(stale.state.movementDecision?.finalMovement).toBe('ignored');
+    expect(stale.state.alignmentBufferDebug.moveDecision).toBe('ignored stale pre-anchor transcript');
   });
 
   it('resets transcript evidence and revisions when the manuscript changes', () => {

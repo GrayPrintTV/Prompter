@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { deriveNarrationStatus, isBenignStartDiagnosticMessage } from '../domain/narrationStatus';
+import {
+  deriveNarrationStatus,
+  deriveTranscriptPipelineState,
+  isBenignStartDiagnosticMessage
+} from '../domain/narrationStatus';
 
 const BASE = {
   isRunning: false,
@@ -104,6 +108,66 @@ describe('deriveNarrationStatus', () => {
 
     expect(status.label).toBe('Lagging');
     expect(status.warning).toBe('Queue backing up');
+  });
+
+  it('reports stalled only for an active non-silent request beyond the soft timeout', () => {
+    const activity = {
+      activeRequestStartedAtMs: 10_000,
+      activeRequestCapturedAtMs: 9_000,
+      lastNonSilentCapturedAtMs: 9_000,
+      unusableSpeechStartedAtMs: 9_000,
+      lastUsableTranscriptCapturedAtMs: 0,
+      lastRequestCompletedCaptureAtMs: 0,
+      lastRequestWasDelayed: false
+    };
+    const pipelineState = deriveTranscriptPipelineState(activity, 'following', 25_001);
+    const status = deriveNarrationStatus({ ...BASE, isRunning: true, pipelineState });
+
+    expect(pipelineState).toBe('stalled');
+    expect(status.label).toBe('Stalled');
+  });
+
+  it('does not call ordinary silence stalled', () => {
+    const pipelineState = deriveTranscriptPipelineState({
+      activeRequestStartedAtMs: 0,
+      activeRequestCapturedAtMs: 0,
+      lastNonSilentCapturedAtMs: 9_000,
+      unusableSpeechStartedAtMs: 5_000,
+      lastUsableTranscriptCapturedAtMs: 9_000,
+      lastRequestCompletedCaptureAtMs: 9_000,
+      lastRequestWasDelayed: false
+    }, 'following', 100_000);
+
+    expect(pipelineState).toBe('normal');
+  });
+
+  it('reports recovering when delayed usable speech returned but was not yet accepted', () => {
+    const activity = {
+      activeRequestStartedAtMs: 0,
+      activeRequestCapturedAtMs: 0,
+      lastNonSilentCapturedAtMs: 12_000,
+      unusableSpeechStartedAtMs: 0,
+      lastUsableTranscriptCapturedAtMs: 12_000,
+      lastRequestCompletedCaptureAtMs: 12_000,
+      lastRequestWasDelayed: true
+    };
+
+    expect(deriveTranscriptPipelineState(activity, 'holding', 30_000)).toBe('recovering');
+    expect(deriveTranscriptPipelineState(activity, 'following', 30_000)).toBe('normal');
+  });
+
+  it('reports stalled for continuing non-silent chunks that yield no usable text', () => {
+    const pipelineState = deriveTranscriptPipelineState({
+      activeRequestStartedAtMs: 0,
+      activeRequestCapturedAtMs: 0,
+      lastNonSilentCapturedAtMs: 24_000,
+      unusableSpeechStartedAtMs: 5_000,
+      lastUsableTranscriptCapturedAtMs: 0,
+      lastRequestCompletedCaptureAtMs: 24_000,
+      lastRequestWasDelayed: false
+    }, 'following', 25_000);
+
+    expect(pipelineState).toBe('stalled');
   });
 });
 

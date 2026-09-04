@@ -55,6 +55,10 @@ The sidecar is chunk-based and may be delayed. Word-level realtime behavior is n
 
 Sidecar readiness has two separate stages. `ready` from the Python process means the process is alive and accepting JSONL. `model-loaded` means faster-whisper has loaded the requested model and transcription can begin.
 
+Each request owns its temporary WAV through response settlement. A 15-second timer is advisory: it publishes delayed/stalled diagnostics while leaving the request active. A separate 120-second hard watchdog terminates the owning process generation. Main waits for the child `exit` boundary before rejecting that generation, deleting its files, or starting replacement work; late responses and repeated cleanup are idempotent. Process, request, status, and renderer runs are generation-fenced so Stop/Start and restarts cannot settle newer work. Safe startup cleanup removes only abandoned Prompter temp WAV files. The spawned process receives UTF-8 environment/launcher settings, and the Python entry point reconfigures stdin/stdout/stderr as UTF-8.
+
+Local Whisper timing metadata is optional on `TranscriptDelta` and is populated only by that provider. `LocalWhisperTelemetryAccumulator` combines renderer capture/queue timestamps, main receipt/dispatch depth, Python monotonic inference duration, coordinator decision timing, and the first discrete programmatic `scrollTop` write. It emits one bounded aggregate through preload IPC approximately every 60 seconds. Electron appends a size-limited JSONL record and bounds the production main log; no per-chunk telemetry record is written.
+
 ## Experimental OpenAI Realtime Flow
 
 The provider is parked and disabled by default. When disabled, it is omitted from the provider registry, saved selections fall back to Manual, and Electron rejects Realtime SDP IPC before reading `OPENAI_API_KEY` or making a network request.
@@ -69,9 +73,13 @@ The alignment engine lives in `src/domain/alignment.ts` and related domain modul
 
 Stateful transcript-to-position behavior is owned by `src/session/SessionCoordinator.ts`. It combines the existing domain functions without changing their thresholds or scoring, and owns transcript buffers, accepted semantic position, reacquisition state, confidence/follow decisions, and movement diagnostics. `App.tsx` projects immutable coordinator state into React while retaining rendering, provider lifecycle, local persistence, and physical scroll animation. The coordinator can emit a JSON-serializable authoritative snapshot that validates against the shared protocol schema.
 
+Settled user scrolling is an authoritative manual-anchor event, not merely a visual offset. `PrompterView` distinguishes wheel/pointer/touch input from programmatic writes, cancels an active correction, and reports the visible token plus detection time. The coordinator immediately rebases and persists that token, rejects transcripts captured before the anchor, and retains the protection across Stop/Start. Fresh nearby speech captured after the anchor may reacquire; manuscript replacement or explicit session reset may clear it. This ownership prevents old ASR or motion results from overriding a narrator correction.
+
 ## Shared Tablet Protocol Foundation
 
 Language-neutral JSON Schemas and compatibility rules live under `shared/protocol/`. They define envelopes, authoritative snapshots, transcript and semantic movement events, audio control metadata, and pairing/authentication placeholders. They do not implement a server, listener, authentication, binary transport, or Android client. Transport protocol versions are independent of session and manuscript revisions; visual lines and pixel positions are intentionally not authoritative cross-platform fields.
+
+`manualReposition.inputSource` is shared and validated as `touch`, `pointer`, `fast-scroll`, or `unknown`. Android's fast-scroll control uses `fast-scroll`; all variants still become semantic manual anchors rather than cross-platform pixel positions.
 
 ## UI and Debug Flow
 
@@ -86,6 +94,8 @@ In Developer mode, the Display panel can issue scroll-test requests for 1, 5, an
 Movement-decision diagnostics live in `src/domain/movementDiagnostics.ts` and are surfaced by `App.tsx` into Developer mode in `ControlPanel`. They consume existing data from `AlignmentResult`, Local Whisper provisional-buffer decisions, PrompterView anchor debug, Assist status, and scroll trace events. The diagnostics classify decisions as on-track, local correction, plausible forward movement, suspicious jump, rollback/retake, suspicious rollback, or held/stale/uncertain. They also show a 160 WPM expected-progress corridor for observability only; the classifier does not change alignment scoring, confidence thresholds, or scroll acceptance.
 
 Narration status labels are derived in `src/domain/narrationStatus.ts` from provider/follow/mic/lag/error inputs. This keeps UI labels such as Idle, Starting, Following, Holding, Lagging, and Error separate from ASR provider internals.
+
+The Local Whisper pipeline adds `Stalled` and `Recovering` without treating silence as a failure. Status derives from non-silent capture time, active/pending requests, usable-result capture time, and delayed-request completion. Provider/session cleanup removes status timers and telemetry correlation state.
 
 `src/components/DebugPanel.tsx` is gated by Developer mode and shows transcript buffer, current token, best match, confidence, follow state, search window, and reason.
 

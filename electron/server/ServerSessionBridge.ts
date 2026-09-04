@@ -275,6 +275,8 @@ export class ServerSessionBridge {
       ? null
       : state.currentTokenIndex - pendingAnchorTokenIndex;
     const manualReacquired = trackedTabletAnchor !== null &&
+      state.manualReacquireAnchor?.source !== 'tablet-manual-scroll' &&
+      state.movementDecision?.classification === 'manual scroll reacquired' &&
       isAuthoritativeTargetNearTabletManualAnchor(
         {
           tokenIndex: trackedTabletAnchor.anchorTokenIndex,

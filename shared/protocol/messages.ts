@@ -133,7 +133,7 @@ export type TabletManualRepositionPayload = {
   sentenceIndex: number;
   paragraphIndex: number;
   direction: 'backward' | 'forward' | 'stationary';
-  inputSource: 'touch' | 'pointer' | 'unknown';
+  inputSource: 'touch' | 'pointer' | 'fast-scroll' | 'unknown';
   scrollContainer: string;
   detectedAtMs: number;
 };

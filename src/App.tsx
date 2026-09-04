@@ -22,6 +22,7 @@ import {
 } from './domain/movementDiagnostics';
 import {
   deriveNarrationStatus,
+  deriveTranscriptPipelineState,
   isBenignStartDiagnosticMessage,
   type StartDiagnostic
 } from './domain/narrationStatus';
@@ -61,6 +62,7 @@ import {
 import type { ServerStatusSummary, TabletModeStatus } from '../shared/protocol/messages';
 import { rendererProjectionForTabletUpdate } from './session/tabletAuthority';
 import type { ManualScrollInputSource } from './domain/manualFollow';
+import { LocalWhisperTelemetryAccumulator } from './diagnostics/LocalWhisperTelemetry';
 
 function emptyAlignment(model: ManuscriptModel, tokenIndex: number): AlignmentResult {
   const sentenceIndex = findSentenceIndexForToken(model, tokenIndex);
@@ -217,8 +219,11 @@ export default function App() {
   const manualProviderRef = useRef(new ManualAsrProvider());
   const mockProviderRef = useRef(new MockAsrProvider());
   const liveProviderRef = useRef(new OpenAiRealtimeAsrProvider());
+  const localWhisperTelemetryRef = useRef(new LocalWhisperTelemetryAccumulator());
   const localWhisperProviderRef = useRef(
-    new LocalWhisperAsrProvider(initialLocalWhisperSettings)
+    new LocalWhisperAsrProvider(initialLocalWhisperSettings, {
+      onTelemetryEvent: (event) => localWhisperTelemetryRef.current.recordProviderEvent(event)
+    })
   );
   const scrollTestIdRef = useRef(0);
   const startupVisibleAnchorRequestIdRef = useRef(0);
@@ -434,25 +439,32 @@ export default function App() {
   }, [sessionCoordinator]);
 
   const requestStartupVisibleAnchor = useCallback(async () => {
+    const existingAnchor = sessionCoordinator.getState().manualReacquireAnchor;
+    if (existingAnchor && existingAnchor.source !== 'startup') {
+      appendTrace(`manual anchor preserved across start token=${existingAnchor.visibleTokenIndex}`);
+      return;
+    }
     clearManualReacquireAnchor();
     startupVisibleAnchorRequestIdRef.current += 1;
     setStartupVisibleAnchorRequestId(startupVisibleAnchorRequestIdRef.current);
     await new Promise<void>((resolve) => {
       window.requestAnimationFrame(() => window.requestAnimationFrame(() => resolve()));
     });
-  }, [clearManualReacquireAnchor]);
+  }, [appendTrace, clearManualReacquireAnchor, sessionCoordinator]);
 
   const enterFollowing = useCallback(() => {
     applyCoordinatorState(sessionCoordinator.setFollowState('following'));
   }, [applyCoordinatorState, sessionCoordinator]);
 
   const resetAlignmentContext = useCallback(() => {
+    clearMicStartupGrace();
+    activeStartAttemptRef.current = null;
     setSessionResetId((value) => value + 1);
     sessionCoordinator.resetTranscriptContext();
     setTranscriptBuffer([]);
     setAlignmentBufferDebug(EMPTY_ALIGNMENT_BUFFER_DEBUG);
     setManualReacquireAnchor(null);
-  }, [sessionCoordinator]);
+  }, [clearMicStartupGrace, sessionCoordinator]);
 
   const onTraceScroll = useCallback((info: { sentenceIndex: number; didScroll: boolean; reason: string }) => {
     const r = info.reason || '';
@@ -511,6 +523,9 @@ export default function App() {
 
   const onScrollAnimationStatus = useCallback((info: ScrollAnimationStatusInfo) => {
     setScrollAnimationStatus(info);
+    if (info.source === 'live' && (info.status === 'direct scroll' || info.status === 'first frame')) {
+      localWhisperTelemetryRef.current.recordVisibleMovement();
+    }
   }, []);
 
   const onStartupVisibleAnchor = useCallback((info: {
@@ -551,11 +566,13 @@ export default function App() {
     direction: 'backward' | 'forward' | 'stationary';
     source: ManualScrollInputSource;
     correctionCancelled: boolean;
+    detectedAtMs: number;
   }) => {
+    const previousTokenIndex = currentTokenRef.current;
     const anchor: VisibleReacquireAnchor = {
       source: 'manual-scroll',
       visibleTokenIndex: info.visibleTokenIndex,
-      detectedAtMs: Date.now(),
+      detectedAtMs: info.detectedAtMs,
       direction: info.direction,
       hadFreshConfirmedAnchor: sessionCoordinator.hasFreshAnchor()
     };
@@ -565,8 +582,8 @@ export default function App() {
     );
     recordMovementDecision({
       source: `manual-scroll:${info.source}`,
-      previousTokenIndex: currentTokenRef.current,
-      confirmedTokenIndex: currentTokenRef.current,
+      previousTokenIndex,
+      confirmedTokenIndex: info.visibleTokenIndex,
       proposedTargetTokenIndex: info.visibleTokenIndex,
       confidence: 0,
       followState: 'holding',
@@ -586,6 +603,21 @@ export default function App() {
     if (tabletModeRef.current) return;
     setDeltas((previous) => [...previous.slice(-24), delta]);
     const result = sessionCoordinator.processTranscript(delta);
+    const acceptedAtMs = Date.now();
+    if (delta.source === 'local-whisper') {
+      const decision = result.state.movementDecision;
+      const rejectedAsStale = result.state.alignmentBufferDebug.moveDecision === 'ignored stale pre-anchor transcript';
+      const alignmentAccepted = decision?.finalMovement === 'accepted' || decision?.finalMovement === 'corrected';
+      localWhisperTelemetryRef.current.recordCoordinatorResult({
+        telemetry: delta.telemetry,
+        acceptedAtMs,
+        rejectedAsStale,
+        alignmentAccepted,
+        visibleMovementExpected: Boolean(
+          alignmentAccepted && decision && decision.confirmedTokenIndex !== decision.previousAnchorTokenIndex
+        )
+      });
+    }
     for (const trace of result.traces) appendTrace(trace);
     setInputLevel(result.inputLevel);
     applyCoordinatorState(result.state);
@@ -784,9 +816,8 @@ export default function App() {
       enterFollowing();
       return;
     }
-    clearManualReacquireAnchor();
     applyCoordinatorState(sessionCoordinator.setFollowState('manual'));
-  }, [applyCoordinatorState, clearManualReacquireAnchor, enterFollowing, requestStartupVisibleAnchor, sessionCoordinator]);
+  }, [applyCoordinatorState, enterFollowing, requestStartupVisibleAnchor, sessionCoordinator]);
 
   const togglePause = useCallback(async () => {
     if (followStateRef.current === 'paused') {
@@ -837,10 +868,9 @@ export default function App() {
 
   const stopMock = useCallback(async () => {
     await mockProviderRef.current.stop();
-    clearManualReacquireAnchor();
     setIsMockPlaying(false);
     applyCoordinatorState(sessionCoordinator.setFollowState('manual'));
-  }, [applyCoordinatorState, clearManualReacquireAnchor, sessionCoordinator]);
+  }, [applyCoordinatorState, sessionCoordinator]);
 
   const startMicMonitor = useCallback(async () => {
     if (tabletModeRef.current) return;
@@ -907,7 +937,6 @@ export default function App() {
       }
       if (liveStatus.listening) {
         await liveProviderRef.current.stop();
-        clearManualReacquireAnchor();
         applyCoordinatorState(sessionCoordinator.setFollowState('manual'));
       } else {
         try {
@@ -928,7 +957,6 @@ export default function App() {
       if (localWhisperStatus.listening) {
         clearMicStartupGrace();
         await localWhisperProviderRef.current.stop();
-        clearManualReacquireAnchor();
         applyCoordinatorState(sessionCoordinator.setFollowState('manual'));
       } else {
         if (!localWhisperStatus.bridge.localWhisperBridgeAvailable) {
@@ -945,6 +973,10 @@ export default function App() {
         beginMicStartupGrace();
         try {
           await localWhisperProviderRef.current.start();
+          if (localWhisperProviderRef.current.getStatus() !== 'listening') {
+            clearMicStartupGrace();
+            return;
+          }
           settleMicStartupGrace();
           const attempt = activeStartAttemptRef.current;
           if (attempt?.providerId === 'local-whisper') {
@@ -993,7 +1025,6 @@ export default function App() {
 
     if (isListening) {
       await manualProviderRef.current.stop();
-      clearManualReacquireAnchor();
       setIsListening(false);
       applyCoordinatorState(sessionCoordinator.setFollowState('manual'));
     } else {
@@ -1010,7 +1041,6 @@ export default function App() {
     liveConfig.enabled,
     liveStatus.listening,
     beginMicStartupGrace,
-    clearManualReacquireAnchor,
     clearMicStartupGrace,
     enterFollowing,
     localWhisperStatus.bridge.localWhisperBridgeAvailable,
@@ -1112,9 +1142,10 @@ export default function App() {
 
   const selectAsrProvider = useCallback((providerId: AsrProviderId) => {
     if (tabletModeRef.current) return;
-    clearManualReacquireAnchor();
+    clearMicStartupGrace();
+    activeStartAttemptRef.current = null;
     setSelectedAsrProviderId(coerceSelectedProvider(providerId, liveConfig, localWhisperSettings));
-  }, [clearManualReacquireAnchor, liveConfig, localWhisperSettings]);
+  }, [clearMicStartupGrace, liveConfig, localWhisperSettings]);
 
   const localWhisperSettingsDirty = !localWhisperSettingsEqual(
     localWhisperSettings,
@@ -1297,6 +1328,9 @@ export default function App() {
     selectedAsrProviderId === 'local-whisper'
       ? localWhisperStatus.chunk.warningMessage
       : null;
+  const transcriptPipelineState = selectedAsrProviderId === 'local-whisper' && selectedProviderListening
+    ? deriveTranscriptPipelineState(localWhisperStatus.chunk, followState, Date.now())
+    : 'normal';
   const narrationStatus = deriveNarrationStatus({
     isRunning: selectedProviderListening,
     isStarting: selectedProviderStarting,
@@ -1308,8 +1342,31 @@ export default function App() {
     inputLevel: selectedInputLevel,
     isLagging: localQueueLagging,
     errorMessage: selectedProviderError,
-    warningMessage: selectedProviderWarning
+    warningMessage: selectedProviderWarning,
+    pipelineState: transcriptPipelineState
   });
+  const publishLocalWhisperTelemetry = useCallback(() => {
+    const recordTelemetry = window.prompterApi?.recordLocalWhisperTelemetry;
+    if (!recordTelemetry) return;
+    const aggregate = localWhisperTelemetryRef.current.drain();
+    if (aggregate) void recordTelemetry(aggregate).catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    if (selectedAsrProviderId !== 'local-whisper') return;
+    localWhisperTelemetryRef.current.recordNarratorStatus(narrationStatus.label);
+  }, [narrationStatus.label, selectedAsrProviderId]);
+
+  useEffect(() => {
+    if (selectedAsrProviderId !== 'local-whisper' || !selectedProviderListening) return;
+    const timer = window.setInterval(publishLocalWhisperTelemetry, 60_000);
+    return () => {
+      window.clearInterval(timer);
+      publishLocalWhisperTelemetry();
+      localWhisperTelemetryRef.current.resetLifecycleCorrelations();
+    };
+  }, [publishLocalWhisperTelemetry, selectedAsrProviderId, selectedProviderListening, sessionResetId]);
+
   const startStopDisabled = tabletMode || (
     selectedAsrProviderId === 'local-whisper' &&
     !selectedProviderListening &&
@@ -1424,7 +1481,7 @@ export default function App() {
           layoutMode={controlsVisible ? 'with-controls' : 'prompter-only'}
           assistScrollLagging={localQueueLagging}
           manualScrollTrackingEnabled={
-            !tabletMode && selectedProviderListening && followState !== 'manual' && followState !== 'paused'
+            !tabletMode
           }
           visibleReacquireActive={Boolean(manualReacquireAnchor)}
           visibleReacquireSource={manualReacquireAnchor?.source}

@@ -222,6 +222,9 @@ export function getNarratorStatusMessage(params: {
   }
 
   if (narrationStatus.label === 'Starting') return 'Starting';
+  if (narrationStatus.label === 'Stalled' || narrationStatus.label === 'Recovering') {
+    return narrationStatus.label;
+  }
   if (followState === 'lost' || followState === 'uncertain' || followState === 'holding') {
     return 'Needs resync';
   }
@@ -518,6 +521,12 @@ export function ControlPanel(props: Props) {
     if (err || s.modelPhase === 'error') {
       return { label: 'Sidecar failed', type: 'error' };
     }
+    if (narrationStatus.label === 'Stalled') {
+      return { label: 'Transcription stalled', type: 'warning' };
+    }
+    if (narrationStatus.label === 'Recovering') {
+      return { label: 'Reacquiring position', type: 'warning' };
+    }
     if (isBehind) {
       return { label: 'Whisper is behind', type: 'warning' };
     }
@@ -719,7 +728,7 @@ export function ControlPanel(props: Props) {
           </div>
           <div>
             <span>Following</span>
-            <strong>{followState === 'following' ? 'Following narration' : followState === 'paused' ? 'Paused' : 'Waiting for speech'}</strong>
+            <strong>{followState === 'paused' ? 'Paused' : narrationStatus.label === 'Stalled' || narrationStatus.label === 'Recovering' ? narrationStatus.label : followState === 'following' ? 'Following narration' : 'Waiting for speech'}</strong>
           </div>
         </div>
         <div className="level-meter" aria-label="Microphone level">

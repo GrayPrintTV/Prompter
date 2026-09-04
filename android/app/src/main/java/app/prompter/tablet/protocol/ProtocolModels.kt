@@ -250,7 +250,15 @@ data class ManualReposition(
     val inputSource: String,
     val scrollContainer: String,
     val detectedAtMs: Long
-)
+) {
+    init {
+        require(inputSource in INPUT_SOURCES) { "Unsupported manual reposition inputSource: $inputSource" }
+    }
+
+    companion object {
+        val INPUT_SOURCES = setOf("touch", "pointer", "fast-scroll", "unknown")
+    }
+}
 
 @Serializable
 data class ManualRepositionResult(

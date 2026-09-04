@@ -14,14 +14,17 @@ const SETTINGS: LocalWhisperSettings = {
   chunkDurationSeconds: 2
 };
 
-function fakeProcess(onCommand?: (command: Record<string, unknown>, process: any) => void) {
+function fakeProcess(
+  onCommand?: (command: Record<string, unknown>, process: any) => void,
+  autoExitOnKill = true
+) {
   const process = new EventEmitter() as any;
   process.stdin = new PassThrough();
   process.stdout = new PassThrough();
   process.stderr = new PassThrough();
   process.pid = 4321;
   process.kill = vi.fn(() => {
-    queueMicrotask(() => process.emit('exit', 0, null));
+    if (autoExitOnKill) queueMicrotask(() => process.emit('exit', 0, null));
     return true;
   });
   let input = '';
@@ -38,30 +41,46 @@ function fakeProcess(onCommand?: (command: Record<string, unknown>, process: any
   return process;
 }
 
-function createHarness(options: { packaged?: boolean } = {}) {
+function createHarness(options: {
+  packaged?: boolean;
+  respondToTranscribe?: boolean;
+  autoExitOnKill?: boolean;
+  respondToReady?: boolean;
+  startupCleanupGate?: Promise<void>;
+  abandonedTempFiles?: Array<{ name: string; mtimeMs: number }>;
+} = {}) {
   const commands: Record<string, unknown>[] = [];
   const published: any[] = [];
   const unlinked: string[] = [];
   const spawnCalls: any[] = [];
-  const process = fakeProcess((command, child) => {
-    commands.push(command);
-    if (command.type === 'configure') {
-      queueMicrotask(() => child.stdout.write(`${JSON.stringify({
-        type: 'model-loaded',
-        modelName: command.modelName,
-        modelPath: command.modelPath,
-        localFilesOnly: command.localFilesOnly,
-        device: command.device,
-        computeType: command.computeType
-      })}\n`));
-    }
-    if (command.type === 'transcribe') {
-      queueMicrotask(() => child.stdout.write(`${JSON.stringify({
-        type: 'transcribe-start', requestId: command.requestId, fileSizeBytes: command.fileSizeBytes,
-        audioFormat: command.audioFormat, mimeType: command.mimeType, headerSignature: command.headerSignature
-      })}\n${JSON.stringify({ type: 'transcript', requestId: command.requestId, text: 'fixture transcript', durationSeconds: 2 })}\n`));
-    }
-  });
+  const processes: any[] = [];
+  const createProcess = () => {
+    const child = fakeProcess((command, commandProcess) => {
+      commands.push(command);
+      if (command.type === 'configure') {
+        queueMicrotask(() => commandProcess.stdout.write(`${JSON.stringify({
+          type: 'model-loaded',
+          modelName: command.modelName,
+          modelPath: command.modelPath,
+          localFilesOnly: command.localFilesOnly,
+          device: command.device,
+          computeType: command.computeType
+        })}\n`));
+      }
+      if (command.type === 'transcribe') {
+        queueMicrotask(() => commandProcess.stdout.write(`${JSON.stringify({
+          type: 'transcribe-start', requestId: command.requestId, fileSizeBytes: command.fileSizeBytes,
+          audioFormat: command.audioFormat, mimeType: command.mimeType, headerSignature: command.headerSignature,
+          inferenceStartedAtMs: Date.now()
+        })}\n`));
+        if (options.respondToTranscribe !== false) {
+          queueMicrotask(() => commandProcess.stdout.write(`${JSON.stringify({ type: 'transcript', requestId: command.requestId, text: 'fixture transcript', durationSeconds: 2, inferenceDurationMs: 321 })}\n`));
+        }
+      }
+    }, options.autoExitOnKill !== false);
+    processes.push(child);
+    return child;
+  };
   const service = new WhisperTranscriptionService({
     runtimePathContext: () => ({
       isPackaged: Boolean(options.packaged),
@@ -75,17 +94,30 @@ function createHarness(options: { packaged?: boolean } = {}) {
     exists: () => true,
     mkdirSync: vi.fn(),
     mkdir: vi.fn(async () => undefined) as any,
+    readdir: vi.fn(async () => {
+      await options.startupCleanupGate;
+      return (options.abandonedTempFiles ?? []).map((entry) => ({
+        name: entry.name,
+        isFile: () => true
+      }));
+    }) as any,
+    stat: vi.fn(async (filePath: string) => ({
+      mtimeMs: options.abandonedTempFiles?.find((entry) => filePath.endsWith(entry.name))?.mtimeMs ?? Date.now()
+    })) as any,
     writeFile: vi.fn(async () => undefined) as any,
     unlink: vi.fn(async (filePath: string) => { unlinked.push(filePath); }) as any,
     spawnProcess: vi.fn((executable, args, spawnOptions) => {
       spawnCalls.push({ executable, args, spawnOptions });
-      queueMicrotask(() => process.stdout.write(`${JSON.stringify({ type: 'ready' })}\n`));
-      return process;
+      const child = createProcess();
+      if (options.respondToReady !== false || processes.length > 1) {
+        queueMicrotask(() => child.stdout.write(`${JSON.stringify({ type: 'ready' })}\n`));
+      }
+      return child;
     }) as any,
     publishStatus: (status) => published.push(status),
-    now: () => 123456
+    now: () => Date.now()
   });
-  return { service, process, commands, published, unlinked, spawnCalls };
+  return { service, get process() { return processes[0]; }, processes, commands, published, unlinked, spawnCalls };
 }
 
 describe('WhisperTranscriptionService', () => {
@@ -95,7 +127,10 @@ describe('WhisperTranscriptionService', () => {
 
     expect(harness.spawnCalls[0]).toMatchObject({
       executable: 'python',
-      spawnOptions: { stdio: 'pipe', windowsHide: true }
+      spawnOptions: {
+        stdio: 'pipe', windowsHide: true,
+        env: expect.objectContaining({ PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' })
+      }
     });
     expect(harness.spawnCalls[0].args[0]).toContain('python\\local_whisper_sidecar.py');
     expect(harness.commands[0]).toMatchObject({
@@ -127,12 +162,96 @@ describe('WhisperTranscriptionService', () => {
       settings: SETTINGS
     });
 
-    expect(result).toEqual({ text: 'fixture transcript', durationSeconds: 2 });
+    expect(result).toMatchObject({
+      text: 'fixture transcript',
+      durationSeconds: 2,
+      telemetry: {
+        requestId: '1',
+        mainQueueDepthAtReceive: 0,
+        mainQueueDepthAtDispatch: 1,
+        mainQueueDepthAtCompletion: 0,
+        sidecarInferenceMs: 321
+      }
+    });
     expect(harness.commands.find((command) => command.type === 'transcribe')).toMatchObject({
       audioFormat: 'wav', mimeType: 'audio/wav', headerSignature: 'RIFF/WAVE', sampleRate: 16000
     });
     expect(harness.unlinked).toHaveLength(1);
     expect(harness.service.getStatus().lastTranscriptDelta).toBe('fixture transcript');
+  });
+
+  it('removes only abandoned owned temp chunks during safe startup cleanup', async () => {
+    const now = Date.now();
+    const harness = createHarness({
+      abandonedTempFiles: [
+        { name: 'chunk-100-1.wav', mtimeMs: now - 25 * 60 * 60 * 1000 },
+        { name: 'chunk-200-2.wav', mtimeMs: now - 60 * 1000 },
+        { name: 'unrelated.wav', mtimeMs: now - 25 * 60 * 60 * 1000 }
+      ]
+    });
+
+    await harness.service.start(SETTINGS);
+
+    expect(harness.unlinked).toEqual([expect.stringContaining('chunk-100-1.wav')]);
+  });
+
+  it('keeps a delayed request and its audio alive after the soft timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createHarness({ respondToTranscribe: false });
+      const pending = harness.service.transcribe({
+        audioData: new Uint8Array([82, 73, 70, 70, 0, 0, 0, 0, 87, 65, 86, 69]).buffer,
+        mimeType: 'audio/wav', sampleRate: 16000, durationSeconds: 2, settings: SETTINGS
+      });
+      await vi.runAllTicks();
+      await vi.advanceTimersByTimeAsync(15_000);
+
+      expect(harness.unlinked).toEqual([]);
+      expect(harness.process.kill).not.toHaveBeenCalled();
+      expect(harness.service.getStatus().chunk.warningMessage).toContain('still waiting');
+      expect(harness.service.takeQueueTelemetry()).toEqual({ current: 1, max: 1 });
+
+      const request = harness.commands.find((command) => command.type === 'transcribe');
+      harness.process.stdout.write(`${JSON.stringify({
+        type: 'transcript', requestId: request?.requestId, text: 'late ā but valid', durationSeconds: 2
+      })}\n`);
+      await expect(pending).resolves.toMatchObject({ text: 'late ā but valid', durationSeconds: 2 });
+      expect(harness.unlinked).toHaveLength(1);
+      expect(harness.service.takeQueueTelemetry()).toEqual({ current: 0, max: 1 });
+      expect(harness.service.takeQueueTelemetry()).toEqual({ current: 0, max: 0 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('restarts after the hard watchdog and cleans audio only after process exit', async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createHarness({ respondToTranscribe: false, autoExitOnKill: false });
+      const pending = harness.service.transcribe({
+        audioData: new Uint8Array([82, 73, 70, 70, 0, 0, 0, 0, 87, 65, 86, 69]).buffer,
+        mimeType: 'audio/wav', sampleRate: 16000, durationSeconds: 2, settings: SETTINGS
+      });
+      const rejected = expect(pending).rejects.toThrow('hard watchdog');
+      await vi.runAllTicks();
+      await vi.advanceTimersByTimeAsync(120_000);
+
+      expect(harness.process.kill).toHaveBeenCalledOnce();
+      expect(harness.unlinked).toEqual([]);
+      harness.process.emit('exit', null, 'SIGTERM');
+      await rejected;
+      await vi.runAllTicks();
+      expect(harness.unlinked).toHaveLength(1);
+      expect(harness.spawnCalls).toHaveLength(2);
+
+      const staleRequest = harness.commands.find((command) => command.type === 'transcribe');
+      harness.process.stdout.write(`${JSON.stringify({
+        type: 'transcript', requestId: staleRequest?.requestId, text: 'stale generation'
+      })}\n`);
+      expect(harness.service.getStatus().lastTranscriptDelta).not.toBe('stale generation');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('shuts down intentionally and leaves a stopped non-error status', async () => {
@@ -143,6 +262,55 @@ describe('WhisperTranscriptionService', () => {
     expect(harness.commands.at(-1)).toMatchObject({ type: 'shutdown' });
     expect(harness.process.kill).toHaveBeenCalledOnce();
     expect(status).toMatchObject({ sidecarRunning: false, modelPhase: 'stopped', status: 'stopped', errorMessage: null });
+  });
+
+  it('settles an in-flight startup when Stop terminates the starting generation', async () => {
+    const harness = createHarness({ respondToReady: false });
+    const starting = harness.service.start(SETTINGS);
+    const startupResult = expect(starting).rejects.toThrow('sidecar stopped');
+    await vi.waitFor(() => expect(harness.spawnCalls).toHaveLength(1));
+
+    await expect(harness.service.stop()).resolves.toMatchObject({ status: 'stopped' });
+    await startupResult;
+
+    await harness.service.start(SETTINGS);
+    expect(harness.spawnCalls).toHaveLength(2);
+    expect(harness.service.getStatus()).toMatchObject({ status: 'listening' });
+  });
+
+  it('does not spawn a sidecar when Stop wins during asynchronous startup cleanup', async () => {
+    let releaseCleanup!: () => void;
+    const startupCleanupGate = new Promise<void>((resolve) => { releaseCleanup = resolve; });
+    const harness = createHarness({ startupCleanupGate });
+    const starting = harness.service.start(SETTINGS);
+    const startupResult = expect(starting).rejects.toThrow('stopped during startup');
+
+    await Promise.resolve();
+    await harness.service.stop();
+    releaseCleanup();
+    await startupResult;
+
+    expect(harness.spawnCalls).toHaveLength(0);
+    await harness.service.start(SETTINGS);
+    expect(harness.spawnCalls).toHaveLength(1);
+  });
+
+  it('retains cancelled request audio until shutdown exit acknowledgement', async () => {
+    const harness = createHarness({ respondToTranscribe: false, autoExitOnKill: false });
+    await harness.service.start(SETTINGS);
+    const pending = harness.service.transcribe({
+      audioData: new Uint8Array([82, 73, 70, 70, 0, 0, 0, 0, 87, 65, 86, 69]).buffer,
+      mimeType: 'audio/wav', sampleRate: 16000, durationSeconds: 2, settings: SETTINGS
+    });
+    await vi.waitFor(() => expect(harness.commands.some((command) => command.type === 'transcribe')).toBe(true));
+
+    const stopping = harness.service.stop();
+    expect(harness.unlinked).toEqual([]);
+    harness.process.emit('exit', 0, null);
+
+    await expect(pending).resolves.toEqual({ text: '' });
+    await expect(stopping).resolves.toMatchObject({ status: 'stopped', errorMessage: null });
+    expect(harness.unlinked).toHaveLength(1);
   });
 
   it('publishes an unexpected sidecar exit while the application is alive', async () => {

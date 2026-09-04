@@ -98,6 +98,10 @@ The Local Whisper defaults are tuned for conservative CPU live following:
 
 Live testing has generally favored `base.en / cpu / int8 / 2s` over `turbo` or `tiny.en` for this near-live prompter use.
 
+Transcription requests use a 15-second soft timeout and a separate 120-second hard watchdog. The soft timeout marks the active speech pipeline as delayed but continues awaiting the result; it does not drop the chunk. The hard watchdog treats the sidecar as wedged, terminates it, waits for process exit, rejects requests from that process generation, cleans their temporary WAV files, and starts a fenced generation for later work. Temporary WAV files remain owned by their request until completion, acknowledged cancellation, or sidecar exit. Abandoned Prompter WAV files are also removed by bounded startup cleanup.
+
+Electron and Python force UTF-8 for sidecar stdin, stdout, and stderr. JSONL messages may therefore contain Whisper Unicode output without depending on the Windows console code page.
+
 Install development sidecar dependencies in a Python environment:
 
 ```powershell
@@ -113,6 +117,10 @@ Use the always-visible top bar `Start` button or the normal Controls `Start List
 Local Whisper settings in Developer mode are draft settings. Typing into Python/model/device/compute/chunk fields does not silently change a running sidecar. Use `Apply` while stopped, or `Restart Whisper` while following; when following is active, the UI labels draft edits as applying after restart.
 
 Normal mode shows compact Local Whisper status such as `Local Whisper ready`, `Starting`, `Listening`, `Mic not detected`, or `Needs resync`, plus the latest heard phrase. Developer mode shows mic state, selected/default input label when Chromium exposes it, sidecar phase, chunk counters, chunk format, MIME type, extension, first-byte header signature such as `RIFF/WAVE`, sample rate, duration, last transcript text, recent ASR transcript history under `Heard`, and warnings for missing PCM/WAV chunks or sidecar response timeouts. Empty Whisper returns are shown as `[empty transcript]` so silence is visible instead of looking like nothing happened. Provider status messages such as `Sidecar is running` are diagnostics only and should not appear in `Heard`, `Last delta`, or feed the aligner.
+
+`Stalled` is shown only when captured non-silent audio has remained without a usable transcription long enough to indicate pipeline delay; ordinary silence does not trigger it. `Recovering` indicates that a delayed request completed and fresh captured speech is moving through the pipeline again. These labels use capture/request activity rather than the wall-clock arrival time of a late transcript.
+
+Local Whisper performance diagnostics are aggregated in memory and written to `prompter-main.log` approximately once per minute while active. Each bounded record includes chunk/result counts, current and maximum renderer/main queue depth, audio duration, narrator-status transitions, empty/stale/generation-fenced/alignment-unaccepted counts, and p50/p90/max timing from renderer backlog through first programmatic scroll write. Samples are capped per stage, individual records are size-limited, and the JSONL file rotates at roughly 4 MiB. The visible-movement timing ends at the DOM `scrollTop` write; OS audio buffering and compositor paint are not observable.
 
 The sidecar distinguishes process startup from model readiness. `Process started` means Python is running and answering JSONL. `Model loading` means faster-whisper is loading the requested model. `Ready` means the model is loaded and transcription chunks can be processed. The model-ready timeout defaults to 180 seconds and can be overridden with:
 
@@ -188,6 +196,10 @@ Scrolling is controlled by a `requestAnimationFrame` animation loop rather than 
 Developer mode includes proof buttons for the physical scroll engine: `Test smooth scroll: 1 line`, `5 lines`, `15 lines`, and `Reset test scroll position`. The 1/5/15-line buttons do not use ASR or alignment; they send measured scroll requests through the same correction-scroll engine live following uses, so you can tune the motion independently. Reset is a direct jump back to the top for setup. Developer mode also shows the latest motion status, including reduced-motion state, distance, duration, easing, Correction feel, and frame count. Systems with `prefers-reduced-motion` enabled use minimal motion and make that visible in the trace log.
 
 Optional `Assist Scroll` is a predictive cruise layer and remains off by default. When enabled, recent high-confidence `following` matches become correction anchors; the prompter estimates reading pace from confirmed target movement and keeps the manuscript moving gently between ASR chunks. The normal Display panel includes Assist Scroll on/off and Assist speed (`Slower` / `Faster`); Developer mode adds Correction feel (`Gentle` / `Firm`). Assist cruise slows when Local Whisper is lagging, decays when confidence becomes stale, and stops on holding, lost, paused, manual, retake, or low confidence. Active sentence highlighting can also be hidden from the Display controls.
+
+A deliberate settled desktop scroll immediately becomes the authoritative persisted reading anchor and cancels any in-progress correction. Stop/Start preserves that anchor. Only audio captured after the anchor may reacquire following, and generation/timestamp fences prevent older transcription or movement results from pulling the manuscript back. Fresh, high-confidence speech near the manual location clears anchor protection while keeping the rebased position authoritative. Loading/replacing the manuscript or an explicit session reset may clear it.
+
+The Android fast-scroll thumb reports settled navigation through the authenticated tablet protocol with `manualReposition.inputSource: "fast-scroll"`. Desktop and Android validators accept the same `touch`, `pointer`, `fast-scroll`, and `unknown` values.
 
 Developer mode includes a compact `Movement decision` diagnostic area. It shows the latest confirmed manuscript token, proposed lookahead target, prior fresh anchor, token/line delta, current Reading Lookahead, time since the last high-confidence anchor, a 160 WPM diagnostic pace prior, expected progress corridor, confidence, retake/duplicate/jump penalty flags when available, final outcome, plain-English reason, and the last 10 movement decisions. The 160 WPM value is observability only; it does not force scrolling or change alignment acceptance.
 

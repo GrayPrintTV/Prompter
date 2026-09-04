@@ -1,5 +1,6 @@
 import type { AsrProvider, AsrStatus, TranscriptDelta } from './AsrProvider';
 import localWhisperPcmWorkletSource from './localWhisperPcmWorklet.js?raw';
+import type { LocalWhisperProviderTelemetryEvent } from '../diagnostics/LocalWhisperTelemetry';
 import type {
   AsrTranscriptHistoryItem,
   ElectronBridgeDiagnostics,
@@ -27,6 +28,11 @@ type LocalWhisperBridge = {
     sampleRate?: number;
     durationSeconds?: number;
     headerSignature?: string;
+    telemetry?: {
+      capturedAtMs: number;
+      audioDurationMs: number;
+      rendererDispatchedAtMs: number;
+    };
     settings: LocalWhisperSettings;
   }): Promise<LocalWhisperTranscriptResult>;
   onLocalWhisperStatus(callback: (status: LocalWhisperStatus) => void): () => void;
@@ -37,6 +43,7 @@ export type LocalWhisperPcmChunk = {
   sampleRate: number;
   durationSeconds: number;
   sequence: number;
+  capturedAtMs?: number;
   rmsLevel?: number; // optional level for silence-aware drop preference on overflow
 };
 
@@ -67,6 +74,7 @@ type LocalWhisperDeps = {
   cancelAnimationFrame?: (handle: number) => void;
   chunkResponseTimeoutMs?: number;
   now?: () => number;
+  onTelemetryEvent?: (event: LocalWhisperProviderTelemetryEvent) => void;
 };
 
 const MAX_MIC_LOG_LINES = 18;
@@ -185,7 +193,15 @@ function createDefaultChunkDiagnostics(): LocalWhisperChunkDiagnostics {
     lastTranscriptText: '',
     lastSidecarError: null,
     warningMessage: null,
-    pendingResponses: 0
+    pendingResponses: 0,
+    activeRequestStartedAtMs: 0,
+    activeRequestCapturedAtMs: 0,
+    lastNonSilentCapturedAtMs: 0,
+    unusableSpeechStartedAtMs: 0,
+    lastUsableTranscriptCapturedAtMs: 0,
+    lastRequestCompletedAtMs: 0,
+    lastRequestCompletedCaptureAtMs: 0,
+    lastRequestWasDelayed: false
   };
 }
 
@@ -265,6 +281,8 @@ export class LocalWhisperAsrProvider implements AsrProvider {
   private lastLevelUpdateMs = 0;
   private chunkWatchdogTimeout: number | null = null;
   private hasStoppedIntentionally = false;
+  private runGeneration = 0;
+  private startOperation: Promise<void> | null = null;
 
   constructor(private settings: LocalWhisperSettings, private deps: LocalWhisperDeps = {}) {
     this.setConnectionStatus({ bridge: this.inspectBridge() });
@@ -330,7 +348,26 @@ export class LocalWhisperAsrProvider implements AsrProvider {
   }
 
   async start() {
-    if (this.status === 'listening' || this.status === 'starting') return;
+    if (this.status === 'listening') return;
+    if (this.startOperation) {
+      await this.startOperation.catch(() => undefined);
+      if (this.getStatus() === 'listening') return;
+    }
+
+    const operation = this.startInternal();
+    this.startOperation = operation;
+    try {
+      await operation;
+    } finally {
+      if (this.startOperation === operation) this.startOperation = null;
+    }
+  }
+
+  private async startInternal() {
+    const runGeneration = ++this.runGeneration;
+    this.hasStoppedIntentionally = false;
+    this.busy = false;
+    this.chunkQueue = [];
     this.status = 'starting';
     this.setConnectionStatus({
       status: 'starting',
@@ -345,11 +382,30 @@ export class LocalWhisperAsrProvider implements AsrProvider {
         ...this.connectionStatus.chunk,
         warningMessage: null,
         lastSidecarError: null,
-        pendingResponses: 0
+        pendingResponses: 0,
+        activeRequestStartedAtMs: 0,
+        activeRequestCapturedAtMs: 0,
+        lastNonSilentCapturedAtMs: 0,
+        unusableSpeechStartedAtMs: 0,
+        lastUsableTranscriptCapturedAtMs: 0,
+        lastRequestCompletedAtMs: 0,
+        lastRequestCompletedCaptureAtMs: 0,
+        lastRequestWasDelayed: false
       }
     });
 
+    const cancelled = () => (
+      runGeneration !== this.runGeneration || this.hasStoppedIntentionally
+    );
+    const cancelStaleStart = async () => {
+      await this.stop();
+    };
+
     const bridgeDiagnostics = await this.refreshBridgeDiagnostics();
+    if (cancelled()) {
+      await cancelStaleStart();
+      return;
+    }
     if (!bridgeDiagnostics.localWhisperBridgeAvailable) {
       const message = 'Local Whisper bridge unavailable. Are you running inside Electron?';
       this.status = 'idle';
@@ -391,12 +447,20 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       try {
         sidecarStatus = await bridge.startLocalWhisper(this.settings);
       } catch (error) {
+        if (cancelled()) {
+          await cancelStaleStart();
+          return;
+        }
         const message = this.errorMessage(error, 'Local Whisper setup failed.');
         this.updateMic(
           { captureState: 'not-requested', errorMessage: `Setup failed before microphone request: ${message}` },
           `Local Whisper setup failed before getUserMedia: ${message}`
         );
         throw error;
+      }
+      if (cancelled()) {
+        await cancelStaleStart();
+        return;
       }
 
       const remoteSidecarStatus = this.sanitizeRemoteStatus(sidecarStatus);
@@ -410,10 +474,17 @@ export class LocalWhisperAsrProvider implements AsrProvider {
           : this.connectionStatus.transcriptHistory
       });
       this.mediaStream = await this.ensureMicrophoneStream();
+      if (cancelled()) {
+        await cancelStaleStart();
+        return;
+      }
       this.pcmRecorder = this.createPcmChunkRecorder(this.mediaStream, {
         chunkDurationSeconds: this.settings.chunkDurationSeconds,
         onChunk: (chunk) => {
-          void this.acceptPcmAudioChunk(chunk);
+          void this.acceptPcmAudioChunk({
+            ...chunk,
+            capturedAtMs: chunk.capturedAtMs ?? this.now()
+          }, runGeneration);
         },
         onLog: (message) => this.updateMic({}, message),
         onError: (error) => {
@@ -423,6 +494,10 @@ export class LocalWhisperAsrProvider implements AsrProvider {
         }
       });
       await this.pcmRecorder.start();
+      if (cancelled()) {
+        await cancelStaleStart();
+        return;
+      }
       this.updateMic({ captureState: 'pcm-capturing' }, 'PCM WAV capture started.');
       this.startChunkWatchdog();
       this.chunkQueue = [];
@@ -432,9 +507,10 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       this.totalRealtimeFactor = 0;
       this.realtimeFactorCount = 0;
       this.setProviderStatus('listening', null);
-      this.hasStoppedIntentionally = false;
     } catch (error) {
+      const wasCancelled = cancelled();
       await this.stop();
+      if (wasCancelled) return;
       this.setProviderStatus('error', this.errorMessage(error, 'Local Whisper failed to start.'));
       throw error;
     }
@@ -442,6 +518,8 @@ export class LocalWhisperAsrProvider implements AsrProvider {
 
   async stop() {
     this.hasStoppedIntentionally = true;
+    this.runGeneration += 1;
+    this.busy = false;
     this.pcmRecorder?.stop();
     this.pcmRecorder = null;
     this.stopChunkWatchdog();
@@ -545,8 +623,14 @@ export class LocalWhisperAsrProvider implements AsrProvider {
     return this.connectionStatus;
   }
 
-  async acceptTranscriptResult(result: LocalWhisperTranscriptResult) {
-    if (this.hasStoppedIntentionally) {
+  async acceptTranscriptResult(
+    result: LocalWhisperTranscriptResult,
+    capturedAtMs = this.now(),
+    runGeneration = this.runGeneration,
+    telemetry?: TranscriptDelta['telemetry']
+  ) {
+    if (this.hasStoppedIntentionally || runGeneration !== this.runGeneration) {
+      this.deps.onTelemetryEvent?.({ type: 'generation-fenced' });
       this.updateMic({}, `Ignoring transcript result after intentional stop (normal shutdown).`);
       return;
     }
@@ -562,7 +646,7 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       displayText,
       isEmpty: text.length === 0,
       isFinal: true,
-      timestampMs: this.now(),
+      timestampMs: capturedAtMs,
       source: 'local-whisper'
     };
     this.setConnectionStatus({
@@ -576,18 +660,26 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       this.updateMic({}, 'Sidecar returned empty transcript.');
       return;
     }
+    this.updateChunk({
+      lastUsableTranscriptCapturedAtMs: Math.max(
+        this.connectionStatus.chunk.lastUsableTranscriptCapturedAtMs,
+        capturedAtMs
+      ),
+      unusableSpeechStartedAtMs: 0
+    });
     const delta: TranscriptDelta = {
       text,
       isFinal: true,
       timestampMs: historyItem.timestampMs,
-      source: 'local-whisper'
+      source: 'local-whisper',
+      ...(telemetry ? { telemetry } : {})
     };
     for (const listener of this.listeners) {
       listener(delta);
     }
   }
 
-  async acceptPcmAudioChunk(chunk: LocalWhisperPcmChunk) {
+  async acceptPcmAudioChunk(chunk: LocalWhisperPcmChunk, runGeneration = this.runGeneration) {
     return this.acceptEncodedAudioChunk({
       audioData: chunk.audioData,
       mimeType: 'audio/wav',
@@ -598,7 +690,9 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       headerSignature: audioHeaderSignature(chunk.audioData),
       logLabel: 'PCM WAV',
       rmsLevel: chunk.rmsLevel,
-      sequence: chunk.sequence
+      sequence: chunk.sequence,
+      capturedAtMs: chunk.capturedAtMs ?? this.now(),
+      runGeneration
     } as any);
   }
 
@@ -615,7 +709,9 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       sampleRate: 0,
       durationSeconds: 0,
       headerSignature,
-      logLabel: 'Legacy MediaRecorder'
+      logLabel: 'Legacy MediaRecorder',
+      capturedAtMs: this.now(),
+      runGeneration: this.runGeneration
       // no sequence/rms for legacy path
     } as any);
   }
@@ -631,8 +727,19 @@ export class LocalWhisperAsrProvider implements AsrProvider {
     logLabel: string;
     rmsLevel?: number; // for silence-aware overflow drops
     sequence?: number;
+    capturedAtMs: number;
+    runGeneration: number;
   }) {
+    if (chunk.runGeneration !== this.runGeneration || this.hasStoppedIntentionally) {
+      this.deps.onTelemetryEvent?.({ type: 'generation-fenced' });
+      return;
+    }
     const byteLength = chunk.audioData.byteLength;
+    this.deps.onTelemetryEvent?.({
+      type: 'chunk-captured',
+      audioDurationSeconds: chunk.durationSeconds,
+      queueDepth: this.chunkQueue.length
+    });
     this.updateChunk({
       chunksRecorded: this.connectionStatus.chunk.chunksRecorded + 1,
       lastChunkBytes: byteLength,
@@ -664,11 +771,24 @@ export class LocalWhisperAsrProvider implements AsrProvider {
     // Silence suppression *before queueing* (per req): do not send silence to Whisper (prevents post-speech silence backlog).
     // Count as suppressed (diagnostic), not [empty transcript] in Heard. Still count as recorded.
     if (isSilenceChunk) {
-      this.updateChunk({ silenceChunksSuppressed: (this.connectionStatus.chunk.silenceChunksSuppressed || 0) + 1 });
+      const speechActivityExpired = this.now() - this.connectionStatus.chunk.lastNonSilentCapturedAtMs > 8_000;
+      this.updateChunk({
+        silenceChunksSuppressed: (this.connectionStatus.chunk.silenceChunksSuppressed || 0) + 1,
+        ...(speechActivityExpired ? { unusableSpeechStartedAtMs: 0 } : {})
+      });
       this.updateQueueDiagnostics();
       this.updateMic({}, 'Chunk silence-suppressed (below RMS; not queued or sent to Whisper).');
       return;
     }
+
+    this.updateChunk({
+      lastNonSilentCapturedAtMs: Math.max(
+        this.connectionStatus.chunk.lastNonSilentCapturedAtMs,
+        chunk.capturedAtMs
+      ),
+      unusableSpeechStartedAtMs:
+        this.connectionStatus.chunk.unusableSpeechStartedAtMs || chunk.capturedAtMs
+    });
 
     // FIFO queue for order preservation when short. Latency-aware stale drop if backlog exceeds budget (prefer current over old audio).
     if (this.busy) {
@@ -717,8 +837,9 @@ export class LocalWhisperAsrProvider implements AsrProvider {
     this.busy = true;
     const receivedBefore = this.connectionStatus.chunk.chunksReceivedBySidecar;
     const returnedBefore = this.connectionStatus.chunk.chunksReturnedFromSidecar;
-    const timeoutHandle = this.setResponseTimeout();
     const transcribeStart = (this.now ? this.now() : Date.now());
+    let responseDelayed = false;
+    const timeoutHandle = this.setResponseTimeout(chunk.runGeneration, () => { responseDelayed = true; });
     try {
       this.processingSequence += 1;
       this.updateChunk({
@@ -727,7 +848,9 @@ export class LocalWhisperAsrProvider implements AsrProvider {
         warningMessage: null,
         processingSequence: this.processingSequence,
         lastChunkSequence: (chunk as any).sequence ?? this.processingSequence,
-        queueLength: this.chunkQueue.length
+        queueLength: this.chunkQueue.length,
+        activeRequestStartedAtMs: transcribeStart,
+        activeRequestCapturedAtMs: chunk.capturedAtMs
       });
       this.setConnectionStatus({ modelPhase: 'transcribing' });
       this.updateMic({ captureState: 'chunk-sent' }, `IPC send to main: ${byteLength} byte ${chunk.format} chunk. (seq=${(chunk as any).sequence ?? '?'})`);
@@ -739,9 +862,24 @@ export class LocalWhisperAsrProvider implements AsrProvider {
         sampleRate: chunk.sampleRate,
         durationSeconds: chunk.durationSeconds,
         headerSignature: chunk.headerSignature,
+        telemetry: {
+          capturedAtMs: chunk.capturedAtMs,
+          audioDurationMs: Math.max(0, chunk.durationSeconds * 1000),
+          rendererDispatchedAtMs: transcribeStart
+        },
         settings: this.settings
       });
       const transcribeEnd = (this.now ? this.now() : Date.now());
+      const telemetry = result.telemetry ? {
+        ...result.telemetry,
+        capturedAtMs: chunk.capturedAtMs,
+        audioDurationMs: Math.max(0, chunk.durationSeconds * 1000),
+        rendererDispatchedAtMs: transcribeStart,
+        rendererReceivedAtMs: transcribeEnd
+      } : undefined;
+      if (telemetry) {
+        this.deps.onTelemetryEvent?.({ type: 'result', telemetry, empty: result.text.trim().length === 0 });
+      }
       const durationMs = transcribeEnd - transcribeStart;
       this.totalTranscriptionTimeMs += durationMs;
       this.transcriptionCount += 1;
@@ -767,7 +905,10 @@ export class LocalWhisperAsrProvider implements AsrProvider {
         avgTranscriptionDurationMs: avgMs,
         lastRealtimeFactor: rtFactor,
         avgRealtimeFactor: avgRtFactor,
-        queueLength: this.chunkQueue.length
+        queueLength: this.chunkQueue.length,
+        lastRequestCompletedAtMs: transcribeEnd,
+        lastRequestCompletedCaptureAtMs: chunk.capturedAtMs,
+        lastRequestWasDelayed: responseDelayed
       });
       this.updateQueueDiagnostics();
 
@@ -783,12 +924,21 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       }
 
       this.updateMic({ captureState: 'chunk-returned' }, 'Sidecar response received.');
-      await this.acceptTranscriptResult(result);
+      await this.acceptTranscriptResult(result, chunk.capturedAtMs, chunk.runGeneration, telemetry);
     } catch (error) {
       const message = this.errorMessage(error, 'Local Whisper transcription failed.');
-      if (this.hasStoppedIntentionally) {
+      if (this.hasStoppedIntentionally || chunk.runGeneration !== this.runGeneration) {
+        this.deps.onTelemetryEvent?.({ type: 'generation-fenced' });
         this.updateMic({}, `Ignoring post-stop transcription error (normal shutdown): ${message}`);
         // do not set error status / errorMessage for intentional stop; in-flight classified normal
+      } else if (message.includes('exceeded the hard watchdog; sidecar restarted')) {
+        this.updateChunk({
+          lastSidecarError: message,
+          warningMessage: message,
+          chunksFailed: (this.connectionStatus.chunk.chunksFailed || 0) + 1
+        });
+        this.updateMic({}, message);
+        this.setProviderStatus('listening', null);
       } else {
         this.updateChunk({ lastSidecarError: message, warningMessage: message, chunksFailed: (this.connectionStatus.chunk.chunksFailed || 0) + 1 });
         this.updateMic({ errorMessage: message }, `Sidecar response failed: ${message}`);
@@ -796,7 +946,12 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       }
     } finally {
       this.clearResponseTimeout(timeoutHandle);
-      this.updateChunk({ pendingResponses: Math.max(0, this.connectionStatus.chunk.pendingResponses - 1) });
+      if (chunk.runGeneration !== this.runGeneration) return;
+      this.updateChunk({
+        pendingResponses: Math.max(0, this.connectionStatus.chunk.pendingResponses - 1),
+        activeRequestStartedAtMs: 0,
+        activeRequestCapturedAtMs: 0
+      });
       this.busy = false;
       this.startChunkWatchdog();
       this.updateQueueDiagnostics();
@@ -951,8 +1106,10 @@ export class LocalWhisperAsrProvider implements AsrProvider {
     }
   }
 
-  private setResponseTimeout() {
+  private setResponseTimeout(runGeneration: number, onDelayed?: () => void) {
     return this.requestTimeout(() => {
+      if (runGeneration !== this.runGeneration || this.hasStoppedIntentionally) return;
+      onDelayed?.();
       const message = `Chunk sent but no sidecar response within ${Math.round(this.responseTimeoutMs / 1000)} seconds.`;
       this.updateChunk({ warningMessage: message });
       this.updateMic({}, message);
@@ -993,6 +1150,7 @@ export class LocalWhisperAsrProvider implements AsrProvider {
 
   private updateQueueDiagnostics() {
     const latency = this.computeQueueLatencyMs();
+    this.deps.onTelemetryEvent?.({ type: 'queue-depth', queueDepth: this.chunkQueue.length });
     this.updateChunk({
       queueLength: this.chunkQueue.length,
       estimatedQueueLatencyMs: latency
@@ -1034,7 +1192,15 @@ export class LocalWhisperAsrProvider implements AsrProvider {
       lastHeaderSignature: remote.lastHeaderSignature || current.lastHeaderSignature,
       lastSampleRate: remote.lastSampleRate || current.lastSampleRate,
       lastChunkDurationSeconds: remote.lastChunkDurationSeconds || current.lastChunkDurationSeconds,
-      lastTranscriptText: remote.lastTranscriptText || current.lastTranscriptText
+      lastTranscriptText: remote.lastTranscriptText || current.lastTranscriptText,
+      activeRequestStartedAtMs: current.activeRequestStartedAtMs,
+      activeRequestCapturedAtMs: current.activeRequestCapturedAtMs,
+      lastNonSilentCapturedAtMs: current.lastNonSilentCapturedAtMs,
+      unusableSpeechStartedAtMs: current.unusableSpeechStartedAtMs,
+      lastUsableTranscriptCapturedAtMs: current.lastUsableTranscriptCapturedAtMs,
+      lastRequestCompletedAtMs: current.lastRequestCompletedAtMs,
+      lastRequestCompletedCaptureAtMs: current.lastRequestCompletedCaptureAtMs,
+      lastRequestWasDelayed: current.lastRequestWasDelayed
     };
   }
 
@@ -1327,6 +1493,7 @@ export class LocalWhisperAsrProvider implements AsrProvider {
               sampleRate,
               durationSeconds: samples.length / sampleRate,
               sequence,
+              capturedAtMs: thisProvider.now() - (samples.length / sampleRate) * 1000,
               rmsLevel
             });
           } catch (error) {

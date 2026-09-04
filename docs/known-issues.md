@@ -14,6 +14,10 @@ Current fix: `electron/preload.cts` builds to `dist-electron/preload.cjs`, and E
 
 Local Whisper no longer relies on Chromium MediaRecorder WebM chunks. The renderer captures PCM with Web Audio and encodes WAV chunks with `RIFF/WAVE` headers, and live microphone transcription now works end-to-end through the Python sidecar. Following quality is still sensitive to model choice, chunk duration, silence suppression, and CPU latency; the app now defaults to `base.en` with 2-second chunks on `cpu`/`int8` because it has looked better in live narration than `turbo` or `tiny.en`.
 
+The 15-second threshold is an advisory stalled signal, not a dropped-transcription timeout. The request continues until completion or a separate 120-second hard watchdog. Hard-watchdog recovery generation-fences the process and requests, waits for child exit, then performs idempotent WAV cleanup and restart. Sidecar streams are forced to UTF-8. Recent installed testing observed successful 15-18-second requests without missing-file or Unicode failures.
+
+Following may still be choppy or catch up late. Do not infer the bottleneck from total request duration alone. `local-whisper-telemetry-aggregate` records distinguish the measurable renderer, main, sidecar, coordinator, and first-scroll-write stages. They cannot observe audio-driver buffering, actual compositor paint, or assign a discrete visible movement to continuous Assist cruise.
+
 ## Local Whisper Sidecar Self-Test Can Be Slow
 
 The sidecar self-test exists:

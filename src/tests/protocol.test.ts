@@ -98,6 +98,8 @@ describe('shared protocol schemas', () => {
       detectedAtMs: 10_000
     };
     expect(validate(payload), JSON.stringify(validate.errors)).toBe(true);
+    expect(validate({ ...payload, inputSource: 'fast-scroll' }), JSON.stringify(validate.errors)).toBe(true);
+    expect(validate({ ...payload, inputSource: 'mouse-wheel' })).toBe(false);
     expect(validate({ ...payload, untrustedField: true })).toBe(false);
   });
 

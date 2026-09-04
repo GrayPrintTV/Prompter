@@ -36,6 +36,36 @@ class ProtocolCodecTest {
         assertEquals(3, codec.decodeEnvelope(encoded).sequence)
     }
 
+    @Test fun `manual reposition accepts every shared input source including fast scroll`() {
+        for (source in listOf("touch", "pointer", "fast-scroll", "unknown")) {
+            val reposition = ManualReposition(
+                manuscriptRevision = 1,
+                visibleTokenIndex = 1,
+                visibleCharacter = 1,
+                sentenceIndex = 1,
+                paragraphIndex = 1,
+                direction = "stationary",
+                inputSource = source,
+                scrollContainer = "manuscript",
+                detectedAtMs = 10
+            )
+            assertEquals(source, reposition.inputSource)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            ManualReposition(
+                manuscriptRevision = 1,
+                visibleTokenIndex = 1,
+                visibleCharacter = 1,
+                sentenceIndex = 1,
+                paragraphIndex = 1,
+                direction = "stationary",
+                inputSource = "mouse-wheel",
+                scrollContainer = "manuscript",
+                detectedAtMs = 10
+            )
+        }
+    }
+
     @Test fun `server challenge exposes connected build and protocol identity`() {
         val payload = ServerChallenge(
             nonce = "redacted",

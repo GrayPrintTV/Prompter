@@ -32,6 +32,12 @@ Phase 1 is in progress. The app has Phase 0/0.5 manuscript alignment, torture-te
 - Electron window state persists the last normal window bounds plus maximized state. Maximized windows reopen maximized on the same validated monitor; full-screen state is intentionally not preserved.
 - Developer-mode Local Whisper settings use draft/apply semantics; changes made while following are labeled as applying after Restart Whisper.
 - Optional predictive Assist Scroll is implemented and off by default.
+- Local Whisper requests retain their temporary WAV until completion or acknowledged process termination, use a 15-second soft-delay signal plus a 120-second hard sidecar watchdog, and fence all work by process/renderer generation.
+- Sidecar JSONL and stderr are UTF-8 at both the Electron launcher and Python stream boundary.
+- Deliberate desktop scrolling immediately persists an authoritative manual anchor. Pre-anchor audio is rejected, Stop/Start preserves the anchor, and fresh nearby post-anchor speech reacquires without restoring an older position.
+- Narration status distinguishes `Stalled` and `Recovering` from ordinary silence using capture/request activity.
+- Android and desktop share `fast-scroll` as a validated manual-reposition input source.
+- Bounded Local Whisper telemetry records per-minute queue, latency, result, and narrator-status aggregates without per-chunk production logging.
 
 ## Current Active Bug/Fix Status
 
@@ -70,6 +76,8 @@ Sidecar readiness is now split:
 - `Model loading`: faster-whisper is loading the requested model.
 - `Ready`: model is loaded and chunks can be transcribed.
 
+The former 15-second response failure is now a soft timeout only. Requests observed at roughly 15-18 seconds complete normally and retain their WAV. A genuinely wedged request reaches a separate 120-second hard watchdog, after which the sidecar is terminated and cleanup/restart occurs only after process exit. Fresh installed-app logs have shown delayed completions without `FileNotFoundError`, `UnicodeEncodeError`, hard watchdog, or unexpected sidecar exit.
+
 ## ASR Providers
 
 - Manual: local typed transcript chunks; always available.
@@ -83,6 +91,7 @@ Normal mode shows Local Whisper and Manual in the provider selector. Mock and Op
 
 - Local Whisper bridge should be manually smoke-tested after full Electron restart when Electron main/preload/build files change.
 - Local Whisper transcription quality and following behavior remain model/chunk-duration sensitive; the app now defaults to `base.en` with 2-second chunks on `cpu`/`int8` because it has looked better in live narration than `turbo` or `tiny.en`.
+- Following can still feel choppy or catch up late. Use the bounded `local-whisper-telemetry-aggregate` main-log records to separate renderer backlog, main dispatch wait, sidecar queue/inference, capture-to-result, coordinator decision, and first scroll-write delay before tuning thresholds or movement.
 - Local Whisper sidecar self-test exists, but model download/load can take time on first run.
 - Audio input selector is not implemented yet; Chromium default device is used.
 - Number and abbreviation normalization is intentionally narrow.

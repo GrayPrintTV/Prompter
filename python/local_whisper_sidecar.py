@@ -16,10 +16,23 @@ import argparse
 import math
 import sys
 import tempfile
+import time
 import traceback
 import wave
 from pathlib import Path
 from typing import Any
+
+
+def configure_standard_streams() -> None:
+    """Keep the JSONL boundary Unicode-safe in console and windowless builds."""
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="strict")
+
+
+if __name__ == "__main__":
+    configure_standard_streams()
 
 try:
     from faster_whisper import WhisperModel
@@ -121,6 +134,9 @@ def transcribe(command: dict[str, Any]) -> None:
     if not audio_path.exists():
         raise FileNotFoundError(f"Audio chunk not found: {audio_path}")
 
+    initial_file_size = audio_path.stat().st_size
+    initial_header_signature = header_signature(audio_path)
+    inference_started_at_ms = int(time.time() * 1000)
     emit(
         {
             "type": "transcribe-start",
@@ -128,12 +144,14 @@ def transcribe(command: dict[str, Any]) -> None:
             "audioPath": str(audio_path),
             "audioFormat": str(command.get("audioFormat") or audio_path.suffix.lstrip(".") or "unknown"),
             "mimeType": str(command.get("mimeType") or ""),
-            "fileSizeBytes": audio_path.stat().st_size,
-            "headerSignature": header_signature(audio_path),
+            "fileSizeBytes": initial_file_size,
+            "headerSignature": initial_header_signature,
             "sampleRate": command.get("sampleRate"),
             "chunkDurationSeconds": command.get("chunkDurationSeconds"),
+            "inferenceStartedAtMs": inference_started_at_ms,
         }
     )
+    inference_started = time.perf_counter()
     segments, info = model.transcribe(
         str(audio_path),
         beam_size=1,
@@ -141,16 +159,18 @@ def transcribe(command: dict[str, Any]) -> None:
         condition_on_previous_text=False,
     )
     text = " ".join(segment.text.strip() for segment in segments if segment.text.strip()).strip()
+    inference_duration_ms = max(0, round((time.perf_counter() - inference_started) * 1000))
     emit(
         {
             "type": "transcript",
             "requestId": request_id,
             "text": text,
             "durationSeconds": getattr(info, "duration", None),
+            "inferenceDurationMs": inference_duration_ms,
             "diagnostics": {
                 "audioPath": str(audio_path),
-                "fileSizeBytes": audio_path.stat().st_size,
-                "headerSignature": header_signature(audio_path),
+                "fileSizeBytes": initial_file_size,
+                "headerSignature": initial_header_signature,
             },
         }
     )

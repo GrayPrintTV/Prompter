@@ -1,5 +1,5 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, safeStorage, screen, shell } from 'electron';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { hostname } from 'node:os';
@@ -21,7 +21,7 @@ import {
   WhisperTranscriptionService
 } from './whisper/WhisperTranscriptionService.js';
 import { WhisperStatusPublisher } from './whisper/WhisperStatusPublisher.js';
-import type { LocalWhisperSettings } from '#prompter-shared/domain/types.js';
+import type { LocalWhisperSettings, LocalWhisperTelemetryAggregate } from '#prompter-shared/domain/types.js';
 import type { BuildIdentityPayload, RendererSessionSync } from '#prompter-shared/protocol/messages.js';
 import { PROTOCOL_MAJOR, PROTOCOL_MINOR } from '#prompter-shared/protocol/protocol-version.js';
 import { PairedDeviceStore } from './server/PairedDeviceStore.js';
@@ -36,6 +36,7 @@ import { DiagnosticLogService, diagnosticError } from './server/DiagnosticLogSer
 import { LiveTabletLogWindow } from './server/LiveTabletLogWindow.js';
 import { TabletModeController } from './server/TabletModeController.js';
 import type { StructuredDiagnosticEvent } from '#prompter-shared/protocol/diagnostics.js';
+import { appendBoundedJsonLine } from './diagnostics/BoundedJsonlLog.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const APP_ID = 'com.narrationprompter.prompter';
@@ -126,11 +127,10 @@ function runtimePathContext(): RuntimePathContext {
 function appendDiagnosticLog(event: string, data: Record<string, unknown>) {
   try {
     const logDir = path.join(app.getPath('userData'), 'logs');
-    mkdirSync(logDir, { recursive: true });
-    appendFileSync(
-      path.join(logDir, APP_LOG_FILE),
-      `${JSON.stringify({ timestamp: new Date().toISOString(), event, ...data })}\n`,
-      'utf8'
+    const logPath = path.join(logDir, APP_LOG_FILE);
+    appendBoundedJsonLine(
+      logPath,
+      { timestamp: new Date().toISOString(), event, ...data }
     );
   } catch (error) {
     console.warn('[main] failed to write diagnostic log', error);
@@ -958,6 +958,26 @@ ipcMain.handle('local-whisper:stop', async () => {
   return localWhisperStatusForRenderer();
 });
 
+ipcMain.handle('local-whisper:recordTelemetry', (_event, aggregate: LocalWhisperTelemetryAggregate) => {
+  if (!aggregate || aggregate.schemaVersion !== 1) return false;
+  const serialized = JSON.stringify(aggregate);
+  if (serialized.length > 64 * 1024) return false;
+  const mainQueue = whisperService.takeQueueTelemetry();
+  appendDiagnosticLog('local-whisper-telemetry-aggregate', {
+    aggregate: {
+      ...aggregate,
+      queueDepth: {
+        ...aggregate.queueDepth,
+        main: {
+          current: mainQueue.current,
+          max: Math.max(aggregate.queueDepth.main.max, mainQueue.max)
+        }
+      }
+    }
+  });
+  return true;
+});
+
 ipcMain.handle(
   'local-whisper:transcribeChunk',
   async (_event, payload: {
@@ -968,6 +988,16 @@ ipcMain.handle(
     sampleRate?: number;
     durationSeconds?: number;
     headerSignature?: string;
+    telemetry?: {
+      capturedAtMs: number;
+      audioDurationMs: number;
+      rendererDispatchedAtMs: number;
+    };
     settings: LocalWhisperSettings;
-  }) => whisperService.transcribe(payload)
+  }) => whisperService.transcribe({
+    ...payload,
+    telemetry: payload.telemetry
+      ? { ...payload.telemetry, mainReceivedAtMs: Date.now() }
+      : undefined
+  })
 );

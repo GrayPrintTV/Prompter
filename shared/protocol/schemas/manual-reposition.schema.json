@@ -24,7 +24,7 @@
     "sentenceIndex": { "type": "integer", "minimum": 0 },
     "paragraphIndex": { "type": "integer", "minimum": 0 },
     "direction": { "enum": ["backward", "forward", "stationary"] },
-    "inputSource": { "enum": ["touch", "pointer", "unknown"] },
+    "inputSource": { "enum": ["touch", "pointer", "fast-scroll", "unknown"] },
     "scrollContainer": { "type": "string", "minLength": 1, "maxLength": 120 },
     "detectedAtMs": { "type": "integer", "minimum": 0 }
   }

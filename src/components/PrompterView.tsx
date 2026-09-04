@@ -63,6 +63,7 @@ type Props = {
     direction: 'backward' | 'forward' | 'stationary';
     source: ManualScrollInputSource;
     correctionCancelled: boolean;
+    detectedAtMs: number;
   }) => void;
   onAnchorDebug?: (info: {
     confirmedToken: number;
@@ -174,6 +175,7 @@ export function PrompterView({
   const pendingManualDirectionRef = useRef<'backward' | 'forward' | 'stationary'>('stationary');
   const pendingManualSourceRef = useRef<ManualScrollInputSource>('unknown');
   const manualOverrideStartedRef = useRef(false);
+  const manualOverrideDetectedAtRef = useRef(0);
   const correctionCancelledForManualRef = useRef(false);
   const manualScrollHoldRef = useRef(false);
   const lastStartupVisibleAnchorRequestRef = useRef(0);
@@ -708,6 +710,12 @@ export function PrompterView({
 
       const step = interpolateCorrectionScroll(plan, timestamp - activeAnimation.startTimestamp);
       writeProgrammaticScrollTop(activeContainer, step.nextScrollTop);
+      if (activeAnimation.frameCount === 0) {
+        reportAnimationStatus('first frame', {
+          source: activeAnimation.source,
+          ...planStatusDetails(plan)
+        });
+      }
       activeAnimation.frameCount += 1;
 
       if (step.done) {
@@ -899,6 +907,7 @@ export function PrompterView({
       };
       if (!manualOverrideStartedRef.current) {
         manualOverrideStartedRef.current = true;
+        manualOverrideDetectedAtRef.current = Date.now();
         emitTrace(
           currentSentenceIndexRef.current,
           false,
@@ -927,6 +936,7 @@ export function PrompterView({
         );
         manualScrollIntentUntilRef.current = 0;
         manualOverrideStartedRef.current = false;
+        manualOverrideDetectedAtRef.current = 0;
         correctionCancelledForManualRef.current = false;
         pendingManualSourceRef.current = 'unknown';
         return;
@@ -943,10 +953,12 @@ export function PrompterView({
         scrollTop: container.scrollTop,
         direction,
         source,
-        correctionCancelled: correctionCancelledForManualRef.current
+        correctionCancelled: correctionCancelledForManualRef.current,
+        detectedAtMs: manualOverrideDetectedAtRef.current || Date.now()
       });
       manualScrollIntentUntilRef.current = 0;
       manualOverrideStartedRef.current = false;
+      manualOverrideDetectedAtRef.current = 0;
       correctionCancelledForManualRef.current = false;
       pendingManualSourceRef.current = 'unknown';
     };
@@ -1095,6 +1107,7 @@ export function PrompterView({
     if (!visibleReacquireActive) {
       manualScrollHoldRef.current = false;
       manualOverrideStartedRef.current = false;
+      manualOverrideDetectedAtRef.current = 0;
       correctionCancelledForManualRef.current = false;
     }
   }, [visibleReacquireActive]);

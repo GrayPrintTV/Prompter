@@ -8,6 +8,67 @@ export type TranscriptDelta = {
   confidence?: number;
   timestampMs: number;
   source: TranscriptSource;
+  telemetry?: LocalWhisperTranscriptTelemetry;
+};
+
+export type LocalWhisperTranscriptTelemetry = {
+  requestId: string;
+  capturedAtMs: number;
+  audioDurationMs: number;
+  rendererDispatchedAtMs: number;
+  mainReceivedAtMs: number;
+  mainDispatchedAtMs: number;
+  sidecarStartedAtMs?: number;
+  sidecarInferenceMs?: number;
+  mainCompletedAtMs: number;
+  rendererReceivedAtMs: number;
+  mainQueueDepthAtReceive: number;
+  mainQueueDepthAtDispatch: number;
+  mainQueueDepthAtCompletion: number;
+};
+
+export type LocalWhisperLatencySummary = {
+  count: number;
+  p50: number | null;
+  p90: number | null;
+  max: number | null;
+};
+
+export type LocalWhisperTelemetryAggregate = {
+  schemaVersion: 1;
+  windowStartedAtMs: number;
+  windowEndedAtMs: number;
+  windowDurationMs: number;
+  counts: {
+    chunksCaptured: number;
+    transcriptionResults: number;
+    emptyResults: number;
+    rejectedAsStale: number;
+    generationFenced: number;
+    alignmentUnaccepted: number;
+    coordinatorAccepted: number;
+    visibleMovements: number;
+    visibleMovementPending: number;
+  };
+  queueDepth: {
+    renderer: { current: number; max: number };
+    main: { current: number; max: number };
+  };
+  audioDurationProcessedSeconds: number;
+  latencyMs: {
+    rendererAudioBacklog: LocalWhisperLatencySummary;
+    mainProcessQueueWait: LocalWhisperLatencySummary;
+    sidecarCommandQueueWait: LocalWhisperLatencySummary;
+    sidecarInference: LocalWhisperLatencySummary;
+    captureToTranscript: LocalWhisperLatencySummary;
+    transcriptToCoordinatorAcceptance: LocalWhisperLatencySummary;
+    coordinatorToVisibleMovement: LocalWhisperLatencySummary;
+  };
+  narratorStatusTransitions: {
+    total: number;
+    byTransition: Record<string, number>;
+  };
+  measurementNotes: string[];
 };
 
 export type AsrTranscriptHistoryItem = TranscriptDelta & {
@@ -274,6 +335,14 @@ export type LocalWhisperChunkDiagnostics = {
   lastSidecarError: string | null;
   warningMessage: string | null;
   pendingResponses: number;
+  activeRequestStartedAtMs: number;
+  activeRequestCapturedAtMs: number;
+  lastNonSilentCapturedAtMs: number;
+  unusableSpeechStartedAtMs: number;
+  lastUsableTranscriptCapturedAtMs: number;
+  lastRequestCompletedAtMs: number;
+  lastRequestCompletedCaptureAtMs: number;
+  lastRequestWasDelayed: boolean;
 };
 
 export type ElectronBridgeDiagnostics = {
@@ -338,4 +407,5 @@ export type LocalWhisperServiceStatus = Omit<LocalWhisperStatus, 'bridge'>;
 export type LocalWhisperTranscriptResult = {
   text: string;
   durationSeconds?: number;
+  telemetry?: Omit<LocalWhisperTranscriptTelemetry, 'capturedAtMs' | 'audioDurationMs' | 'rendererDispatchedAtMs' | 'rendererReceivedAtMs'>;
 };
