@@ -41,7 +41,7 @@ If the Codex shell lacks normal `npm` on `PATH`, use the legacy workaround in `R
 
 - Do not commit API keys, `.env`, `.env.local`, microphone recordings, temp audio chunks, or logs.
 - OpenAI API keys must remain in Electron main/environment handling and must never reach renderer state or logs.
-- Electron main owns secret-bearing setup and Local Whisper sidecar process control.
+- Electron main owns secret-bearing setup and Local Whisper sidecar process.
 - Do not print secrets to logs or diagnostics.
 - Confirm `.gitignore` coverage before adding new local config, logs, or generated assets.
 
@@ -50,8 +50,9 @@ If the Codex shell lacks normal `npm` on `PATH`, use the legacy workaround in `R
 - Start with `git status --short`.
 - Do not revert or overwrite user changes unless explicitly asked.
 - Keep changes scoped to the task.
-- Do not make commits unless the user asks.
-- Before reporting, run tests/build when available and `git diff --check`.
+- At each verified feature or fix stopping point, commit the task's changes and push the current branch to `origin`.
+- Leave work uncommitted only when the user explicitly says it is exploratory or not ready.
+- Before committing, run tests/build when available and `git diff --check`.
 - Report untracked/generated files clearly.
 
 ## Required Reporting Format
@@ -63,5 +64,6 @@ Report these items at the end of implementation work:
 - Tests run and result.
 - Build result.
 - Whether requested diagnostics or acceptance checks pass.
+- Git branch, commit hash, and successful push result.
 - Remaining caveats or fragile areas.
 - Any required manual restart or smoke-test steps.
