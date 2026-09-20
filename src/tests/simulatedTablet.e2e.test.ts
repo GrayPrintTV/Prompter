@@ -371,6 +371,31 @@ describe('Windows-only simulated tablet', () => {
       narrationSessionId: narrationBeforeReconnect.narrationSessionId,
       acceptedCharacter: narrationBeforeReconnect.acceptedCharacter
     }));
+    const pausedCharacter = session.getTabletNarrationStatus().acceptedCharacter;
+    afterGrace.socket.send(envelope('audioStreamStop', {
+      action: 'stop', streamId: 'stream-after-grace', lastSequence: 0, captureTimestampMs: Date.now()
+    }, 2));
+    expect((await afterGrace.receive('controllerLease')).payload).toEqual(expect.objectContaining({ granted: false }));
+    expect(session.getTabletNarrationStatus()).toEqual(expect.objectContaining({
+      active: false,
+      policy: 'resume',
+      resumeAvailable: true,
+      acceptedCharacter: pausedCharacter
+    }));
+    afterGrace.socket.send(envelope('audioStreamStart', {
+      action: 'start', streamId: 'stream-after-pause', sampleRate: 16000, channels: 1, encoding: 'pcm-s16le',
+      sequenceStart: 0, captureTimestampMs: Date.now(), frameDurationMs: 200
+    }, 3));
+    expect((await afterGrace.receive('controllerLease')).payload).toEqual(expect.objectContaining({
+      granted: true,
+      streamId: 'stream-after-pause',
+      streamRegistered: true
+    }));
+    expect(session.getTabletNarrationStatus()).toEqual(expect.objectContaining({
+      active: true,
+      policy: 'resume',
+      acceptedCharacter: pausedCharacter
+    }));
     afterGrace.socket.close();
 
     await server.forgetDevice('tablet-1');

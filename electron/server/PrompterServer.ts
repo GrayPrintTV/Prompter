@@ -827,6 +827,7 @@ export class PrompterServer {
         this.audio.stop(client.deviceId, client.audioStreamId ?? undefined, client.connectionId);
         client.pendingAudioMetadata = null;
         client.audioStreamId = null;
+        this.selectTabletStartPolicy('resume');
         this.releaseTabletControl(client.deviceId, 'Tablet stopped its audio stream');
       }
     } catch (error) {

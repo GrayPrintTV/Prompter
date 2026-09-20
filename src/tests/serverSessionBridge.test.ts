@@ -139,6 +139,24 @@ describe('ServerSessionBridge', () => {
     expect(restarted).toEqual(expect.objectContaining({ continued: false, positionSource: 'reset', acceptedCharacter: 0 }));
   });
 
+  it('restores the preserved position when a deliberate tablet pause arms resume for the next start', () => {
+    const bridge = new ServerSessionBridge();
+    bridge.applyRendererSync(sync(1, { currentTokenIndex: 4 }));
+    bridge.acquireController('tablet-1');
+    bridge.selectTabletPositionFromWindowsView();
+    const started = bridge.startTabletNarration('tablet-1', 'stream-1');
+    bridge.selectTabletStartPolicy('resume');
+    bridge.endTabletNarration('tablet pause');
+    bridge.releaseController('tablet-1');
+    bridge.acquireController('tablet-1');
+    const resumed = bridge.startTabletNarration('tablet-1', 'stream-2');
+    expect(resumed).toEqual(expect.objectContaining({
+      continued: false,
+      positionSource: 'restored',
+      acceptedCharacter: started.acceptedCharacter
+    }));
+  });
+
   it('arms a beginning startup anchor so an initial repeated transcript cannot inherit a stale location', () => {
     const bridge = new ServerSessionBridge();
     const repeated = 'studio '.repeat(180);
