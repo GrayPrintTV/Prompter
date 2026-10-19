@@ -1,11 +1,14 @@
 import type {
+  AlignmentRejectionCategory,
   LocalWhisperTelemetryAggregate,
+  LocalWhisperAlignmentRejectionSample,
   LocalWhisperTranscriptTelemetry
 } from '../domain/types';
 import type { NarrationStatusLabel } from '../domain/narrationStatus';
 
 const MAX_STAGE_SAMPLES = 256;
 const MAX_VISIBLE_MOVEMENT_WAIT_MS = 10_000;
+const MAX_REJECTION_SAMPLES = 32;
 
 type StageName = keyof LocalWhisperTelemetryAggregate['latencyMs'];
 
@@ -64,6 +67,9 @@ export class LocalWhisperTelemetryAccumulator {
   private statusTransitionTotal = 0;
   private statusTransitions: Record<string, number> = {};
   private pendingVisibleMovementAtMs: number | null = null;
+  private rejectionCounts: Partial<Record<AlignmentRejectionCategory, number>> = {};
+  private rejectionSamples: LocalWhisperAlignmentRejectionSample[] = [];
+  private droppedRejectionSamples = 0;
 
   constructor(private readonly now: () => number = () => Date.now()) {
     this.windowStartedAtMs = now();
@@ -112,6 +118,7 @@ export class LocalWhisperTelemetryAccumulator {
     rejectedAsStale: boolean;
     alignmentAccepted: boolean;
     visibleMovementExpected: boolean;
+    rejection?: LocalWhisperAlignmentRejectionSample;
   }) {
     if (params.telemetry) {
       this.addSample(
@@ -121,7 +128,10 @@ export class LocalWhisperTelemetryAccumulator {
     }
     if (params.rejectedAsStale) this.counts.rejectedAsStale += 1;
     if (params.alignmentAccepted) this.counts.coordinatorAccepted += 1;
-    else if (!params.rejectedAsStale) this.counts.alignmentUnaccepted += 1;
+    else {
+      if (!params.rejectedAsStale) this.counts.alignmentUnaccepted += 1;
+      if (params.rejection) this.recordRejection(params.rejection);
+    }
     if (params.visibleMovementExpected) this.pendingVisibleMovementAtMs = params.acceptedAtMs;
   }
 
@@ -160,6 +170,8 @@ export class LocalWhisperTelemetryAccumulator {
       this.counts.chunksCaptured > 0 ||
       this.counts.generationFenced > 0 ||
       this.statusTransitionTotal > 0 ||
+      this.rejectionSamples.length > 0 ||
+      Object.keys(this.rejectionCounts).length > 0 ||
       Object.values(this.samples).some((values) => values.length > 0);
     if (!hasActivity) {
       this.windowStartedAtMs = nowMs;
@@ -167,7 +179,7 @@ export class LocalWhisperTelemetryAccumulator {
     }
 
     const aggregate: LocalWhisperTelemetryAggregate = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       windowStartedAtMs: this.windowStartedAtMs,
       windowEndedAtMs: nowMs,
       windowDurationMs: Math.max(0, nowMs - this.windowStartedAtMs),
@@ -193,6 +205,11 @@ export class LocalWhisperTelemetryAccumulator {
         total: this.statusTransitionTotal,
         byTransition: { ...this.statusTransitions }
       },
+      alignmentRejections: {
+        byCategory: { ...this.rejectionCounts },
+        samples: this.rejectionSamples.map((sample) => ({ ...sample })),
+        droppedSamples: this.droppedRejectionSamples
+      },
       measurementNotes: [
         'rendererAudioBacklog starts when a complete audio chunk is ready, not when its first sample was captured',
         'mainProcessQueueWait covers main IPC receipt through sidecar command dispatch, including temp-file preparation',
@@ -207,6 +224,15 @@ export class LocalWhisperTelemetryAccumulator {
 
   sampleCount(stage: StageName) {
     return this.samples[stage].length;
+  }
+
+  private recordRejection(sample: LocalWhisperAlignmentRejectionSample) {
+    this.rejectionCounts[sample.category] = (this.rejectionCounts[sample.category] ?? 0) + 1;
+    if (this.rejectionSamples.length >= MAX_REJECTION_SAMPLES) {
+      this.droppedRejectionSamples += 1;
+      return;
+    }
+    this.rejectionSamples.push({ ...sample });
   }
 
   private recordRendererQueueDepth(queueDepth: number) {
@@ -231,5 +257,8 @@ export class LocalWhisperTelemetryAccumulator {
     for (const values of Object.values(this.samples)) values.length = 0;
     this.statusTransitionTotal = 0;
     this.statusTransitions = {};
+    this.rejectionCounts = {};
+    this.rejectionSamples = [];
+    this.droppedRejectionSamples = 0;
   }
 }

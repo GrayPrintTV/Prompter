@@ -132,6 +132,8 @@ function makeRestrictedEnv(tempRoot) {
     HF_HOME: path.join(tempRoot, 'hf-home'),
     HUGGINGFACE_HUB_CACHE: path.join(tempRoot, 'hf-hub'),
     TRANSFORMERS_CACHE: path.join(tempRoot, 'transformers-cache'),
+    PROMPTER_USER_DATA_DIR: path.join(tempRoot, 'app-data'),
+    PROMPTER_DISABLE_TABLET: '1',
     HF_HUB_OFFLINE: '1',
     HF_HUB_DISABLE_TELEMETRY: '1',
     NO_COLOR: '1'

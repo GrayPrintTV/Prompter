@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+throw new Error('Legacy installer smoke is disabled: it targets production. Use the documented isolated candidate procedure.');
 const packageJson = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'));
 const installerPath = path.join(root, 'release', `Prompter-Setup-${packageJson.version}-x64.exe`);
 const appDataDir = path.join(process.env.APPDATA || '', 'Prompter');

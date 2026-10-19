@@ -5,6 +5,9 @@ export const BUNDLED_WHISPER_SIDECAR_RELATIVE_PATH = path.join('whisper-sidecar'
 export const BUNDLED_WHISPER_MODEL_NAME = 'base.en';
 export const BUNDLED_WHISPER_MODEL_RELATIVE_PATH = path.join('models', BUNDLED_WHISPER_MODEL_NAME);
 export const LOCAL_WHISPER_PYTHON_ENV_VAR = 'LOCAL_WHISPER_PYTHON_EXECUTABLE';
+export const LOCAL_MANUSCRIPT_PREP_WORKER_RELATIVE_PATH = path.join('python', 'manuscript_prep_worker.py');
+export const BUNDLED_MANUSCRIPT_PREP_WORKER_RELATIVE_PATH = path.join('manuscript-prep-worker', 'manuscript-prep-worker.exe');
+export const MANUSCRIPT_PREP_PYTHON_ENV_VAR = 'MANUSCRIPT_PREP_PYTHON_EXECUTABLE';
 export const REQUIRED_WHISPER_MODEL_FILES = [
   'config.json',
   'model.bin',
@@ -43,6 +46,14 @@ export function resolveBundledWhisperSidecarPath(context: RuntimePathContext) {
 
 export function resolveBundledWhisperModelPath(context: RuntimePathContext) {
   return path.join(context.resourcesPath, BUNDLED_WHISPER_MODEL_RELATIVE_PATH);
+}
+
+export type ManuscriptPrepLaunchPlan = { executablePath: string; args: string[]; bundled: boolean; workingDirectory: string };
+export function resolveManuscriptPrepLaunchPlan(context: RuntimePathContext, userDataPath: string, env: NodeJS.ProcessEnv = process.env): ManuscriptPrepLaunchPlan {
+  const workingDirectory = path.join(userDataPath, 'manuscript-prep-worker');
+  if (context.isPackaged) return { executablePath: path.join(context.resourcesPath, BUNDLED_MANUSCRIPT_PREP_WORKER_RELATIVE_PATH), args: [], bundled: true, workingDirectory };
+  const python = env[MANUSCRIPT_PREP_PYTHON_ENV_VAR]?.trim() || 'python';
+  return { executablePath: python, args: [path.join(context.appPath, LOCAL_MANUSCRIPT_PREP_WORKER_RELATIVE_PATH)], bundled: false, workingDirectory };
 }
 
 export function resolveLocalWhisperWorkingDirectory(userDataPath: string) {

@@ -15,6 +15,8 @@ import app.prompter.tablet.audio.AudioDiagnostics
 import app.prompter.tablet.connection.ConnectionDiagnostics
 import app.prompter.tablet.connection.ConnectionState
 import app.prompter.tablet.connection.ManualRepositionSendOutcome
+import app.prompter.tablet.connection.UsbEndpointContract
+import app.prompter.tablet.connection.UsbIntentExtra
 import app.prompter.tablet.discovery.DiscoveredServer
 import app.prompter.tablet.discovery.DiscoveryState
 import app.prompter.tablet.diagnostics.AndroidDiagnosticEvent
@@ -105,7 +107,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         viewModelScope.launch { services.pairedServers.pairedServer.collect { paired ->
-            if (paired != null && !autoConnected) { autoConnected = true; services.connections.connect(paired.discovered()) }
+            if (paired != null) {
+                services.connections.setLanFallback(paired.discovered())
+                if (!autoConnected && !services.connections.hasConnectionTarget()) {
+                    autoConnected = true
+                    services.connections.connect(paired.discovered())
+                }
+            }
         } }
     }
 
@@ -128,6 +136,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun refreshDiscovery() { services.discovery.stop(); services.discovery.start() }
     fun setPairingCode(value: String) { update { copy(pairingCode = value.filter(Char::isDigit).take(6)) } }
     fun setManualAddress(value: String) { update { copy(manualAddress = value) } }
+
+    fun handleUsbConnectionIntent(action: String?, extras: List<UsbIntentExtra>) {
+        runCatching { UsbEndpointContract.parse(action, extras) }
+            .onSuccess { endpoint ->
+                autoConnected = true
+                services.connections.preferUsb(endpoint)
+                update { copy(lastError = null) }
+            }
+            .onFailure { error ->
+                services.diagnostics.record(
+                    "connection", "error", "android.usb.intent_rejected",
+                    "USB connection request was rejected.",
+                    details = mapOf("reason" to (error.message ?: "invalid link"))
+                )
+                update { copy(lastError = error.message ?: "Invalid USB connection request.") }
+            }
+    }
 
     fun addManualAddress() {
         val raw = _ui.value.manualAddress.trim().removePrefix("ws://")
@@ -160,6 +185,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             appendLine("serverBuild=${serverBuild?.versionName ?: "unavailable"} timestamp=${serverBuild?.buildTimestamp ?: "unavailable"} git=${serverBuild?.gitHash ?: "unavailable"} dirty=${serverBuild?.dirty ?: "unavailable"}")
             appendLine("serverProtocol=${state.connectionDiagnostics.serverProtocolMajor ?: "?"}.${state.connectionDiagnostics.serverProtocolMinor ?: "?"} serverStartedAtMs=${state.connectionDiagnostics.serverStartedAtMs ?: "unavailable"}")
             appendLine("connection=${state.connection} cause=${state.connectionDiagnostics.lastStateTransitionCause ?: "none"} lifecycle=${state.connectionDiagnostics.appLifecycleState}")
+            appendLine("transport=${state.connectionDiagnostics.activeTransport} candidate=${state.connectionDiagnostics.candidateTransport ?: "none"} transportStatus=${state.connectionDiagnostics.transportMessage ?: "none"}")
             appendLine("controllerLease=${state.connectionDiagnostics.controllerLease} leaseState=${state.connectionDiagnostics.controllerLeaseState}")
             appendLine("registeredAudioStreamId=${state.connectionDiagnostics.registeredAudioStreamId ?: "none"} audioSocketGeneration=${state.connectionDiagnostics.audioSocketGeneration ?: "none"} serverAudioConnectionGeneration=${state.connectionDiagnostics.serverAudioConnectionGeneration ?: "none"} registrationAttempts=${state.connectionDiagnostics.streamRegistrationAttempts}")
             appendLine("queuedAnchor=${state.connectionDiagnostics.pendingManualAnchorTokenIndex ?: "none"} queuedReason=${state.connectionDiagnostics.pendingManualAnchorReason ?: "none"}")

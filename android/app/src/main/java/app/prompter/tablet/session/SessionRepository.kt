@@ -10,7 +10,9 @@ import app.prompter.tablet.protocol.SessionSnapshot
 import app.prompter.tablet.protocol.TranscriptEvent
 import app.prompter.tablet.protocol.RuntimeSettings
 import app.prompter.tablet.protocol.SessionState
+import app.prompter.tablet.protocol.TabletRecoveryClaim
 import java.io.File
+import java.security.MessageDigest
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -29,7 +31,8 @@ data class TabletSessionState(
     val latestMovementRejection: String? = null,
     val runtimeSettings: RuntimeSettings? = null,
     val snapshotAnchor: SnapshotAnchor? = null,
-    val manualRepositionResult: ManualRepositionResult? = null
+    val manualRepositionResult: ManualRepositionResult? = null,
+    val recoveryPosition: Position? = null
 )
 
 data class SnapshotAnchor(
@@ -68,17 +71,21 @@ class SessionRepository private constructor(private val cacheDir: File, private 
         val currentNarrationSessionId = currentSnapshot?.narrationSessionId
         val currentSessionRevision = currentSnapshot?.sessionRevision
         val sameTransport = current.sessionId == envelope.sessionId
-        val sameManuscript = sameTransport && currentSnapshot != null &&
+        val sameContent = currentSnapshot != null &&
+            currentSnapshot.manuscript.contentHash == restored.manuscript.contentHash &&
+            currentSnapshot.manuscript.manuscriptId == restored.manuscript.manuscriptId
+        val sameManuscript = sameTransport && sameContent &&
             currentSnapshot.manuscriptRevision == restored.manuscriptRevision &&
             currentSnapshot.manuscript.contentHash == restored.manuscript.contentHash
-        val knownPosition = current.latestMovement
-            ?.takeIf { sameManuscript && it.manuscriptRevision == restored.manuscriptRevision }
+        val knownPosition = current.recoveryPosition
+            ?: current.latestMovement
+            ?.takeIf { sameContent && it.manuscriptRevision == restored.manuscriptRevision }
             ?.let { Position(it.targetTokenIndex, it.targetCharacter, it.sentenceIndex, it.paragraphIndex) }
             ?: currentAcceptedPosition
         val sameNarration = currentNarrationSessionId == restored.narrationSessionId
         val staleSameNarrationSnapshot = sameManuscript && sameNarration &&
             restored.sessionRevision < (currentSessionRevision ?: Long.MIN_VALUE)
-        val bootstrapDuringReconnect = current.awaitingSnapshot && sameManuscript &&
+        val bootstrapDuringReconnect = current.awaitingSnapshot && sameContent &&
             knownPosition != null && (knownPosition.tokenIndex > 0 || knownPosition.character > 0) &&
             restored.acceptedPosition.tokenIndex == 0 && restored.acceptedPosition.character == 0 &&
             (restored.narrationSessionId == null || sameNarration)
@@ -129,7 +136,8 @@ class SessionRepository private constructor(private val cacheDir: File, private 
             latestMovementRejection = current.latestMovementRejection,
             runtimeSettings = chooseSettings(current.runtimeSettings, restored.runtimeSettings),
             snapshotAnchor = anchor,
-            manualRepositionResult = current.manualRepositionResult
+            manualRepositionResult = current.manualRepositionResult,
+            recoveryPosition = if (preserveKnownPosition) knownPosition else semanticSnapshot.acceptedPosition
         )
         diagnostics?.record(
             "session", "info", "android.snapshot.applied", "Authoritative Windows snapshot applied.",
@@ -168,6 +176,29 @@ class SessionRepository private constructor(private val cacheDir: File, private 
     }
 
     fun cachedManuscriptHash(): String? = _state.value.snapshot?.manuscript?.contentHash
+
+    fun recoveryClaim(nowMs: Long = System.currentTimeMillis()): TabletRecoveryClaim? {
+        val state = _state.value
+        val snapshot = state.snapshot ?: return null
+        val position = state.recoveryPosition ?: state.latestMovement?.let {
+            Position(it.targetTokenIndex, it.targetCharacter, it.sentenceIndex, it.paragraphIndex)
+        } ?: snapshot.acceptedPosition
+        val token = snapshot.manuscript.tokens.getOrNull(position.tokenIndex) ?: return null
+        if (position.character !in token.characterRange.start..token.characterRange.end ||
+            position.sentenceIndex != token.sentenceIndex || position.paragraphIndex != token.paragraphIndex) return null
+        val fingerprint = anchorFingerprint(snapshot, position.tokenIndex) ?: return null
+        return TabletRecoveryClaim(
+            manuscriptId = snapshot.manuscript.manuscriptId,
+            contentHash = snapshot.manuscript.contentHash,
+            manuscriptRevision = snapshot.manuscriptRevision,
+            tokenIndex = position.tokenIndex,
+            character = position.character,
+            sentenceIndex = position.sentenceIndex,
+            paragraphIndex = position.paragraphIndex,
+            anchorFingerprint = fingerprint,
+            capturedAtMs = nowMs
+        )
+    }
 
     fun acceptIncremental(envelope: ProtocolEnvelope): Boolean = evaluateIncremental(envelope).accepted
 
@@ -212,7 +243,15 @@ class SessionRepository private constructor(private val cacheDir: File, private 
     }
 
     fun applyManualRepositionResult(result: ManualRepositionResult) {
-        _state.value = _state.value.copy(manualRepositionResult = result)
+        val current = _state.value
+        val token = current.snapshot?.manuscript?.tokens?.getOrNull(result.visibleTokenIndex)
+        val acceptedPosition = if (result.accepted && token != null) Position(
+            tokenIndex = token.tokenIndex,
+            character = token.characterRange.start,
+            sentenceIndex = token.sentenceIndex,
+            paragraphIndex = token.paragraphIndex
+        ) else current.recoveryPosition
+        _state.value = current.copy(manualRepositionResult = result, recoveryPosition = acceptedPosition)
     }
 
     fun applyMovement(event: MovementEvent, eventId: String? = null): MovementApplication {
@@ -231,7 +270,8 @@ class SessionRepository private constructor(private val cacheDir: File, private 
             latestMovementEventId = eventId ?: "${event.sessionRevision}:${event.targetTokenIndex}",
             lastRemoteMovementStatus = event.manualRepositionStatus ?: "normal",
             lastAcceptedMovementReason = event.reason,
-            latestMovementRejection = null
+            latestMovementRejection = null,
+            recoveryPosition = Position(event.targetTokenIndex, event.targetCharacter, event.sentenceIndex, event.paragraphIndex)
         )
         diagnostics?.record("movement", "info", "android.movement.accepted", "Semantic movement accepted by SessionRepository.", details = mapOf("sessionRevision" to event.sessionRevision.toString(), "manuscriptRevision" to event.manuscriptRevision.toString(), "targetCharacter" to event.targetCharacter.toString(), "paragraphIndex" to event.paragraphIndex.toString(), "classification" to event.classification))
         return MovementApplication(true)
@@ -268,4 +308,16 @@ class SessionRepository private constructor(private val cacheDir: File, private 
     }
 
     private fun cacheFile(hash: String) = File(cacheDir, hash.replace(Regex("[^A-Za-z0-9._-]"), "_") + ".txt")
+
+    private fun anchorFingerprint(snapshot: SessionSnapshot, tokenIndex: Int): String? {
+        val content = snapshot.manuscript.normalizedContent ?: return null
+        val tokens = snapshot.manuscript.tokens
+        val first = tokens.getOrNull((tokenIndex - 8).coerceAtLeast(0)) ?: return null
+        val last = tokens.getOrNull((tokenIndex + 8).coerceAtMost(tokens.lastIndex)) ?: return null
+        if (first.characterRange.start !in 0..content.length || last.characterRange.end !in 0..content.length ||
+            first.characterRange.start > last.characterRange.end) return null
+        val bytes = content.substring(first.characterRange.start, last.characterRange.end).toByteArray(Charsets.UTF_8)
+        val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
+        return "sha256:" + digest.joinToString("") { "%02x".format(it) }
+    }
 }

@@ -168,7 +168,8 @@ data class ServerChallenge(
     val protocolMajor: Int? = null,
     val protocolMinor: Int? = null,
     val serverBuild: BuildIdentityPayload? = null,
-    val serverStartedAtMs: Long? = null
+    val serverStartedAtMs: Long? = null,
+    val recoveryClaimRequested: Boolean = false
 )
 @Serializable data class PairCredential(val approved: Boolean, val deviceId: String, val credential: String)
 @Serializable data class PairDenied(val approved: Boolean = false, val reason: String)
@@ -208,7 +209,22 @@ data class Authenticate(
     val protocolMajor: Int = ProtocolVersion.MAJOR,
     val protocolMinor: Int = ProtocolVersion.MINOR,
     val clientBuild: BuildIdentityPayload? = null,
-    val cachedManuscriptHash: String? = null
+    val cachedManuscriptHash: String? = null,
+    val recoveryClaim: TabletRecoveryClaim? = null
+)
+
+@Serializable
+data class TabletRecoveryClaim(
+    val schemaVersion: Int = 1,
+    val manuscriptId: String,
+    val contentHash: String,
+    val manuscriptRevision: Long,
+    val tokenIndex: Int,
+    val character: Int,
+    val sentenceIndex: Int,
+    val paragraphIndex: Int,
+    val anchorFingerprint: String,
+    val capturedAtMs: Long
 )
 
 @Serializable

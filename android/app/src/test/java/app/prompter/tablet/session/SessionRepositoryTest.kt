@@ -19,6 +19,27 @@ class SessionRepositoryTest {
             sentences = listOf(SentenceAnchor(0, 0, CharacterRange(0, 16), 0, 2)), tokens = listOf(TokenAnchor(0, 0, 0, CharacterRange(0, 5)))),
         Position(0, 0, 0, 0), "following", .9, displayHints = DisplayHints()
     )
+    private fun recoverySnapshot(position: Position = Position(0, 0, 0, 0), narrationId: String? = "narration-a") = SessionSnapshot(
+        sessionRevision = 7,
+        manuscriptRevision = 0,
+        manuscript = ManuscriptPayload(
+            manuscriptId = "book-1",
+            contentHash = "sha256:" + "a".repeat(64),
+            normalizedContent = "One two three.",
+            paragraphs = listOf(ParagraphAnchor(0, CharacterRange(0, 14), 0, 1)),
+            sentences = listOf(SentenceAnchor(0, 0, CharacterRange(0, 14), 0, 3)),
+            tokens = listOf(
+                TokenAnchor(0, 0, 0, CharacterRange(0, 3)),
+                TokenAnchor(1, 0, 0, CharacterRange(4, 7)),
+                TokenAnchor(2, 0, 0, CharacterRange(8, 13))
+            )
+        ),
+        acceptedPosition = position,
+        followState = "following",
+        currentConfidence = .9,
+        displayHints = DisplayHints(),
+        narrationSessionId = narrationId
+    )
 
     @Test fun `snapshot caches manuscript and replacement follows revision`() {
         val repository = SessionRepository(Files.createTempDirectory("prompter-session").toFile())
@@ -146,6 +167,38 @@ class SessionRepositoryTest {
         assertEquals("narration-a", repository.state.value.snapshot?.narrationSessionId)
         assertEquals(identity, repository.state.value.snapshotAnchor?.identity)
         assertTrue(repository.state.value.snapshotAnchor!!.consumed)
+    }
+
+    @Test fun `new Windows process bootstrap retains same manuscript position and emits a validated recovery claim`() {
+        val repository = SessionRepository(Files.createTempDirectory("prompter-session").toFile())
+        val retained = Position(2, 8, 0, 0)
+        repository.applySnapshot(envelope(1, "windows-before-restart"), recoverySnapshot(retained))
+        repository.markDisconnected()
+
+        repository.applySnapshot(
+            envelope(1, "windows-after-restart"),
+            recoverySnapshot(Position(0, 0, 0, 0), narrationId = null).copy(sessionRevision = 1)
+        )
+
+        assertEquals(retained, repository.state.value.snapshot?.acceptedPosition)
+        val claim = requireNotNull(repository.recoveryClaim(123_456))
+        assertEquals("book-1", claim.manuscriptId)
+        assertEquals(retained.tokenIndex, claim.tokenIndex)
+        assertEquals(retained.character, claim.character)
+        assertEquals(123_456, claim.capturedAtMs)
+        assertTrue(claim.anchorFingerprint.startsWith("sha256:"))
+    }
+
+    @Test fun `only an accepted manual reposition changes the retained recovery position`() {
+        val repository = SessionRepository(Files.createTempDirectory("prompter-session").toFile())
+        repository.applySnapshot(envelope(1), recoverySnapshot())
+
+        repository.applyManualRepositionResult(ManualRepositionResult(false, "preview only", 0, 2, 8))
+        assertEquals(0, repository.recoveryClaim()?.tokenIndex)
+
+        repository.applyManualRepositionResult(ManualRepositionResult(true, "accepted", 0, 2, 8))
+        assertEquals(2, repository.recoveryClaim()?.tokenIndex)
+        assertEquals(8, repository.recoveryClaim()?.character)
     }
 
     @Test fun `explicit new narration identity still applies start-from-beginning reset`() {

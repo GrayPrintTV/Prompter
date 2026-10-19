@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { cp, mkdir, stat } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
 import os from 'node:os';
@@ -5,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const modelLock = JSON.parse(readFileSync(path.join(root, 'packaging', 'model-lock.json'), 'utf8'));
 const modelName = 'base.en';
 const repoCacheName = 'models--Systran--faster-whisper-base.en';
 const requiredFiles = ['config.json', 'model.bin', 'tokenizer.json', 'vocabulary.txt'];
@@ -24,7 +26,7 @@ function resolveModelSourceDir() {
   const refPath = path.join(repoDir, 'refs', 'main');
   if (!existsSync(refPath)) return '';
 
-  const revision = readFileSync(refPath, 'utf8').trim();
+  const revision = modelLock.revision;
   return path.join(repoDir, 'snapshots', revision);
 }
 
@@ -47,7 +49,7 @@ async function sameRequiredFiles(sourceDir, destinationDir) {
       const sourceInfo = await stat(path.join(sourceDir, fileName));
       const targetInfo = await stat(path.join(destinationDir, fileName));
       if (!sourceInfo.isFile() || !targetInfo.isFile()) return false;
-      if (sourceInfo.size !== targetInfo.size) return false;
+      if (sourceInfo.size !== targetInfo.size || createHash('sha256').update(readFileSync(path.join(destinationDir, fileName))).digest('hex') !== modelLock.files[fileName]) return false;
     } catch {
       return false;
     }
@@ -67,6 +69,10 @@ if (missingSourceFiles.length > 0) {
   console.error(`Model source is incomplete: ${sourceDir}`);
   console.error(`Missing: ${missingSourceFiles.join(', ')}`);
   process.exit(1);
+}
+
+for (const fileName of requiredFiles) {
+  if (createHash('sha256').update(readFileSync(path.join(sourceDir, fileName))).digest('hex') !== modelLock.files[fileName]) throw new Error(`Model hash mismatch: ${fileName}`);
 }
 
 await mkdir(path.dirname(targetDir), { recursive: true });

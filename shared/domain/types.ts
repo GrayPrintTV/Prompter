@@ -34,8 +34,34 @@ export type LocalWhisperLatencySummary = {
   max: number | null;
 };
 
+export type AlignmentRejectionCategory =
+  | 'stale-pre-anchor'
+  | 'empty-transcript'
+  | 'manual-or-paused'
+  | 'manual-anchor-backward'
+  | 'manual-anchor-outside-neighborhood'
+  | 'automatic-backward'
+  | 'stale-context'
+  | 'low-confidence'
+  | 'bounded-reacquire'
+  | 'unknown';
+
+export type LocalWhisperAlignmentRejectionSample = {
+  category: AlignmentRejectionCategory;
+  currentTokenIndex: number;
+  candidateStartTokenIndex: number | null;
+  candidateEndTokenIndex: number | null;
+  confidence: number | null;
+  matchedWordCount: number | null;
+  distinctiveMatchedWordCount: number | null;
+  lowConfidenceCount: number | null;
+  followState: FollowState;
+  transcriptAgeMs: number | null;
+  rendererBacklogMs: number | null;
+};
+
 export type LocalWhisperTelemetryAggregate = {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   windowStartedAtMs: number;
   windowEndedAtMs: number;
   windowDurationMs: number;
@@ -67,6 +93,12 @@ export type LocalWhisperTelemetryAggregate = {
   narratorStatusTransitions: {
     total: number;
     byTransition: Record<string, number>;
+  };
+  // Schema v2. Counts every rejection while retaining only a small, text-free sample.
+  alignmentRejections?: {
+    byCategory: Partial<Record<AlignmentRejectionCategory, number>>;
+    samples: LocalWhisperAlignmentRejectionSample[];
+    droppedSamples: number;
   };
   measurementNotes: string[];
 };
@@ -170,6 +202,7 @@ export type AlignmentBufferDebug = {
   lostOrResyncing?: boolean;
   reacquireEvent?: 'search' | 'candidate' | 'accepted' | 'rejected';
   reacquireReason?: string;
+  rejectionCategory?: AlignmentRejectionCategory;
 };
 
 export type FollowState =

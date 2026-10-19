@@ -28,12 +28,35 @@ class ProtocolCodecTest {
 
     @Test fun `major mismatch rejects while higher minor negotiates`() {
         assertThrows(IllegalArgumentException::class.java) { ProtocolVersion.requireCompatible(2, 0) }
-        assertEquals(2, ProtocolVersion.requireCompatible(1, 4))
+        assertEquals(3, ProtocolVersion.requireCompatible(1, 4))
     }
 
     @Test fun `envelope serialization round trips`() {
         val encoded = codec.encodeEnvelope("requestSnapshot", RequestSnapshot(), RequestSnapshot.serializer(), "server-1", "session-1", "connection-1", 3)
         assertEquals(3, codec.decodeEnvelope(encoded).sequence)
+    }
+
+    @Test fun `authentication round trip retains tablet to Windows recovery claim`() {
+        val claim = TabletRecoveryClaim(
+            manuscriptId = "book-1",
+            contentHash = "sha256:" + "a".repeat(64),
+            manuscriptRevision = 3,
+            tokenIndex = 10,
+            character = 42,
+            sentenceIndex = 2,
+            paragraphIndex = 1,
+            anchorFingerprint = "sha256:" + "b".repeat(64),
+            capturedAtMs = 99_000
+        )
+        val authenticate = Authenticate(
+            deviceId = "tablet", clientNonce = "nonce", timestampMs = 100_000,
+            proof = "proof", recoveryClaim = claim
+        )
+        val encoded = codec.encodeEnvelope(
+            "authenticate", authenticate, Authenticate.serializer(),
+            "server-1", "session-1", "connection-1", 3
+        )
+        assertEquals(claim, codec.decodePayload<Authenticate>(codec.decodeEnvelope(encoded)).recoveryClaim)
     }
 
     @Test fun `manual reposition accepts every shared input source including fast scroll`() {

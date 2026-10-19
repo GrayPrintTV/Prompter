@@ -24,7 +24,7 @@ import type {
 } from '../domain/types';
 import { DEFAULT_DISPLAY_SETTINGS } from '../state/appStore';
 import { cleanupImportedManuscriptText } from '../domain/manuscriptImportCleanup';
-import type { ServerStatusSummary } from '../../shared/protocol/messages';
+import type { ServerStatusSummary, UsbTransportMode } from '../../shared/protocol/messages';
 
 type Props = {
   projectTitle: string;
@@ -99,6 +99,9 @@ type Props = {
   lastStartDiagnostic?: StartDiagnostic | null;
   tabletStatus: ServerStatusSummary | null;
   onPrepareTablet(): void;
+  onSetTabletUsbMode?(mode: UsbTransportMode): void;
+  onSelectTabletUsbDevice?(serial: string | null): void;
+  onRetryTabletUsb?(): void;
   onQuitPrompter(): void;
   providerControlsDisabled?: boolean;
 };
@@ -368,6 +371,9 @@ export function ControlPanel(props: Props) {
     lastStartDiagnostic,
     tabletStatus,
     onPrepareTablet,
+    onSetTabletUsbMode = () => undefined,
+    onSelectTabletUsbDevice = () => undefined,
+    onRetryTabletUsb = () => undefined,
     onQuitPrompter,
     providerControlsDisabled = false
   } = props;
@@ -837,12 +843,56 @@ export function ControlPanel(props: Props) {
           <strong>{tabletProductStatus.label}</strong>
           <span>{tabletProductStatus.detail}</span>
         </div>
+        {tabletStatus?.usbTransport && ['unauthorized', 'multiple-devices', 'error'].includes(tabletStatus.usbTransport.state) && (
+          <div className="settings-subtle">USB: {tabletStatus.usbTransport.message}</div>
+        )}
         {tabletStatus?.connectedDevices.length ? (
           <div className="settings-subtle">The tablet will follow this narration session automatically.</div>
         ) : (
           <button type="button" onClick={onPrepareTablet}>
             {tabletStatus?.pairingActive ? 'Create a new pairing code' : 'Set up tablet'}
           </button>
+        )}
+        {developerMode && tabletStatus?.usbTransport && (
+          <details className="tablet-calibration-details">
+            <summary>USB/LAN transport diagnostics</summary>
+            <label>
+              Transport preference
+              <select
+                value={tabletStatus.usbTransport.mode}
+                onChange={(event) => onSetTabletUsbMode(event.target.value as UsbTransportMode)}
+              >
+                <option value="auto">Automatic (USB preferred)</option>
+                <option value="lan-only">LAN only</option>
+                <option value="usb-only">USB only</option>
+              </select>
+            </label>
+            <div className="settings-subtle">{tabletStatus.usbTransport.message}</div>
+            <div className="settings-subtle">
+              ADB: {tabletStatus.usbTransport.adbPath ?? 'not found'} · USB port {tabletStatus.usbTransport.tabletLocalPort}
+            </div>
+            {tabletStatus.usbTransport.state === 'error' && (
+              <button type="button" className="secondary-button" onClick={onRetryTabletUsb}>Retry USB setup</button>
+            )}
+            {tabletStatus.usbTransport.devices.filter((device) => device.state === 'authorized').length > 1 && (
+              <label>
+                Authorized tablet
+                <select
+                  value={tabletStatus.usbTransport.selectedSerial ?? ''}
+                  onChange={(event) => onSelectTabletUsbDevice(event.target.value || null)}
+                >
+                  <option value="">Select a device…</option>
+                  {tabletStatus.usbTransport.devices
+                    .filter((device) => device.state === 'authorized')
+                    .map((device) => (
+                      <option key={device.serial} value={device.serial}>
+                        {device.model ? `${device.model} — ` : ''}{device.serial}
+                      </option>
+                    ))}
+                </select>
+              </label>
+            )}
+          </details>
         )}
       </section>
 

@@ -131,7 +131,7 @@ async function extractDocxText(buffer: Buffer) {
   return normalizeImportedText(result.value);
 }
 
-async function extractPdfText(buffer: Buffer) {
+export async function extractPdfText(buffer: Buffer, reviewLines = false) {
   const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
   const loadingTask = pdfjs.getDocument({
     data: new Uint8Array(buffer),
@@ -155,7 +155,8 @@ async function extractPdfText(buffer: Buffer) {
             }]
           : []
       );
-      const pageText = normalizePdfLines(pdfItemsToLines(items));
+      const pageText = reviewLines ? pdfItemsToLines(items).map(line => line.text).join("\n\n") : normalizePdfLines(pdfItemsToLines(items));
+      if (reviewLines && !pageText.trim()) throw new Error("PDF page has no selectable text. OCR is not qualified; no ready manuscript was produced.");
       if (pageText) pages.push(pageText);
       page.cleanup();
     }

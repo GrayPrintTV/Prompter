@@ -15,9 +15,12 @@ import type {
   RendererSyncResult,
   ServerCoordinatorUpdate,
   ServerStatusSummary,
-  TabletModeStatus
+  TabletModeStatus,
+  UsbTransportMode,
+  UsbTransportStatus
 } from '../shared/protocol/messages';
 import type { StructuredDiagnosticEvent } from '../shared/protocol/diagnostics';
+import type { PrepDraft, PrepOperationResult, PrepProjectSummary, PrepReviewOperation } from '../shared/manuscriptPrep/types';
 
 type ImportedManuscriptFile = {
   filePath: string;
@@ -41,6 +44,15 @@ declare global {
       ping(): string;
       openManuscriptFile(): Promise<ImportedManuscriptFile | null>;
       openTextFile(): Promise<ImportedManuscriptFile | null>;
+      importPrepTxt(projectId: string): Promise<{ inspected: PrepOperationResult<unknown>; extracted: PrepOperationResult<unknown> | null } | null>;
+      getPrepDraft(projectId: string, draftId: string): Promise<PrepOperationResult<PrepDraft>>;
+      applyPrepReviewChange(projectId: string, draftId: string, expectedRevision: number, operation: PrepReviewOperation, idempotencyKey?: string): Promise<PrepOperationResult<{ revision: number }>>;
+      approvePrepDraft(projectId: string, draftId: string, expectedRevision: number, idempotencyKey?: string): Promise<PrepOperationResult<unknown>>;
+      cancelPrepRequest(projectId: string, requestId: string): Promise<PrepOperationResult<unknown>>;
+      getPrepProjectSummary(projectId: string): Promise<PrepProjectSummary>;
+      readPrepApproved(projectId: string, approvedId: string): Promise<import('../shared/manuscriptPrep/types').PrepApproved & { projectId: string; text: string }>;
+      exportPrepApproved(projectId: string, approvedId: string): Promise<unknown>;
+      getPrepActiveProjectId(): Promise<string>;
       toggleFullScreen(): Promise<boolean>;
       toggleAlwaysOnTop(): Promise<boolean>;
       quitApp(): Promise<boolean>;
@@ -70,6 +82,9 @@ declare global {
       getServerStatus(): Promise<ServerStatusSummary | null>;
       getServerDiagnostics(): Promise<unknown>;
       prepareTablet(): Promise<ServerStatusSummary>;
+      setTabletUsbMode(mode: UsbTransportMode): Promise<UsbTransportStatus | null>;
+      selectTabletUsbDevice(serial: string | null): Promise<UsbTransportStatus | null>;
+      retryTabletUsb(): Promise<UsbTransportStatus | null>;
       getTabletLogEvents(): Promise<StructuredDiagnosticEvent[]>;
       copyTabletLog(events: StructuredDiagnosticEvent[]): Promise<void>;
       clearTabletLogView(): Promise<void>;

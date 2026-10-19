@@ -21,8 +21,9 @@ import {
   WhisperTranscriptionService
 } from './whisper/WhisperTranscriptionService.js';
 import { WhisperStatusPublisher } from './whisper/WhisperStatusPublisher.js';
+import { ManuscriptPrepService } from './manuscriptPrep/ManuscriptPrepService.js';
 import type { LocalWhisperSettings, LocalWhisperTelemetryAggregate } from '#prompter-shared/domain/types.js';
-import type { BuildIdentityPayload, RendererSessionSync } from '#prompter-shared/protocol/messages.js';
+import type { BuildIdentityPayload, RendererSessionSync, UsbTransportMode } from '#prompter-shared/protocol/messages.js';
 import { PROTOCOL_MAJOR, PROTOCOL_MINOR } from '#prompter-shared/protocol/protocol-version.js';
 import { PairedDeviceStore } from './server/PairedDeviceStore.js';
 import { PairingService } from './server/PairingService.js';
@@ -36,10 +37,19 @@ import { DiagnosticLogService, diagnosticError } from './server/DiagnosticLogSer
 import { LiveTabletLogWindow } from './server/LiveTabletLogWindow.js';
 import { TabletModeController } from './server/TabletModeController.js';
 import type { StructuredDiagnosticEvent } from '#prompter-shared/protocol/diagnostics.js';
-import { appendBoundedJsonLine } from './diagnostics/BoundedJsonlLog.js';
+import { BufferedJsonlLog } from './diagnostics/BoundedJsonlLog.js';
+import { AdbTransportService } from './usb/AdbTransportService.js';
+import { NarrationCheckpointStore } from './server/NarrationCheckpointStore.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const APP_ID = 'com.narrationprompter.prompter';
+const isReleaseCandidate = app.getVersion().includes('-rc.');
+const APP_ID = isReleaseCandidate ? 'com.narrationprompter.prompter.candidate' : 'com.narrationprompter.prompter';
+if (isReleaseCandidate) { app.setName('Prompter Release Candidate'); app.setPath('userData', path.join(app.getPath('appData'), 'Prompter Release Candidate')); }
+const isolatedUserData = process.env.PROMPTER_USER_DATA_DIR?.trim();
+if (isolatedUserData) {
+  if (!path.isAbsolute(isolatedUserData)) throw new Error('PROMPTER_USER_DATA_DIR must be absolute.');
+  app.setPath('userData', isolatedUserData);
+}
 const isDev = !app.isPackaged && Boolean(process.env.VITE_DEV_SERVER_URL);
 
 let mainWindow: BrowserWindow | null = null;
@@ -48,8 +58,12 @@ let prompterServer: PrompterServer | null = null;
 let trayController: TrayController | null = null;
 let quitting = false;
 let tabletDiagnostics: DiagnosticLogService | null = null;
+let mainDiagnosticLog: BufferedJsonlLog | null = null;
+let lastTabletServerStatusLog: { signature: string; timestampMs: number } | null = null;
 let liveTabletLog: LiveTabletLogWindow | null = null;
 let tabletModeController: TabletModeController | null = null;
+let usbTransport: AdbTransportService | null = null;
+let narrationCheckpoints: NarrationCheckpointStore | null = null;
 const serverSession = new ServerSessionBridge();
 
 type OpenAiRealtimeConfig = {
@@ -126,12 +140,19 @@ function runtimePathContext(): RuntimePathContext {
 
 function appendDiagnosticLog(event: string, data: Record<string, unknown>) {
   try {
+    if (event === 'tablet-server-status') {
+      const signature = JSON.stringify(data);
+      const nowMs = Date.now();
+      const previous = lastTabletServerStatusLog;
+      lastTabletServerStatusLog = { signature, timestampMs: nowMs };
+      if (previous && previous.signature === signature && nowMs - previous.timestampMs < 30_000) return;
+    }
     const logDir = path.join(app.getPath('userData'), 'logs');
     const logPath = path.join(logDir, APP_LOG_FILE);
-    appendBoundedJsonLine(
-      logPath,
-      { timestamp: new Date().toISOString(), event, ...data }
-    );
+    mainDiagnosticLog ??= new BufferedJsonlLog(logPath, {
+      onError: (error) => console.warn('[main] failed to write diagnostic log', error)
+    });
+    mainDiagnosticLog.append({ timestamp: new Date().toISOString(), event, ...data });
   } catch (error) {
     console.warn('[main] failed to write diagnostic log', error);
   }
@@ -153,6 +174,10 @@ function stableServerId() {
 function electronBuildIdentity(): BuildIdentityPayload {
   let gitHash = process.env.PROMPTER_GIT_HASH || process.env.GIT_COMMIT || 'unavailable';
   let dirty: boolean | undefined;
+  let packagedDate: string | undefined;
+  if (app.isPackaged) {
+    try { const identity = JSON.parse(readFileSync(path.join(process.resourcesPath, 'build-identity.json'), 'utf8')); gitHash = identity.sourceCommit; packagedDate = identity.sourceDate; dirty = false; } catch { gitHash = 'unavailable'; }
+  }
   if (!app.isPackaged) {
     try {
       gitHash = execFileSync('git', ['rev-parse', '--short=12', 'HEAD'], {
@@ -169,7 +194,7 @@ function electronBuildIdentity(): BuildIdentityPayload {
       dirty = undefined;
     }
   }
-  let buildTimestamp = process.env.PROMPTER_BUILD_TIMESTAMP;
+  let buildTimestamp = packagedDate || process.env.PROMPTER_BUILD_TIMESTAMP;
   if (!buildTimestamp) {
     try { buildTimestamp = statSync(fileURLToPath(import.meta.url)).mtime.toISOString(); }
     catch { buildTimestamp = 'unavailable'; }
@@ -199,8 +224,20 @@ async function initializeTabletServer() {
   tabletDiagnostics.onEvent((event) => {
     for (const window of BrowserWindow.getAllWindows()) window.webContents.send('tablet-log:event', event);
   });
-  const devices = PairedDeviceStore.underUserData(app.getPath('userData'), safeStorage);
+  const devices = PairedDeviceStore.underUserData(app.getPath('userData'), safeStorage, (event) => {
+    tabletDiagnostics?.record({ component: 'server.pairing-store', ...event });
+  });
   await devices.load();
+  narrationCheckpoints = new NarrationCheckpointStore(
+    path.join(app.getPath('userData'), 'narration-checkpoints.v1.json'),
+    {
+      onError: (error) => tabletDiagnostics?.record({
+        component: 'server.checkpoint', level: 'warn', event: 'session.checkpoint.persistence_failed',
+        message: error instanceof Error ? error.message : String(error)
+      })
+    }
+  );
+  await narrationCheckpoints.load();
   const pairing = new PairingService(devices, async (request) => {
     tabletDiagnostics?.record({ component: 'server.pairing', level: 'info', event: 'pairing.approval.dialog.opening', message: 'Opening Windows pairing approval dialog.', requestId: request.requestId, deviceId: request.deviceId, remoteAddress: request.remoteAddress });
     const options: Electron.MessageBoxOptions = {
@@ -219,12 +256,20 @@ async function initializeTabletServer() {
   const protocolSchemaRoot = app.isPackaged
     ? path.join(process.resourcesPath, 'protocol-schemas')
     : path.join(app.getAppPath(), 'shared', 'protocol', 'schemas');
+  const serverId = stableServerId();
   prompterServer = new PrompterServer({
-    serverId: stableServerId(), productVersion: app.getVersion(), computerName: hostname(),
+    serverId, productVersion: app.getVersion(), computerName: hostname(),
     buildInfo: electronBuildIdentity(),
     port: Number(process.env.PROMPTER_SERVER_PORT || 43127), pairing, devices, discovery, session: serverSession,
+    checkpoints: narrationCheckpoints,
     protocolValidator: new ProtocolValidator(protocolSchemaRoot),
     diagnostics: tabletDiagnostics,
+    onRecoveryAdopted: (state) => mainWindow?.webContents.send('tablet-server:sessionState', {
+      origin: 'tablet',
+      deviceId: serverSession.getControllerDeviceId(),
+      state,
+      movementSuppressedOnDesktop: Boolean(serverSession.getControllerDeviceId())
+    }),
     whisperSettings: {
       pythonExecutablePath: 'python', modelName: 'base.en', device: 'cpu', computeType: 'int8', chunkDurationSeconds: 2
     },
@@ -234,6 +279,7 @@ async function initializeTabletServer() {
       durationSeconds: chunk.durationSeconds, headerSignature: chunk.wav.subarray(0, 12).toString('hex'), settings
     })
   });
+  prompterServer.beginStartupRecovery();
   trayController = new TrayController({
     openPrompter: restoreMainWindow,
     hidePrompter: () => mainWindow?.hide(),
@@ -271,7 +317,33 @@ async function initializeTabletServer() {
     appendDiagnosticLog('tablet-server-status', {
       state: status.state, bindAddress: status.bindAddress, port: status.port, lastError: status.lastError
     });
+    usbTransport?.observeConnectedDevices(status.connectedDevices);
   });
+  usbTransport = new AdbTransportService({
+    rootDirectory: app.getAppPath(),
+    ensureServer: async () => {
+      if (!prompterServer) throw new Error('Tablet server is unavailable.');
+      if (!prompterServer.getStatus().enabled) await prompterServer.enable();
+      return { serverId, port: prompterServer.getStatus().port };
+    },
+    onStatus: (status) => {
+      tabletDiagnostics?.record({
+        component: 'server.usb',
+        level: status.state === 'error' || status.state === 'multiple-devices' ? 'warn' : 'info',
+        event: `usb.${status.state}`,
+        message: status.message,
+        details: {
+          mode: status.mode,
+          selectedSerial: status.selectedSerial,
+          authorizedDevices: status.devices.filter((device) => device.state === 'authorized').length,
+          tabletLocalPort: status.tabletLocalPort,
+          desktopServerPort: status.desktopServerPort
+        }
+      });
+      prompterServer?.setUsbTransportStatus(status);
+    }
+  });
+  usbTransport.start();
   serverSession.onState((state) => {
     if (serverSession.getAuthority() === 'tablet') mainWindow?.webContents.send('tablet-server:sessionState', {
       origin: 'tablet', deviceId: serverSession.getControllerDeviceId(), state, movementSuppressedOnDesktop: true
@@ -334,8 +406,13 @@ async function shutdownAndQuit() {
     whisperService.disposeStatusPublication();
     whisperStatusPublisher.dispose();
     prompterServer?.stopPairing();
+    await usbTransport?.stop();
     await prompterServer?.shutdown();
+    await narrationCheckpoints?.flush();
     await whisperService.stop();
+    await manuscriptPrepService.dispose();
+    await tabletDiagnostics?.flush();
+    await mainDiagnosticLog?.flush();
     liveTabletLog?.close();
     trayController?.destroy();
   } finally {
@@ -709,7 +786,7 @@ app.on('second-instance', restoreMainWindow);
 if (hasSingleInstanceLock) app.whenReady().then(async () => {
   createMainWindow();
   installApplicationMenu();
-  await initializeTabletServer();
+  if (process.env.PROMPTER_DISABLE_TABLET !== '1' && (!isReleaseCandidate || process.env.PROMPTER_ENABLE_TABLET === '1')) await initializeTabletServer();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -758,6 +835,32 @@ async function openManuscriptFile() {
 ipcMain.handle('dialog:openManuscriptFile', openManuscriptFile);
 ipcMain.handle('dialog:openTextFile', openManuscriptFile);
 
+ipcMain.handle('manuscript-prep:importTxt', async (_event, projectId: string) => {
+  if (typeof projectId !== 'string' || !/^project_[a-zA-Z0-9-]{1,80}$/.test(projectId)) throw new Error('Invalid project ID.');
+  const owner = BrowserWindow.getFocusedWindow() ?? mainWindow ?? undefined;
+  const result = owner
+    ? await dialog.showOpenDialog(owner, { title: 'Prepare manuscript', properties: ['openFile'], filters: [{ name: 'TXT, Word and selectable PDF documents', extensions: ['txt', 'text', 'docx', 'pdf'] }] })
+    : await dialog.showOpenDialog({ title: 'Prepare manuscript', properties: ['openFile'], filters: [{ name: 'TXT, Word and selectable PDF documents', extensions: ['txt', 'text', 'docx', 'pdf'] }] });
+  if (result.canceled || !result.filePaths[0]) return null;
+  const inspected = await manuscriptPrepService.inspect(projectId, result.filePaths[0]);
+  if (!inspected.ok) return { inspected, extracted: null };
+  return { inspected, extracted: await manuscriptPrepService.extract(projectId, result.filePaths[0]) };
+});
+ipcMain.handle('manuscript-prep:getDraft', (_event, projectId: string, draftId: string) => manuscriptPrepService.getDraft(projectId, draftId));
+ipcMain.handle('manuscript-prep:applyReviewChange', (_event, projectId: string, draftId: string, expectedRevision: number, operation: unknown, idempotencyKey?: string) =>
+  manuscriptPrepService.applyReviewChange(projectId, draftId, expectedRevision, operation as never, idempotencyKey));
+ipcMain.handle('manuscript-prep:approve', (_event, projectId: string, draftId: string, expectedRevision: number, idempotencyKey?: string) => manuscriptPrepService.approve(projectId, draftId, expectedRevision, idempotencyKey));
+ipcMain.handle('manuscript-prep:cancel', (_event, projectId: string, targetRequestId: string) => manuscriptPrepService.cancel(projectId, targetRequestId));
+ipcMain.handle('manuscript-prep:getProjectSummary', (_event, projectId: string) => manuscriptPrepService.projectSummary(projectId));
+ipcMain.handle('manuscript-prep:readApproved', (_event, projectId: string, approvedId: string) => manuscriptPrepService.approved(projectId, approvedId));
+ipcMain.handle('manuscript-prep:exportApproved', async (_event, projectId: string, approvedId: string) => {
+  await manuscriptPrepService.approved(projectId, approvedId);
+  const chosen = await dialog.showSaveDialog({ title: 'Export approved UTF-8 manuscript as a new file', defaultPath: 'approved-manuscript.txt', filters: [{ name: 'UTF-8 text', extensions: ['txt'] }] });
+  if (chosen.canceled || !chosen.filePath) return null;
+  return manuscriptPrepService.export(projectId, approvedId, chosen.filePath);
+});
+ipcMain.handle('manuscript-prep:getActiveProjectId', () => manuscriptPrepService.activeProjectId());
+
 ipcMain.handle('window:toggleFullScreen', (event) => {
   const win = BrowserWindow.fromWebContents(event.sender);
   if (!win) return false;
@@ -770,6 +873,17 @@ ipcMain.handle('window:toggleAlwaysOnTop', (event) => {
   if (!win) return false;
   win.setAlwaysOnTop(!win.isAlwaysOnTop(), 'screen-saver');
   return win.isAlwaysOnTop();
+});
+const manuscriptPrepService = new ManuscriptPrepService({
+  runtimePathContext,
+  getUserDataPath: () => app.getPath('userData'),
+  appendDiagnosticLog: (entry) => appendDiagnosticLog(entry.event, {
+    requestId: entry.requestId,
+    operation: entry.operation,
+    code: entry.code,
+    generation: entry.generation,
+    message: entry.message
+  })
 });
 
 ipcMain.handle('app:quit', () => {
@@ -908,6 +1022,8 @@ ipcMain.handle('bridge:getDiagnostics', () => {
 
 ipcMain.handle('tablet-server:syncSession', (_event, sync: RendererSessionSync) => {
   const result = serverSession.applyRendererSync(sync);
+  prompterServer?.beginStartupRecovery();
+  if (result.accepted && sync.transcriptSourceActive) prompterServer?.checkpointDesktopNarrationPosition();
   if (result.accepted && !result.duplicate) prompterServer?.broadcastSnapshot();
   return result;
 });
@@ -918,6 +1034,20 @@ ipcMain.handle('tablet-server:prepare', async () => {
   if (!prompterServer.getStatus().enabled) await prompterServer.enable();
   prompterServer.startPairing();
   return prompterServer.getStatus();
+});
+ipcMain.handle('tablet-usb:setMode', (_event, mode: UsbTransportMode) => {
+  if (!['auto', 'lan-only', 'usb-only'].includes(mode)) throw new Error('Invalid USB transport mode.');
+  usbTransport?.setMode(mode);
+  return usbTransport?.getStatus() ?? null;
+});
+ipcMain.handle('tablet-usb:selectDevice', (_event, serial: string | null) => {
+  if (serial !== null && (typeof serial !== 'string' || serial.length > 200)) throw new Error('Invalid ADB device serial.');
+  usbTransport?.selectDevice(serial);
+  return usbTransport?.getStatus() ?? null;
+});
+ipcMain.handle('tablet-usb:retry', () => {
+  usbTransport?.retryNow();
+  return usbTransport?.getStatus() ?? null;
 });
 ipcMain.handle('tablet-log:getEvents', () => tabletDiagnostics?.list() ?? []);
 ipcMain.handle('tablet-log:copy', (_event, events: StructuredDiagnosticEvent[]) => {
@@ -959,7 +1089,7 @@ ipcMain.handle('local-whisper:stop', async () => {
 });
 
 ipcMain.handle('local-whisper:recordTelemetry', (_event, aggregate: LocalWhisperTelemetryAggregate) => {
-  if (!aggregate || aggregate.schemaVersion !== 1) return false;
+  if (!aggregate || (aggregate.schemaVersion !== 1 && aggregate.schemaVersion !== 2)) return false;
   const serialized = JSON.stringify(aggregate);
   if (serialized.length > 64 * 1024) return false;
   const mainQueue = whisperService.takeQueueTelemetry();

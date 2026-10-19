@@ -152,6 +152,14 @@ textarea {
   min-height: 30px;
 }
 
+.narration-bar-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+  white-space: nowrap;
+}
+
 .narration-primary {
   min-width: 78px;
   border-color: rgba(121, 208, 189, 0.7);
@@ -1312,6 +1320,15 @@ kbd {
 .empty-manuscript {
   color: var(--muted);
 }
+
+.prep-entry-button { white-space: nowrap; }
+.prep-workspace { position: fixed; z-index: 30; inset: 24px; overflow: auto; background: var(--surface, #17202b); color: var(--text, #f5f7fa); border: 1px solid var(--line); border-radius: 10px; padding: 22px; box-shadow: 0 18px 60px #0009; }
+.prep-workspace header { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+.prep-workspace h2 { font-size: 1rem; margin-top: 22px; }
+.prep-status { margin-left: 12px; padding: 3px 8px; border-radius: 12px; font-size: .8rem; background: #52606d; }
+.prep-ready { background: #286d4b; }.prep-approved { background: #16723c; }.prep-failed { background: #9b293c; }.prep-incomplete { background: #8a6322; }
+.prep-message { max-width: 800px; }.prep-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.prep-workspace textarea { display: block; box-sizing: border-box; width: 100%; min-height: 90px; margin: 12px 0; padding: 10px; }
 
 @media (max-width: 980px) {
   .app-shell {

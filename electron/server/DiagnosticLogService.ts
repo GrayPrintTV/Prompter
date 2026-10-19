@@ -1,6 +1,7 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import type { StructuredDiagnosticEvent } from '#prompter-shared/protocol/diagnostics.js';
+import { BufferedJsonlLog } from '../diagnostics/BoundedJsonlLog.js';
 
 export type DiagnosticInput = Omit<StructuredDiagnosticEvent, 'timestampLocal' | 'timestampMs' | 'sequence' | 'platform'>;
 export type DiagnosticSink = { record(input: DiagnosticInput): StructuredDiagnosticEvent };
@@ -12,12 +13,23 @@ export class DiagnosticLogService implements DiagnosticSink {
   private readonly listeners = new Set<(event: StructuredDiagnosticEvent) => void>();
   private sequence = 0;
   private pausedPersistenceError = false;
+  private readonly persistence: BufferedJsonlLog;
+  private lastUsbConnected: { signature: string; timestampMs: number } | null = null;
 
   constructor(
     readonly logDirectory: string,
     private readonly maxEvents = 1_000,
     private readonly maxFileBytes = 2 * 1024 * 1024
-  ) { mkdirSync(logDirectory, { recursive: true }); }
+  ) {
+    mkdirSync(logDirectory, { recursive: true });
+    this.persistence = new BufferedJsonlLog(this.logPath, {
+      maxFileBytes,
+      onError: (error) => {
+        if (!this.pausedPersistenceError) console.warn('[tablet diagnostics] persistence failed', error);
+        this.pausedPersistenceError = true;
+      }
+    });
+  }
 
   get logPath() { return path.join(this.logDirectory, 'tablet-server.ndjson'); }
 
@@ -33,16 +45,11 @@ export class DiagnosticLogService implements DiagnosticSink {
       deviceId: shorten(input.deviceId), serverId: shorten(input.serverId),
       details: redact(input.details)
     };
+    if (this.shouldCoalesce(event)) return event;
     this.events.push(event);
     if (this.events.length > this.maxEvents) this.events.splice(0, this.events.length - this.maxEvents);
-    try {
-      this.rotateIfNeeded();
-      appendFileSync(this.logPath, `${JSON.stringify(event)}\n`, 'utf8');
-      this.pausedPersistenceError = false;
-    } catch (error) {
-      if (!this.pausedPersistenceError) console.warn('[tablet diagnostics] persistence failed', error);
-      this.pausedPersistenceError = true;
-    }
+    this.persistence.append(event);
+    this.pausedPersistenceError = false;
     for (const listener of this.listeners) listener(event);
     return event;
   }
@@ -57,12 +64,18 @@ export class DiagnosticLogService implements DiagnosticSink {
     catch { return ''; }
   }
 
-  private rotateIfNeeded() {
-    if (!existsSync(this.logPath) || statSync(this.logPath).size < this.maxFileBytes) return;
-    const content = readFileSync(this.logPath);
-    const tail = content.subarray(Math.max(0, content.length - Math.floor(this.maxFileBytes / 2)));
-    const firstLine = tail.indexOf(0x0a);
-    writeFileSync(this.logPath, firstLine >= 0 ? tail.subarray(firstLine + 1) : tail);
+  async flush() { await this.persistence.flush(); }
+
+  private shouldCoalesce(event: StructuredDiagnosticEvent) {
+    if (event.component !== 'server.usb') return false;
+    if (event.event !== 'usb.connected') {
+      this.lastUsbConnected = null;
+      return false;
+    }
+    const signature = JSON.stringify({ event: event.event, message: event.message, details: event.details });
+    const previous = this.lastUsbConnected;
+    this.lastUsbConnected = { signature, timestampMs: event.timestampMs };
+    return Boolean(previous && previous.signature === signature && event.timestampMs - previous.timestampMs < 30_000);
   }
 }
 

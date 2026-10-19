@@ -1,6 +1,7 @@
 package app.prompter.tablet
 
 import android.Manifest
+import android.content.Intent
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
@@ -15,6 +16,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.prompter.tablet.ui.AppNavigation
 import app.prompter.tablet.ui.MainViewModel
 import app.prompter.tablet.ui.Screen
+import app.prompter.tablet.connection.UsbEndpointContract
+import app.prompter.tablet.connection.UsbIntentExtra
 
 class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels()
@@ -22,6 +25,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        handleUsbIntent(intent)
         enableEdgeToEdge()
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         setContent {
@@ -38,6 +42,21 @@ class MainActivity : ComponentActivity() {
             }
             AppNavigation(state, viewModel, onRequestMicrophonePermission = { microphonePermission.launch(Manifest.permission.RECORD_AUDIO) })
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleUsbIntent(intent)
+    }
+
+    private fun handleUsbIntent(intent: Intent?) {
+        if (intent?.action != UsbEndpointContract.ACTION) return
+        val extras = intent.extras?.keySet()?.map { key ->
+            @Suppress("DEPRECATION")
+            UsbIntentExtra(key, intent.extras?.get(key))
+        }.orEmpty()
+        viewModel.handleUsbConnectionIntent(intent.action, extras)
     }
 
     override fun onStart() { super.onStart(); viewModel.onForeground("activity onStart") }

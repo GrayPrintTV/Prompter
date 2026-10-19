@@ -20,6 +20,178 @@ function sync(rendererRevision: number, overrides: Partial<Parameters<ServerSess
 }
 
 describe('ServerSessionBridge', () => {
+  it('uses a validated same-manuscript tablet claim before checkpoint or desktop fallback after restart', () => {
+    const bridge = new ServerSessionBridge();
+    bridge.applyRendererSync(sync(1, { currentTokenIndex: 1 }));
+    const tabletCheckpoint = bridge.createCheckpoint(4, 100)!;
+    const durable = bridge.createCheckpoint(2, 90)!;
+    const decision = bridge.resolveRecovery('tablet-1', tabletCheckpoint.manuscriptHash, {
+      schemaVersion: 1,
+      manuscriptId: tabletCheckpoint.manuscriptId,
+      contentHash: tabletCheckpoint.manuscriptHash,
+      manuscriptRevision: tabletCheckpoint.manuscriptRevision,
+      tokenIndex: tabletCheckpoint.tokenIndex,
+      character: tabletCheckpoint.character,
+      sentenceIndex: tabletCheckpoint.sentenceIndex,
+      paragraphIndex: tabletCheckpoint.paragraphIndex,
+      anchorFingerprint: tabletCheckpoint.anchorFingerprint,
+      capturedAtMs: 101
+    }, durable);
+    expect(decision).toEqual(expect.objectContaining({ source: 'tablet', accepted: true, acceptedTokenIndex: 4 }));
+    expect(bridge.getSnapshot()?.acceptedPosition.tokenIndex).toBe(4);
+  });
+
+  it('uses a valid durable checkpoint when no tablet recovery claim is available', () => {
+    const bridge = new ServerSessionBridge();
+    bridge.applyRendererSync(sync(1, { currentTokenIndex: 1 }));
+    const durable = bridge.createCheckpoint(4, 90)!;
+    const decision = bridge.resolveRecovery('tablet-1', durable.manuscriptHash, null, durable);
+    expect(decision).toEqual(expect.objectContaining({ source: 'durable-checkpoint', accepted: true, acceptedTokenIndex: 4 }));
+  });
+
+  it('lets explicit beginning and Windows-view intent override automatic tablet recovery', () => {
+    const bridge = new ServerSessionBridge();
+    bridge.applyRendererSync(sync(1, { currentTokenIndex: 3 }));
+    const position = bridge.createCheckpoint(4, 100)!;
+    const claim = {
+      schemaVersion: 1 as const, manuscriptId: position.manuscriptId, contentHash: position.manuscriptHash,
+      manuscriptRevision: position.manuscriptRevision, tokenIndex: position.tokenIndex, character: position.character,
+      sentenceIndex: position.sentenceIndex, paragraphIndex: position.paragraphIndex,
+      anchorFingerprint: position.anchorFingerprint, capturedAtMs: 101
+    };
+    bridge.selectTabletStartPolicy('beginning');
+    expect(bridge.resolveRecovery('tablet-1', position.manuscriptHash, claim, position)).toEqual(expect.objectContaining({
+      source: 'explicit-beginning', acceptedTokenIndex: 0
+    }));
+
+    const windows = new ServerSessionBridge();
+    windows.applyRendererSync(sync(1, { currentTokenIndex: 3 }));
+    windows.selectTabletPositionFromWindowsView();
+    expect(windows.resolveRecovery('tablet-1', position.manuscriptHash, claim, position)).toEqual(expect.objectContaining({
+      source: 'desktop', acceptedTokenIndex: 3
+    }));
+  });
+
+  it('blocks manuscript mismatch and rejects invalid or out-of-range recovery records safely', () => {
+    const bridge = new ServerSessionBridge();
+    bridge.applyRendererSync(sync(1, { currentTokenIndex: 2 }));
+    const position = bridge.createCheckpoint(4, 100)!;
+    expect(bridge.resolveRecovery('tablet-1', `sha256:${'0'.repeat(64)}`, null, position)).toEqual(expect.objectContaining({
+      accepted: false, blocked: true
+    }));
+    const invalid = { ...position, tokenIndex: 999_999 };
+    expect(bridge.resolveRecovery('tablet-1', position.manuscriptHash, null, invalid)).toEqual(expect.objectContaining({
+      source: 'desktop', acceptedTokenIndex: 2,
+      rejectedCandidates: [{ source: 'durable-checkpoint', reason: 'token index is out of range' }]
+    }));
+
+    const mismatchedClaim = {
+      schemaVersion: 1 as const, manuscriptId: 'another-book', contentHash: position.manuscriptHash,
+      manuscriptRevision: position.manuscriptRevision, tokenIndex: position.tokenIndex, character: position.character,
+      sentenceIndex: position.sentenceIndex, paragraphIndex: position.paragraphIndex,
+      anchorFingerprint: position.anchorFingerprint, capturedAtMs: 101
+    };
+    expect(bridge.resolveRecovery('tablet-1', null, mismatchedClaim, null)).toEqual(expect.objectContaining({
+      accepted: false, blocked: true, acceptedTokenIndex: null
+    }));
+  });
+
+  it('makes duplicate recovery claims idempotent and fences a claim arriving after narration starts', () => {
+    const bridge = new ServerSessionBridge();
+    bridge.applyRendererSync(sync(1, { currentTokenIndex: 1 }));
+    const position = bridge.createCheckpoint(4, 100)!;
+    const claim = {
+      schemaVersion: 1 as const, manuscriptId: position.manuscriptId, contentHash: position.manuscriptHash,
+      manuscriptRevision: position.manuscriptRevision, tokenIndex: position.tokenIndex, character: position.character,
+      sentenceIndex: position.sentenceIndex, paragraphIndex: position.paragraphIndex,
+      anchorFingerprint: position.anchorFingerprint, capturedAtMs: 101
+    };
+    bridge.resolveRecovery('tablet-1', position.manuscriptHash, claim, null);
+    const revisionAfterFirstClaim = bridge.getState()!.sessionRevision;
+    bridge.resolveRecovery('tablet-1', position.manuscriptHash, claim, null);
+    expect(bridge.getState()!.sessionRevision).toBe(revisionAfterFirstClaim);
+
+    const fallback = new ServerSessionBridge();
+    fallback.applyRendererSync(sync(1, { currentTokenIndex: 1 }));
+    const latePosition = fallback.createCheckpoint(4, 100)!;
+    fallback.resolveRecovery('tablet-1', latePosition.manuscriptHash, null, null);
+    fallback.acquireController('tablet-1');
+    const started = fallback.startTabletNarration('tablet-1', 'stream-1');
+    const late = fallback.resolveRecovery('tablet-1', latePosition.manuscriptHash, {
+      ...claim,
+      manuscriptId: latePosition.manuscriptId,
+      contentHash: latePosition.manuscriptHash,
+      manuscriptRevision: latePosition.manuscriptRevision,
+      tokenIndex: latePosition.tokenIndex,
+      character: latePosition.character,
+      sentenceIndex: latePosition.sentenceIndex,
+      paragraphIndex: latePosition.paragraphIndex,
+      anchorFingerprint: latePosition.anchorFingerprint
+    }, null);
+    expect(late).toEqual(expect.objectContaining({
+      acceptedTokenIndex: 1,
+      narrationSessionIdBefore: started.narrationSessionId,
+      reason: 'Active same-process narration remains authoritative.'
+    }));
+    expect(fallback.getState()!.currentTokenIndex).toBe(1);
+  });
+
+  it('lets an explicit beginning command win when it races after automatic tablet adoption', () => {
+    const bridge = new ServerSessionBridge();
+    bridge.applyRendererSync(sync(1, { currentTokenIndex: 1 }));
+    const position = bridge.createCheckpoint(4, 100)!;
+    bridge.resolveRecovery('tablet-1', position.manuscriptHash, {
+      schemaVersion: 1,
+      manuscriptId: position.manuscriptId,
+      contentHash: position.manuscriptHash,
+      manuscriptRevision: position.manuscriptRevision,
+      tokenIndex: position.tokenIndex,
+      character: position.character,
+      sentenceIndex: position.sentenceIndex,
+      paragraphIndex: position.paragraphIndex,
+      anchorFingerprint: position.anchorFingerprint,
+      capturedAtMs: 101
+    }, position);
+    bridge.selectTabletStartPolicy('beginning');
+    bridge.acquireController('tablet-1');
+    const started = bridge.startTabletNarration('tablet-1', 'stream-1');
+    expect(started).toEqual(expect.objectContaining({
+      recoverySource: 'explicit-beginning',
+      acceptedCharacter: 0
+    }));
+    expect(bridge.getState()!.currentTokenIndex).toBe(0);
+  });
+
+  it('does not turn a renderer viewport projection into the tablet reading checkpoint', () => {
+    const bridge = new ServerSessionBridge();
+    bridge.applyRendererSync(sync(1, { currentTokenIndex: 4 }));
+    bridge.acquireController('tablet-1');
+    bridge.selectTabletPositionFromWindowsView();
+    bridge.startTabletNarration('tablet-1', 'stream-1');
+    const confirmed = bridge.createCheckpoint()!;
+
+    bridge.applyRendererSync(sync(2, { currentTokenIndex: 1 }));
+
+    expect(bridge.createCheckpoint()).toEqual(expect.objectContaining({
+      tokenIndex: confirmed.tokenIndex,
+      character: confirmed.character
+    }));
+  });
+
+  it('fences stale desktop projection until durable recovery is acknowledged, then checkpoints narration advancement', () => {
+    const bridge = new ServerSessionBridge();
+    bridge.applyRendererSync(sync(1, { currentTokenIndex: 0 }));
+    const durable = bridge.createCheckpoint(4, 100)!;
+    bridge.resolveRecovery('no-tablet-connected', null, null, durable);
+
+    bridge.applyRendererSync(sync(2, { currentTokenIndex: 1 }));
+    expect(bridge.getState()!.currentTokenIndex).toBe(4);
+
+    bridge.applyRendererSync(sync(3, { currentTokenIndex: 4 }));
+    bridge.applyRendererSync(sync(4, { currentTokenIndex: 5, transcriptSourceActive: true }));
+    expect(bridge.createDesktopNarrationCheckpoint()).toEqual(expect.objectContaining({ tokenIndex: 5 }));
+  });
+
   it('uses the exact same coordinator implementation in renderer and Electron imports', () => {
     expect(RendererCoordinator).toBe(SharedCoordinator);
     expect(new ServerSessionBridge()).toBeInstanceOf(ServerSessionBridge);

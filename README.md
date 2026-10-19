@@ -203,6 +203,14 @@ The Android fast-scroll thumb reports settled navigation through the authenticat
 
 Developer mode includes a compact `Movement decision` diagnostic area. It shows the latest confirmed manuscript token, proposed lookahead target, prior fresh anchor, token/line delta, current Reading Lookahead, time since the last high-confidence anchor, a 160 WPM diagnostic pace prior, expected progress corridor, confidence, retake/duplicate/jump penalty flags when available, final outcome, plain-English reason, and the last 10 movement decisions. The 160 WPM value is observability only; it does not force scrolling or change alignment acceptance.
 
+## Automatic USB tablet transport
+
+The existing authenticated tablet WebSocket protocol can travel over USB without changing pairing credentials or session ownership. When the desktop finds exactly one authorized Android device through an installed Android SDK `adb`, it waits briefly for cable stability, enables the tablet server if necessary, creates `adb reverse tcp:43128 tcp:<server-port>`, and sends an explicit component/action with separately typed server-ID, integer-port, and transport-mode extras. The restricted values contain no remote-shell metacharacters, and Android validates the complete contract before connecting. ADB is discovered from `PROMPTER_ADB_PATH`, `ANDROID_SDK_ROOT`/`ANDROID_HOME`, `android/local.properties`, or the conventional user SDK/PATH. Platform Tools are not bundled or downloaded by the app.
+
+Android tries the supplied `127.0.0.1:43128` endpoint with the same challenge/HMAC authentication used on LAN. During an already healthy LAN connection it authenticates USB first, atomically promotes the new socket, then closes LAN. Removing USB automatically schedules the stored LAN endpoint; controller authority, narration session, manuscript position, and manual anchor remain server-owned. Socket and audio generations reject messages from the retired transport.
+
+Zero, offline, or unauthorized USB devices leave LAN untouched. Multiple authorized devices are never guessed: select one under Advanced diagnostics. Failed launches and absent handshakes use bounded exponential retries and then pause until device topology or an explicit Advanced retry changes eligibility. That panel also offers Automatic, LAN only, and USB only troubleshooting choices and reports missing ADB, authorization, reverse, launch, and tablet-authentication failures.
+
 ## Narration mode
 
 During narration, the left control panel can be hidden with the top-bar `Hide Controls` button or `Ctrl+Alt+C`. The prompter remains full-screen with an always-visible top bar containing:

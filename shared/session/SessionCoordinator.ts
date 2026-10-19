@@ -427,7 +427,8 @@ export class SessionCoordinator {
         normalizedTokens: words,
         moveDecision: 'ignored stale pre-anchor transcript',
         retentionDecision: 'discarded',
-        retentionReason: reason
+        retentionReason: reason,
+        rejectionCategory: 'stale-pre-anchor'
       };
       this.recordMovement({
         source: delta.source,
@@ -450,7 +451,8 @@ export class SessionCoordinator {
       this.followState = nextState;
       this.alignmentBufferDebug = {
         ...EMPTY_SESSION_ALIGNMENT_DEBUG, source: delta.source, rawTranscript: raw,
-        moveDecision: 'held empty transcript', retentionDecision: 'discarded', retentionReason: 'empty transcript'
+        moveDecision: 'held empty transcript', retentionDecision: 'discarded', retentionReason: 'empty transcript',
+        rejectionCategory: 'empty-transcript'
       };
       this.recordMovement({
         source: delta.source, previousTokenIndex: this.currentTokenIndex,
@@ -518,6 +520,7 @@ export class SessionCoordinator {
     let movementFollowState = this.followState;
     let finalMovement: MovementDecisionOutcome = 'held';
     let movementContext = '';
+    let rejectionCategory: AlignmentBufferDebug['rejectionCategory'];
     const freshHighConfidenceMatch = decision.moveRecommended && decision.result.confidence >= HIGH_CONFIDENCE;
     const nearManualAnchor = Boolean(manualAnchor && isNearManualVisibleAnchor(decision.result.tokenIndex, manualAnchor.visibleTokenIndex));
     const allowsBackward = Boolean(manualAnchor && visibleReacquireAllowsBackward(manualAnchor.source, manualAnchor.hadFreshConfirmedAnchor));
@@ -529,6 +532,7 @@ export class SessionCoordinator {
 
     if (this.followState === 'manual' || this.followState === 'paused') {
       moveDecision = 'manual/paused: no follow update'; finalMovement = 'ignored'; movementContext = moveDecision;
+      rejectionCategory = 'manual-or-paused';
       traces.push('manual/paused: moveToToken not called');
     } else if (manualAnchor) {
       if (freshHighConfidenceMatch && nearManualAnchor && !startupBackwardBlocked) {
@@ -550,12 +554,15 @@ export class SessionCoordinator {
         if (startupBackwardBlocked) {
           moveDecision = `auto-backward candidate held: ${decision.result.tokenIndex} < confirmed ${previousToken}`;
           movementContext = 'auto-backward candidate held after startup; possible rollback/reread';
+          rejectionCategory = 'manual-anchor-backward';
         } else if (manualAnchor.source === 'startup') {
           moveDecision = freshHighConfidenceMatch ? `held because startup match was outside visible neighborhood ${manualAnchor.visibleTokenIndex}` : `held: waiting for cold-start match near visible anchor ${manualAnchor.visibleTokenIndex}`;
           movementContext = freshHighConfidenceMatch ? `held because startup match was outside visible neighborhood; startup visible anchor token=${manualAnchor.visibleTokenIndex}` : `startup visible anchor reacquire pending; visible anchor token=${manualAnchor.visibleTokenIndex}`;
+          rejectionCategory = 'manual-anchor-outside-neighborhood';
         } else {
           moveDecision = freshHighConfidenceMatch ? `held: high-confidence match not near visible anchor ${manualAnchor.visibleTokenIndex}` : `held: waiting to reacquire near visible anchor ${manualAnchor.visibleTokenIndex}`;
           movementContext = `manual scroll reacquire pending; visible anchor token=${manualAnchor.visibleTokenIndex}`;
+          rejectionCategory = 'manual-anchor-outside-neighborhood';
         }
         traces.push(`moveToToken called: NO (${moveDecision})`);
         this.traceManualAnchorHold(traces, manualAnchor, moveDecision);
@@ -564,6 +571,7 @@ export class SessionCoordinator {
       this.followState = 'holding'; movementFollowState = 'holding';
       moveDecision = `auto-backward candidate held: ${decision.result.tokenIndex} < confirmed ${previousToken}`;
       movementContext = 'auto-backward candidate held; possible rollback/reread';
+      rejectionCategory = 'automatic-backward';
       traces.push(`moveToToken called: NO (${moveDecision})`);
     } else if (freshHighConfidenceMatch) {
       this.lowConfidenceCount = 0;
@@ -587,6 +595,7 @@ export class SessionCoordinator {
       this.followState = nextState; movementFollowState = nextState;
       moveDecision = staleHighConfidence ? 'held: current delta did not contribute a manuscript anchor' : `held state=${nextState} confidence below threshold`;
       movementContext = moveDecision;
+      rejectionCategory = staleHighConfidence ? 'stale-context' : 'low-confidence';
       traces.push(staleHighConfidence ? `moveToToken called: NO state=${nextState} (stale context)` : `moveToToken called: NO state=${nextState} (low-conf)`);
     }
 
@@ -609,7 +618,8 @@ export class SessionCoordinator {
       newDeltaDistinctiveMatchedWordCount: decision.newDeltaDistinctiveMatchedWordCount,
       commitRejectedReason: decision.commitRejectedReason ?? undefined,
       lowConfidenceCount: this.lowConfidenceCount,
-      lostOrResyncing: this.followState === 'lost' || this.followState === 'resyncing'
+      lostOrResyncing: this.followState === 'lost' || this.followState === 'resyncing',
+      rejectionCategory: moved ? undefined : (wasLost ? 'bounded-reacquire' : rejectionCategory ?? 'unknown')
     };
     if (wasLost) Object.assign(this.alignmentBufferDebug, this.reacquireDebug(delta, words, decision.result, 'rejected', 'bounded forward candidate did not meet strong evidence requirements'));
   }

@@ -10,6 +10,7 @@ type Props = {
   isPaused: boolean;
   onStartStop(): void;
   onTogglePause(): void;
+  onOpenManuscriptPrep(): void;
   onToggleControls(): void;
 };
 
@@ -23,6 +24,7 @@ export function NarrationBar({
   isPaused,
   onStartStop,
   onTogglePause,
+  onOpenManuscriptPrep,
   onToggleControls
 }: Props) {
   return (
@@ -53,9 +55,14 @@ export function NarrationBar({
       <div className="narration-warning-text" title={status.warning ?? ''}>
         {status.warning ?? ''}
       </div>
-      <button type="button" onClick={onToggleControls}>
+      <div className="narration-bar-actions">
+        <button className="prep-entry-button" type="button" onClick={onOpenManuscriptPrep}>
+          Manuscript Prep
+        </button>
+        <button type="button" onClick={onToggleControls}>
         {controlsVisible ? 'Hide Controls' : 'Controls'}
-      </button>
+        </button>
+      </div>
     </div>
   );
 }

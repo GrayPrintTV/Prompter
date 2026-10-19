@@ -24,7 +24,7 @@ import kotlinx.serialization.KSerializer
 
 class PrompterConnectionRepository(
     private val scope: CoroutineScope,
-    private val socket: WebSocketClient,
+    initialSocket: WebSocketClient,
     private val codec: ProtocolCodec,
     private val credentials: CredentialStore,
     private val pairedServers: PairedServerStore,
@@ -33,8 +33,11 @@ class PrompterConnectionRepository(
     private val log: DiagnosticLogger,
     private val networkPreflight: NetworkPreflight,
     private val reconnectPolicy: ReconnectPolicy = ReconnectPolicy(),
-    private val streamRegistrationAckTimeoutMs: Long = 1_500
+    private val streamRegistrationAckTimeoutMs: Long = 1_500,
+    socketFactory: (() -> WebSocketClient)? = null
 ) : WebSocketEvents {
+    private var socket = initialSocket
+    private val createSocket = socketFactory ?: { WebSocketClient(log) }
     private val _state = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     val state: StateFlow<ConnectionState> = _state.asStateFlow()
     private val _diagnostics = MutableStateFlow(ConnectionDiagnostics())
@@ -62,6 +65,11 @@ class PrompterConnectionRepository(
     private val streamRegistration = AudioStreamRegistrationTracker()
     private val pendingManualReposition = PendingManualRepositionTracker()
     private val snapshotSync = SnapshotSyncAssembler()
+    private var lanFallback: DiscoveredServer? = null
+    private var transportPreference = TransportPreference.AUTO
+    private var candidateSocket: WebSocketClient? = null
+    private var candidateAuthTimeout: Job? = null
+    private val transportGenerationFence = TransportGenerationFence()
 
     fun pair(target: DiscoveredServer, request: PairRequest) {
         log.record("pairing", "info", "pairing.user.requested", "User requested pairing.", deviceId = request.deviceId, serverId = target.serverId, remoteAddress = target.endpoint, details = mapOf("source" to if (target.manual) "manual" else "discovery", "hasCode" to (request.pairingCode != null).toString()))
@@ -72,12 +80,40 @@ class PrompterConnectionRepository(
     fun connect(target: DiscoveredServer) {
         log.record("connection", "info", "connection.user.requested", "User requested connection.", serverId = target.serverId, remoteAddress = target.endpoint, details = mapOf("source" to if (target.manual) "manual" else "discovery"))
         pendingPair = null
+        if (target.transport != "usb-adb-reverse") lanFallback = target
         connectInternal(target)
+    }
+
+    fun setLanFallback(target: DiscoveredServer) {
+        require(target.transport != "usb-adb-reverse") { "LAN fallback cannot use the USB endpoint." }
+        lanFallback = target
+    }
+
+    fun hasConnectionTarget() = server != null || candidateSocket != null
+
+    fun preferUsb(endpoint: UsbEndpoint) {
+        transportPreference = endpoint.preference
+        if (endpoint.preference == TransportPreference.LAN_ONLY) {
+            val fallback = lanFallback
+            if (server?.transport == "usb-adb-reverse" && fallback != null) {
+                if (authenticated && socketOpen) beginAuthenticatedHandoff(fallback)
+                else connectInternal(fallback, "LAN-only diagnostics preference selected")
+            }
+            return
+        }
+        val target = endpoint.discovered()
+        val current = server
+        if (current?.transport == "usb-adb-reverse" && current.endpoint == target.endpoint && authenticated) return
+        if (authenticated && socketOpen && current != null) beginAuthenticatedHandoff(target)
+        else connectInternal(target, "USB endpoint selected before LAN authentication")
     }
 
     fun disconnect() {
         manualDisconnect = true
-        reconnectJob?.cancel(); authTimeout?.cancel(); streamRegistrationTimeout?.cancel(); socket.close()
+        transportGenerationFence.activate()
+        reconnectJob?.cancel(); authTimeout?.cancel(); candidateAuthTimeout?.cancel(); streamRegistrationTimeout?.cancel(); socket.close()
+        candidateSocket?.close("user requested disconnect")
+        candidateSocket = null
         authenticated = false; socketOpen = false
         desiredControllerRequest = null
         registeredAudioStreamId = null
@@ -94,7 +130,10 @@ class PrompterConnectionRepository(
             serverAudioConnectionGeneration = null,
             streamRegistrationAttempts = 0,
             pendingManualAnchorTokenIndex = null,
-            pendingManualAnchorReason = null
+            pendingManualAnchorReason = null,
+            activeTransport = "none",
+            candidateTransport = null,
+            transportMessage = "Disconnected by user."
         )
         sessions.markDisconnected()
     }
@@ -275,7 +314,13 @@ class PrompterConnectionRepository(
                     authenticated = true; authTimeout?.cancel(); reconnectAttempt = 0
                     val target = server ?: return
                     transition(ConnectionState.Connected(envelope.serverId, target.endpoint), "server authenticated tablet")
-                    _diagnostics.value = _diagnostics.value.copy(authenticationState = "authenticated", lastError = null)
+                    _diagnostics.value = _diagnostics.value.copy(
+                        authenticationState = "authenticated",
+                        activeTransport = target.transportLabel(),
+                        candidateTransport = null,
+                        transportMessage = "Connected over ${target.transportLabel()}.",
+                        lastError = null
+                    )
                     log.record(
                         "connection", "info", "android.connection.authenticated",
                         "Authenticated to server ${envelope.serverId}.",
@@ -323,7 +368,7 @@ class PrompterConnectionRepository(
                         log.record("movement", "info", "android.movement.before_lease", "Movement arrived before the controller lease; ignored while waiting for control.", connectionId = envelope.connectionId, details = mapOf("sequence" to envelope.sequence.toString(), "leaseState" to _diagnostics.value.controllerLeaseState.name, "wedged" to "false"))
                     } else {
                         val decision = sessions.evaluateIncremental(envelope)
-                          if (decision.accepted) sessions.applyMovement(movement, "${movement.sessionRevision}:${envelope.sequence}")
+                        if (decision.accepted) sessions.applyMovement(movement, "${movement.sessionRevision}:${envelope.sequence}")
                         else { sessions.recordMovementRejection(decision.reason ?: "unknown"); log.record("movement", "warn", "android.movement.rejected", "Semantic movement rejected: ${decision.reason}.", connectionId = envelope.connectionId, details = mapOf("reason" to (decision.reason ?: "unknown"))) }
                     }
                 }
@@ -487,16 +532,213 @@ class PrompterConnectionRepository(
         log.record("lifecycle", "info", event, "Android activity lifecycle transition.", connectionId = connectionId, details = mapOf("cause" to cause, "connectionState" to stateName(_state.value), "socketOpen" to socketOpen.toString(), "controllerLease" to _diagnostics.value.controllerLease.toString()))
     }
 
+    private fun forwardingEvents(source: WebSocketClient, generation: Long) = object : WebSocketEvents {
+        private fun current() = socket === source && transportGenerationFence.accepts(generation)
+        override fun onOpen() { if (current()) this@PrompterConnectionRepository.onOpen() }
+        override fun onText(text: String) { if (current()) this@PrompterConnectionRepository.onText(text) }
+        override fun onClosing(code: Int, reason: String) {
+            if (current()) this@PrompterConnectionRepository.onClosing(code, reason)
+        }
+        override fun onClosed(code: Int, reason: String) {
+            if (current()) this@PrompterConnectionRepository.onClosed(code, reason)
+        }
+        override fun onFailure(message: String, exceptionClass: String, httpCode: Int?, responseSummary: String?) {
+            if (current()) this@PrompterConnectionRepository.onFailure(message, exceptionClass, httpCode, responseSummary)
+        }
+    }
+
+    private fun beginAuthenticatedHandoff(target: DiscoveredServer) {
+        if (!isAllowedConnectionTarget(target)) {
+            _diagnostics.value = _diagnostics.value.copy(lastError = "Transport handoff endpoint was rejected.")
+            return
+        }
+        candidateAuthTimeout?.cancel()
+        candidateSocket?.close("replaced by a newer transport candidate")
+        val candidate = createSocket()
+        candidateSocket = candidate
+        _diagnostics.value = _diagnostics.value.copy(
+            candidateTransport = target.transportLabel(),
+            transportMessage = "Authenticating ${target.transportLabel()} before retiring ${server?.transportLabel() ?: "the current transport"}.",
+            lastError = null
+        )
+        log.record(
+            "connection", "info", "android.transport.handoff_started",
+            "Make-before-break transport handoff started.",
+            serverId = target.serverId,
+            remoteAddress = target.endpoint,
+            details = mapOf("from" to (server?.transportLabel() ?: "none"), "to" to target.transportLabel())
+        )
+        candidate.connect(target.endpoint, CandidateEvents(candidate, target))
+    }
+
+    private inner class CandidateEvents(
+        private val candidate: WebSocketClient,
+        private val target: DiscoveredServer
+    ) : WebSocketEvents {
+        private var promoted = false
+        private var incoming = -1L
+        private var outgoing = 0L
+        private var candidateConnectionId = "android-${UUID.randomUUID()}"
+        private var candidateSessionId = "android-pending"
+        private var promotedGeneration = 0L
+
+        override fun onOpen() {
+            if (candidateSocket !== candidate) return
+            candidateAuthTimeout?.cancel()
+            candidateAuthTimeout = scope.launch {
+                delay(10_000)
+                if (!promoted && candidateSocket === candidate) candidateFailed(candidate, target, "${target.transportLabel().uppercase()} authentication timed out.")
+            }
+        }
+
+        override fun onText(text: String) {
+            if (promoted) {
+                if (socket === candidate && transportGenerationFence.accepts(promotedGeneration)) this@PrompterConnectionRepository.onText(text)
+                return
+            }
+            if (candidateSocket !== candidate) return
+            try {
+                val envelope = codec.decodeEnvelope(text)
+                require(envelope.sequence > incoming) { "Stale candidate transport message." }
+                incoming = envelope.sequence
+                candidateConnectionId = envelope.connectionId
+                candidateSessionId = envelope.sessionId
+                when (envelope.type) {
+                    "serverChallenge" -> authenticateCandidate(envelope)
+                    "authenticated" -> promoteCandidate(envelope)
+                    "authenticationFailed", "protocolError" -> candidateFailed(candidate, target, "${target.transportLabel().uppercase()} authentication was rejected.")
+                    else -> throw IllegalArgumentException("Transport candidate sent ${envelope.type} before authentication completed.")
+                }
+            } catch (error: Exception) {
+                candidate.rejectProtocolMessage("Invalid transport handoff message")
+                candidateFailed(candidate, target, error.message ?: "Transport handoff protocol failed.")
+            }
+        }
+
+        private fun authenticateCandidate(envelope: ProtocolEnvelope) {
+            val challenge = codec.decodePayload<ServerChallenge>(envelope)
+            require(challenge.serverId == target.serverId) { "Candidate server identity did not match the requested desktop." }
+            require(kotlin.math.abs(System.currentTimeMillis() - challenge.issuedAtMs) <= 30_000) { "Candidate server challenge is stale." }
+            val credential = credentials.load(challenge.serverId)
+                ?: throw IllegalArgumentException("This desktop is not paired on the tablet.")
+            val clientNonce = UUID.randomUUID().toString()
+            val recoveryClaim = sessions.recoveryClaim().takeIf {
+                challenge.recoveryClaimRequested && (challenge.protocolMinor ?: 0) >= 3
+            }
+            val authentication = Authenticate(
+                deviceId = deviceId(),
+                clientNonce = clientNonce,
+                timestampMs = System.currentTimeMillis(),
+                proof = Authentication.proof(
+                    credential, challenge.nonce, clientNonce, challenge.serverId, deviceId(), ProtocolVersion.MAJOR,
+                    recoveryClaim
+                ),
+                clientBuild = AppBuildIdentity.payload,
+                cachedManuscriptHash = sessions.cachedManuscriptHash(),
+                recoveryClaim = recoveryClaim
+            )
+            val encoded = codec.encodeEnvelope(
+                "authenticate", authentication, Authenticate.serializer(), challenge.serverId,
+                candidateSessionId, candidateConnectionId, outgoing++
+            )
+            require(candidate.send(encoded)) { "Candidate authentication response could not be queued." }
+        }
+
+        private fun promoteCandidate(envelope: ProtocolEnvelope) {
+            require(envelope.serverId == target.serverId) { "Authenticated server identity changed during handoff." }
+            val retiring = socket
+            val previousTransport = server?.transportLabel() ?: "none"
+            val decision = transportPromotionDecision(candidateAuthenticated = true, identityMatches = envelope.serverId == target.serverId)
+            require(decision.promote && decision.preserveNarrationSession) { decision.reason }
+            promoted = true
+            promotedGeneration = transportGenerationFence.activate()
+            candidateAuthTimeout?.cancel()
+            candidateAuthTimeout = null
+            candidateSocket = null
+            socket = candidate
+            server = target
+            connectionId = envelope.connectionId
+            sessionId = envelope.sessionId
+            incomingSequence = envelope.sequence
+            outgoingSequence.set(outgoing)
+            authenticated = true
+            socketOpen = true
+            reconnectAttempt = 0
+            registeredAudioStreamId = null
+            activeAudioGeneration = null
+            streamRegistrationTimeout?.cancel()
+            streamRegistration.connectionChanged()
+            snapshotSync.clear()
+            transition(ConnectionState.Connected(envelope.serverId, target.endpoint), "authenticated ${target.transportLabel()} promoted atomically")
+            _diagnostics.value = _diagnostics.value.copy(
+                authenticationState = "authenticated",
+                activeTransport = target.transportLabel(),
+                candidateTransport = null,
+                transportMessage = "${target.transportLabel().uppercase()} authenticated and promoted; $previousTransport retired.",
+                registeredAudioStreamId = null,
+                audioSocketGeneration = null,
+                serverAudioConnectionGeneration = null,
+                lastError = null
+            )
+            log.record(
+                "connection", "info", "android.transport.handoff_promoted",
+                "Authenticated transport candidate promoted atomically.",
+                connectionId = envelope.connectionId,
+                serverId = envelope.serverId,
+                details = mapOf("from" to previousTransport, "to" to target.transportLabel(), "sessionPreserved" to "true")
+            )
+            sendControllerRequestIfReady("transport handoff promoted")
+            retiring.close("authenticated ${target.transportLabel()} transport promoted")
+        }
+
+        override fun onClosing(code: Int, reason: String) {
+            if (promoted && socket === candidate && transportGenerationFence.accepts(promotedGeneration)) this@PrompterConnectionRepository.onClosing(code, reason)
+        }
+
+        override fun onClosed(code: Int, reason: String) {
+            if (promoted && socket === candidate && transportGenerationFence.accepts(promotedGeneration)) this@PrompterConnectionRepository.onClosed(code, reason)
+            else candidateFailed(candidate, target, "${target.transportLabel().uppercase()} candidate closed: $code $reason")
+        }
+
+        override fun onFailure(message: String, exceptionClass: String, httpCode: Int?, responseSummary: String?) {
+            if (promoted && socket === candidate && transportGenerationFence.accepts(promotedGeneration)) {
+                this@PrompterConnectionRepository.onFailure(message, exceptionClass, httpCode, responseSummary)
+            } else candidateFailed(candidate, target, "$exceptionClass: $message")
+        }
+    }
+
+    private fun candidateFailed(candidate: WebSocketClient, target: DiscoveredServer, reason: String) {
+        if (candidateSocket !== candidate) return
+        candidateSocket = null
+        candidateAuthTimeout?.cancel()
+        candidateAuthTimeout = null
+        candidate.close("candidate transport failed")
+        _diagnostics.value = _diagnostics.value.copy(
+            candidateTransport = null,
+            transportMessage = "${target.transportLabel().uppercase()} handoff failed; ${server?.transportLabel() ?: "current transport"} retained.",
+            lastError = reason
+        )
+        log.record(
+            "connection", "warn", "android.transport.handoff_failed",
+            "Candidate transport failed before promotion; active transport was retained.",
+            serverId = target.serverId,
+            remoteAddress = target.endpoint,
+            details = mapOf("reason" to reason, "activeTransport" to (server?.transportLabel() ?: "none"))
+        )
+    }
+
+    private fun DiscoveredServer.transportLabel() = if (transport == "usb-adb-reverse") "usb" else "lan"
+
     private fun connectInternal(target: DiscoveredServer, cause: String = "connect requested") {
         suppressReconnectOnce = false
-        networkPreflight.failureReason()?.let { reason ->
+        if (target.transport != "usb-adb-reverse") networkPreflight.failureReason()?.let { reason ->
             log.record("network", "error", "network.preflight.failed", reason, serverId = target.serverId, remoteAddress = target.endpoint)
             _diagnostics.value = _diagnostics.value.copy(resolvedAddress = target.host, port = target.port, lastError = reason)
             transition(ConnectionState.Error(reason), "network preflight failed")
             return
         }
-        runCatching { requirePrivateIpv4(target.host) }.onFailure {
-            transition(ConnectionState.Error(it.message ?: "Only private IPv4 servers are allowed."), "server address rejected"); return
+        if (!isAllowedConnectionTarget(target)) {
+            transition(ConnectionState.Error("Only private IPv4 LAN or validated USB loopback servers are allowed."), "server address rejected"); return
         }
         server = target
         manualDisconnect = false; authenticated = false; socketOpen = false; outgoingSequence.set(0); incomingSequence = -1
@@ -519,10 +761,15 @@ class PrompterConnectionRepository(
             serverProtocolMajor = target.protocolMajor,
             serverProtocolMinor = target.protocolMinor,
             serverBuild = null,
-            serverStartedAtMs = null
+            serverStartedAtMs = null,
+            activeTransport = target.transportLabel(),
+            candidateTransport = null,
+            transportMessage = "Connecting over ${target.transportLabel()}."
         )
         log.record("connection", "info", "connection.endpoint.selected", "Server endpoint selected.", connectionId = connectionId, serverId = target.serverId, remoteAddress = target.endpoint, webSocketState = "CONNECTING", details = mapOf("path" to "/", "source" to if (target.manual) "manual" else "discovery"))
-        socket.connect(target.endpoint, this)
+        val connectingSocket = socket
+        val transportGeneration = transportGenerationFence.activate()
+        connectingSocket.connect(target.endpoint, forwardingEvents(connectingSocket, transportGeneration))
     }
 
     private fun handleChallenge(envelope: ProtocolEnvelope) {
@@ -567,14 +814,21 @@ class PrompterConnectionRepository(
             socket.close(); return
         }
         val nonce = UUID.randomUUID().toString()
+        val recoveryClaim = sessions.recoveryClaim().takeIf {
+            challenge.recoveryClaimRequested && (challenge.protocolMinor ?: 0) >= 3
+        }
         transition(ConnectionState.Authenticating, "authentication response sent")
         log.record("authentication", "info", "authentication.response.sending", "Sending challenge authentication response.", connectionId = envelope.connectionId, deviceId = deviceId(), serverId = challenge.serverId, protocolMessageType = "authenticate")
         _diagnostics.value = _diagnostics.value.copy(authenticationState = "authenticating")
         send("authenticate", Authenticate(
             deviceId = deviceId(), clientNonce = nonce, timestampMs = System.currentTimeMillis(),
-            proof = Authentication.proof(credential, challenge.nonce, nonce, challenge.serverId, deviceId(), ProtocolVersion.MAJOR),
+            proof = Authentication.proof(
+                credential, challenge.nonce, nonce, challenge.serverId, deviceId(), ProtocolVersion.MAJOR,
+                recoveryClaim
+            ),
             clientBuild = AppBuildIdentity.payload,
-            cachedManuscriptHash = sessions.cachedManuscriptHash()
+            cachedManuscriptHash = sessions.cachedManuscriptHash(),
+            recoveryClaim = recoveryClaim
         ), Authenticate.serializer(), challenge.serverId)
     }
 
@@ -619,13 +873,22 @@ class PrompterConnectionRepository(
         if (suppressReconnectOnce) { suppressReconnectOnce = false; return }
         if (manualDisconnect || server == null) { transition(ConnectionState.Disconnected, reason); return }
         if (pendingPair != null) { pendingPair = null; transition(ConnectionState.Error("Pairing connection failed: $reason"), "pairing connection lost"); return }
+        val failedTarget = server!!
+        val reconnectTarget = reconnectTargetAfterLoss(failedTarget, lanFallback, transportPreference)
+        server = reconnectTarget
         val delayMs = reconnectPolicy.delayMs(reconnectAttempt)
         val attempt = ++reconnectAttempt
-        transition(ConnectionState.Reconnecting(attempt, delayMs), reason)
-        log.record("connection", "warn", "connection.reconnect.scheduled", "Reconnect scheduled after failure: $reason", connectionId = connectionId, serverId = server?.serverId, details = mapOf("attempt" to attempt.toString(), "delayMs" to delayMs.toString()))
-        _diagnostics.value = _diagnostics.value.copy(reconnectCount = _diagnostics.value.reconnectCount + 1)
+        val fallback = reconnectTarget !== failedTarget
+        transition(ConnectionState.Reconnecting(attempt, delayMs), if (fallback) "USB lost; LAN fallback scheduled" else reason)
+        log.record("connection", "warn", "connection.reconnect.scheduled", "Reconnect scheduled after failure: $reason", connectionId = connectionId, serverId = reconnectTarget.serverId, details = mapOf("attempt" to attempt.toString(), "delayMs" to delayMs.toString(), "transport" to reconnectTarget.transportLabel(), "fallback" to fallback.toString()))
+        _diagnostics.value = _diagnostics.value.copy(
+            reconnectCount = _diagnostics.value.reconnectCount + 1,
+            activeTransport = "none",
+            candidateTransport = reconnectTarget.transportLabel(),
+            transportMessage = if (fallback) "USB disconnected; reconnecting over LAN." else "Reconnecting over ${reconnectTarget.transportLabel()}."
+        )
         reconnectJob?.cancel()
-        reconnectJob = scope.launch { delay(delayMs); server?.let { connectInternal(it, "scheduled reconnect attempt $attempt") } }
+        reconnectJob = scope.launch { delay(delayMs); connectInternal(reconnectTarget, "scheduled reconnect attempt $attempt") }
     }
 
     private fun reconnectSessionDetails(): Map<String, String> {

@@ -1,6 +1,7 @@
 import type { AsrProviderId, DisplaySettings, FollowState, LocalWhisperSettings } from '../domain/types';
 
 export type StoredSession = {
+  approvedManuscript?: { projectId: string; approvedId: string; textSha256: string };
   projectTitle: string;
   manuscriptText: string;
   currentTokenIndex: number;

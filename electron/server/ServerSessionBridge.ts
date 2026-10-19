@@ -4,6 +4,8 @@ import { SessionCoordinator, type SessionCoordinatorState } from '#prompter-shar
 import type {
   RendererSessionSync,
   RendererSyncResult,
+  RecoverySource,
+  TabletRecoveryClaim,
   TabletManualRepositionPayload,
   TabletManualRepositionResult,
   TabletManualRepositionStatus,
@@ -11,10 +13,36 @@ import type {
 } from '#prompter-shared/protocol/messages.js';
 import { runtimeSettingsFromDisplay, type RuntimeSettings } from '#prompter-shared/protocol/runtime-settings.js';
 import { isAuthoritativeTargetNearTabletManualAnchor } from '#prompter-shared/domain/manualFollow.js';
+import {
+  NARRATION_CHECKPOINT_SCHEMA_VERSION,
+  type NarrationCheckpoint
+} from './NarrationCheckpointStore.js';
 
 const EMPTY_MANUSCRIPT_ID = 'desktop-empty';
 
 export type TabletNarrationStartPolicy = 'beginning' | 'resume' | 'windows-view';
+
+export type RecoveryDecision = {
+  source: RecoverySource;
+  accepted: boolean;
+  blocked: boolean;
+  reason: string;
+  proposedTokenIndex: number | null;
+  proposedCharacter: number | null;
+  acceptedTokenIndex: number | null;
+  acceptedCharacter: number | null;
+  manuscriptId: string;
+  manuscriptHash: string;
+  manuscriptRevision: number;
+  narrationSessionIdBefore: string | null;
+  rejectedCandidates: Array<{ source: 'tablet' | 'durable-checkpoint'; reason: string }>;
+};
+
+type PendingRecovery = {
+  source: RecoverySource;
+  tokenIndex: number;
+  reason: string;
+};
 
 type PreservedPosition = {
   manuscriptHash: string;
@@ -58,6 +86,7 @@ export type TabletNarrationStartResult = {
   paragraphIndex: number;
   lastAcceptedTranscriptAtMs: number | null;
   creationReason: string;
+  recoverySource: RecoverySource;
 };
 
 export class ServerSessionBridge {
@@ -69,6 +98,8 @@ export class ServerSessionBridge {
   private sessionId = randomUUID();
   private nextTabletStartPolicy: TabletNarrationStartPolicy = 'beginning';
   private nextWindowsViewTokenIndex: number | null = null;
+  private explicitStartPolicy: 'beginning' | 'windows-view' | null = null;
+  private pendingRecovery: PendingRecovery | null = null;
   private tabletNarration: TabletNarrationSession | null = null;
   private preservedPosition: PreservedPosition | null = null;
   private settingsRevision = 0;
@@ -106,7 +137,15 @@ export class ServerSessionBridge {
       if (manuscriptContentChanged) this.coordinator.replaceManuscript(buildManuscript(sync.manuscriptText), 0);
       // While a tablet owns transcript authority, renderer synchronization may update manuscript/settings
       // but must not overwrite the accepted tablet position with an older desktop projection.
-      if (!this.controllerDeviceId && !manuscriptContentChanged) this.coordinator.setPosition(sync.currentTokenIndex, sync.followState);
+      if (!this.controllerDeviceId && !manuscriptContentChanged) {
+        const desktopAcknowledgedRecovery = this.pendingRecovery &&
+          this.pendingRecovery.source !== 'tablet' &&
+          sync.currentTokenIndex === this.pendingRecovery.tokenIndex;
+        if (!this.pendingRecovery || desktopAcknowledgedRecovery) {
+          if (desktopAcknowledgedRecovery) this.pendingRecovery = null;
+          this.coordinator.setPosition(sync.currentTokenIndex, sync.followState);
+        }
+      }
     }
 
     if (this.lastSync && sync.sessionResetId !== this.lastSync.sessionResetId) {
@@ -165,8 +204,12 @@ export class ServerSessionBridge {
 
   getSessionId() { return this.sessionId; }
 
-  selectTabletStartPolicy(policy: TabletNarrationStartPolicy) {
+  selectTabletStartPolicy(policy: TabletNarrationStartPolicy, explicit = true) {
     this.nextTabletStartPolicy = policy;
+    if (explicit) {
+      this.explicitStartPolicy = policy === 'beginning' ? 'beginning' : null;
+      this.pendingRecovery = null;
+    }
     if (policy !== 'windows-view') this.nextWindowsViewTokenIndex = null;
     return this.getTabletNarrationStatus();
   }
@@ -174,7 +217,105 @@ export class ServerSessionBridge {
   selectTabletPositionFromWindowsView() {
     this.nextTabletStartPolicy = 'windows-view';
     this.nextWindowsViewTokenIndex = this.lastSync?.currentTokenIndex ?? 0;
+    this.explicitStartPolicy = 'windows-view';
+    this.pendingRecovery = null;
     return this.getTabletNarrationStatus();
+  }
+
+  resolveRecovery(
+    deviceId: string,
+    cachedManuscriptHash: string | null,
+    claim: TabletRecoveryClaim | null,
+    checkpoint: NarrationCheckpoint | null
+  ): RecoveryDecision {
+    const snapshot = this.getSnapshot();
+    const manuscriptId = snapshot?.manuscript.manuscriptId ?? EMPTY_MANUSCRIPT_ID;
+    const manuscriptHash = snapshot?.manuscript.contentHash ?? this.currentManuscriptHash();
+    const manuscriptRevision = snapshot?.manuscriptRevision ?? 0;
+    const before = this.tabletNarration?.id ?? null;
+    const rejectedCandidates: RecoveryDecision['rejectedCandidates'] = [];
+    const decision = (
+      source: RecoverySource,
+      accepted: boolean,
+      blocked: boolean,
+      reason: string,
+      proposedTokenIndex: number | null,
+      proposedCharacter: number | null,
+      acceptedTokenIndex: number | null,
+      acceptedCharacter: number | null
+    ): RecoveryDecision => ({
+      source, accepted, blocked, reason, proposedTokenIndex, proposedCharacter,
+      acceptedTokenIndex, acceptedCharacter, manuscriptId, manuscriptHash,
+      manuscriptRevision, narrationSessionIdBefore: before,
+      rejectedCandidates: [...rejectedCandidates]
+    });
+
+    if (!snapshot || !this.coordinator) {
+      return decision('no-valid-position', false, true, 'Windows has no initialized manuscript session.', null, null, null, null);
+    }
+    if (this.explicitStartPolicy === 'beginning') {
+      this.adoptRecoveryPosition(0);
+      this.pendingRecovery = { source: 'explicit-beginning', tokenIndex: 0, reason: 'Explicit Start from Beginning overrides automatic recovery.' };
+      return decision('explicit-beginning', true, false, this.pendingRecovery.reason, 0, 0, 0, 0);
+    }
+    if (this.explicitStartPolicy === 'windows-view') {
+      const tokenIndex = this.nextWindowsViewTokenIndex ?? this.lastSync?.currentTokenIndex ?? 0;
+      const validation = this.validatePosition(tokenIndex, snapshot.manuscript.tokens[tokenIndex]?.characterRange.start ?? -1);
+      if (validation.ok) {
+        this.adoptRecoveryPosition(tokenIndex);
+        this.pendingRecovery = { source: 'desktop', tokenIndex, reason: 'Explicit Windows-position handoff selected.' };
+        return decision('desktop', true, false, this.pendingRecovery.reason, tokenIndex, validation.character, tokenIndex, validation.character);
+      }
+    }
+    const claimedHash = claim?.contentHash ?? cachedManuscriptHash;
+    const claimedManuscriptId = claim?.manuscriptId;
+    if ((claimedHash && claimedHash !== manuscriptHash) ||
+        (claimedManuscriptId && claimedManuscriptId !== manuscriptId)) {
+      return decision('tablet', false, true, 'Tablet and Windows manuscript identities differ; recovery requires an existing explicit action.', claim?.tokenIndex ?? null, claim?.character ?? null, null, null);
+    }
+    const active = this.tabletNarration;
+    if (active && active.deviceId === deviceId && active.manuscriptHash === manuscriptHash) {
+      const state = this.coordinator.getState();
+      return decision('tablet', true, false, 'Active same-process narration remains authoritative.', state.currentTokenIndex, state.currentCharacter, state.currentTokenIndex, state.currentCharacter);
+    }
+    if (this.nextTabletStartPolicy === 'resume' && this.preservedPosition?.manuscriptHash === manuscriptHash) {
+      const validation = this.validatePosition(this.preservedPosition.tokenIndex, this.preservedPosition.character);
+      if (validation.ok) {
+        this.adoptRecoveryPosition(this.preservedPosition.tokenIndex);
+        this.pendingRecovery = { source: 'tablet', tokenIndex: this.preservedPosition.tokenIndex, reason: 'Preserved same-process narration position selected for resume.' };
+        return decision('tablet', true, false, this.pendingRecovery.reason, this.preservedPosition.tokenIndex, this.preservedPosition.character, this.preservedPosition.tokenIndex, validation.character);
+      }
+    }
+    if (claim) {
+      const validation = this.validateExternalPosition(claim, manuscriptHash, manuscriptId, manuscriptRevision);
+      if (validation.ok) {
+        this.adoptRecoveryPosition(claim.tokenIndex);
+        this.pendingRecovery = { source: 'tablet', tokenIndex: claim.tokenIndex, reason: 'Validated same-manuscript tablet recovery claim.' };
+        return decision('tablet', true, false, this.pendingRecovery.reason, claim.tokenIndex, claim.character, claim.tokenIndex, validation.character);
+      }
+      rejectedCandidates.push({ source: 'tablet', reason: validation.reason });
+    }
+    if (checkpoint) {
+      const validation = this.validateExternalPosition(checkpoint, manuscriptHash, manuscriptId, manuscriptRevision);
+      if (validation.ok) {
+        this.adoptRecoveryPosition(checkpoint.tokenIndex);
+        this.pendingRecovery = { source: 'durable-checkpoint', tokenIndex: checkpoint.tokenIndex, reason: 'Validated durable narration checkpoint.' };
+        return decision('durable-checkpoint', true, false, this.pendingRecovery.reason, checkpoint.tokenIndex, checkpoint.character, checkpoint.tokenIndex, validation.character);
+      }
+      rejectedCandidates.push({ source: 'durable-checkpoint', reason: validation.reason });
+    }
+    const desktopToken = this.lastSync?.currentTokenIndex;
+    if (desktopToken !== undefined) {
+      const validation = this.validatePosition(desktopToken, snapshot.manuscript.tokens[desktopToken]?.characterRange.start ?? -1);
+      if (validation.ok) {
+        this.adoptRecoveryPosition(desktopToken);
+        this.pendingRecovery = { source: 'desktop', tokenIndex: desktopToken, reason: 'Current desktop position is the first valid fallback.' };
+        return decision('desktop', true, false, this.pendingRecovery.reason, desktopToken, validation.character, desktopToken, validation.character);
+      }
+    }
+    this.adoptRecoveryPosition(0);
+    this.pendingRecovery = { source: 'no-valid-position', tokenIndex: 0, reason: 'No valid tablet, checkpoint, or desktop position exists.' };
+    return decision('no-valid-position', true, false, this.pendingRecovery.reason, null, null, 0, 0);
   }
 
   startTabletNarration(deviceId: string, streamId: string, forcedPolicy?: TabletNarrationStartPolicy): TabletNarrationStartResult {
@@ -183,9 +324,14 @@ export class ServerSessionBridge {
     const active = this.tabletNarration;
     if (active && active.deviceId === deviceId && active.manuscriptHash === manuscriptHash) {
       active.streamId = streamId;
-      return this.narrationResult(active, true, 'preserved', 'active same-device same-manuscript narration session');
+      return this.narrationResult(active, true, 'preserved', 'active same-device same-manuscript narration session', 'tablet');
     }
-    const policy = forcedPolicy ?? this.nextTabletStartPolicy;
+    const recoveryPolicy = this.pendingRecovery?.source === 'desktop'
+      ? 'windows-view'
+      : this.pendingRecovery?.source === 'explicit-beginning' || this.pendingRecovery?.source === 'no-valid-position'
+        ? 'beginning'
+        : this.pendingRecovery ? 'resume' : null;
+    const policy = forcedPolicy ?? recoveryPolicy ?? this.nextTabletStartPolicy;
     const creationReason = !active
       ? `no active narration session; applying ${policy} policy`
       : active.deviceId !== deviceId
@@ -207,8 +353,43 @@ export class ServerSessionBridge {
     };
     this.nextTabletStartPolicy = 'beginning';
     this.nextWindowsViewTokenIndex = null;
+    this.explicitStartPolicy = null;
+    this.pendingRecovery = null;
     this.emit();
-    return this.narrationResult(this.tabletNarration, false, selection.positionSource, creationReason);
+    return this.narrationResult(this.tabletNarration, false, selection.positionSource, creationReason, selection.recoverySource);
+  }
+
+  createCheckpoint(
+    tokenIndex = this.coordinator?.getState().currentTokenIndex ?? -1,
+    savedAtMs = Date.now(),
+    character?: number
+  ): NarrationCheckpoint | null {
+    const snapshot = this.getSnapshot();
+    if (!snapshot) return null;
+    const current = this.coordinator?.getState();
+    const proposedCharacter = character ??
+      (current?.currentTokenIndex === tokenIndex ? current.currentCharacter : undefined) ??
+      snapshot.manuscript.tokens[tokenIndex]?.characterRange.start ?? -1;
+    const validation = this.validatePosition(tokenIndex, proposedCharacter);
+    if (!validation.ok) return null;
+    const token = snapshot.manuscript.tokens[tokenIndex];
+    return {
+      schemaVersion: NARRATION_CHECKPOINT_SCHEMA_VERSION,
+      manuscriptId: snapshot.manuscript.manuscriptId,
+      manuscriptHash: snapshot.manuscript.contentHash,
+      manuscriptRevision: snapshot.manuscriptRevision,
+      tokenIndex,
+      character: validation.character,
+      sentenceIndex: token.sentenceIndex,
+      paragraphIndex: token.paragraphIndex,
+      anchorFingerprint: this.anchorFingerprint(tokenIndex),
+      savedAtMs
+    };
+  }
+
+  createDesktopNarrationCheckpoint(savedAtMs = Date.now()) {
+    if (this.controllerDeviceId || this.pendingRecovery?.source === 'tablet') return null;
+    return this.createCheckpoint(undefined, savedAtMs);
   }
 
   endTabletNarration(reason: string) {
@@ -457,20 +638,30 @@ export class ServerSessionBridge {
   }
 
   private selectStartingToken(policy: TabletNarrationStartPolicy, manuscriptHash: string) {
+    if (this.pendingRecovery) {
+      return {
+        tokenIndex: this.pendingRecovery.tokenIndex,
+        positionSource: this.pendingRecovery.source === 'tablet' ? 'restored' as const :
+          this.pendingRecovery.source === 'desktop' ? 'windows-view' as const :
+          this.pendingRecovery.source === 'explicit-beginning' || this.pendingRecovery.source === 'no-valid-position' ? 'reset' as const : 'restored' as const,
+        recoverySource: this.pendingRecovery.source
+      };
+    }
     if (policy === 'resume' && this.preservedPosition?.manuscriptHash === manuscriptHash) {
-      return { tokenIndex: this.preservedPosition.tokenIndex, positionSource: 'restored' as const };
+      return { tokenIndex: this.preservedPosition.tokenIndex, positionSource: 'restored' as const, recoverySource: 'tablet' as const };
     }
     if (policy === 'windows-view') {
-      return { tokenIndex: this.nextWindowsViewTokenIndex ?? this.lastSync?.currentTokenIndex ?? 0, positionSource: 'windows-view' as const };
+      return { tokenIndex: this.nextWindowsViewTokenIndex ?? this.lastSync?.currentTokenIndex ?? 0, positionSource: 'windows-view' as const, recoverySource: 'desktop' as const };
     }
-    return { tokenIndex: 0, positionSource: 'reset' as const };
+    return { tokenIndex: 0, positionSource: 'reset' as const, recoverySource: 'explicit-beginning' as const };
   }
 
   private narrationResult(
     narration: TabletNarrationSession,
     continued: boolean,
     positionSource: TabletNarrationStartResult['positionSource'],
-    creationReason: string
+    creationReason: string,
+    recoverySource: RecoverySource
   ): TabletNarrationStartResult {
     const state = this.coordinator!.getState();
     return {
@@ -480,8 +671,59 @@ export class ServerSessionBridge {
       estimatedCharacter: state.alignment.tokenIndex >= 0 ? state.currentCharacter : 0,
       paragraphIndex: state.currentParagraphIndex,
       lastAcceptedTranscriptAtMs: narration.lastAcceptedTranscriptAtMs,
-      creationReason
+      creationReason,
+      recoverySource
     };
+  }
+
+  private adoptRecoveryPosition(tokenIndex: number) {
+    if (!this.coordinator) return;
+    if (this.coordinator.getState().currentTokenIndex === tokenIndex) return;
+    this.coordinator.setPosition(tokenIndex, 'following');
+    this.coordinator.resetTranscriptContext();
+    this.emit();
+  }
+
+  private validateExternalPosition(
+    candidate: Pick<NarrationCheckpoint, 'manuscriptId' | 'manuscriptHash' | 'manuscriptRevision' | 'tokenIndex' | 'character' | 'sentenceIndex' | 'paragraphIndex' | 'anchorFingerprint'> |
+      TabletRecoveryClaim,
+    manuscriptHash: string,
+    manuscriptId: string,
+    manuscriptRevision: number
+  ): { ok: true; character: number } | { ok: false; reason: string } {
+    const candidateHash = 'contentHash' in candidate ? candidate.contentHash : candidate.manuscriptHash;
+    if (candidateHash !== manuscriptHash) return { ok: false, reason: 'wrong-manuscript hash' };
+    if (candidate.manuscriptId !== manuscriptId) return { ok: false, reason: 'wrong manuscript identity' };
+    if (candidate.manuscriptRevision !== manuscriptRevision) return { ok: false, reason: 'stale manuscript revision' };
+    const validation = this.validatePosition(candidate.tokenIndex, candidate.character);
+    if (!validation.ok) return validation;
+    const snapshot = this.getSnapshot()!;
+    const token = snapshot.manuscript.tokens[candidate.tokenIndex];
+    if (token.sentenceIndex !== candidate.sentenceIndex || token.paragraphIndex !== candidate.paragraphIndex) {
+      return { ok: false, reason: 'structural anchor mismatch' };
+    }
+    if (this.anchorFingerprint(candidate.tokenIndex) !== candidate.anchorFingerprint) {
+      return { ok: false, reason: 'nearby text fingerprint mismatch' };
+    }
+    return validation;
+  }
+
+  private validatePosition(tokenIndex: number, character: number): { ok: true; character: number } | { ok: false; reason: string } {
+    const snapshot = this.getSnapshot();
+    if (!snapshot || !Number.isSafeInteger(tokenIndex) || !Number.isSafeInteger(character)) return { ok: false, reason: 'position is not initialized' };
+    const token = snapshot.manuscript.tokens[tokenIndex];
+    if (!token) return { ok: false, reason: 'token index is out of range' };
+    if (character < token.characterRange.start || character > token.characterRange.end) return { ok: false, reason: 'character is inconsistent with token' };
+    return { ok: true, character };
+  }
+
+  private anchorFingerprint(tokenIndex: number) {
+    const snapshot = this.getSnapshot()!;
+    const tokens = snapshot.manuscript.tokens;
+    const first = tokens[Math.max(0, tokenIndex - 8)];
+    const last = tokens[Math.min(tokens.length - 1, tokenIndex + 8)];
+    const nearby = snapshot.manuscript.normalizedContent.slice(first.characterRange.start, last.characterRange.end);
+    return `sha256:${createHash('sha256').update(nearby).digest('hex')}`;
   }
 
   private fingerprint(sync: RendererSessionSync) {

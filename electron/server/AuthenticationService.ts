@@ -1,5 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import type { AuthenticatePayload } from '#prompter-shared/protocol/messages.js';
+import type { AuthenticatePayload, TabletRecoveryClaim } from '#prompter-shared/protocol/messages.js';
 import { PROTOCOL_MAJOR } from '#prompter-shared/protocol/protocol-version.js';
 import type { PairedDeviceStore } from './PairedDeviceStore.js';
 
@@ -38,7 +38,8 @@ export class AuthenticationService {
       payload.clientNonce,
       this.serverId,
       payload.deviceId,
-      payload.protocolMajor
+      payload.protocolMajor,
+      payload.recoveryClaim ? AuthenticationService.recoveryClaimBinding(payload.recoveryClaim) : undefined
     );
     const supplied = Buffer.from(payload.proof, 'base64url');
     const expectedBuffer = Buffer.from(expected, 'base64url');
@@ -59,10 +60,26 @@ export class AuthenticationService {
     this.challenges.delete(connectionId);
   }
 
-  static createProof(credential: string, challenge: string, clientNonce: string, serverId: string, deviceId: string, protocolMajor: number) {
+  static createProof(
+    credential: string,
+    challenge: string,
+    clientNonce: string,
+    serverId: string,
+    deviceId: string,
+    protocolMajor: number,
+    recoveryClaimBinding?: string
+  ) {
     return createHmac('sha256', credential)
-      .update([challenge, clientNonce, serverId, deviceId, protocolMajor].join('|'))
+      .update([challenge, clientNonce, serverId, deviceId, protocolMajor, ...(recoveryClaimBinding ? [recoveryClaimBinding] : [])].join('|'))
       .digest('base64url');
+  }
+
+  static recoveryClaimBinding(claim: TabletRecoveryClaim) {
+    return [
+      'recovery-v1', `${claim.manuscriptId.length}:${claim.manuscriptId}`, claim.contentHash,
+      claim.manuscriptRevision, claim.tokenIndex, claim.character, claim.sentenceIndex,
+      claim.paragraphIndex, claim.anchorFingerprint, claim.capturedAtMs
+    ].join('|');
   }
 
   private fail(address: string, reason: string) {

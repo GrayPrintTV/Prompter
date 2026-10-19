@@ -38,6 +38,7 @@ Phase 1 is in progress. The app has Phase 0/0.5 manuscript alignment, torture-te
 - Narration status distinguishes `Stalled` and `Recovering` from ordinary silence using capture/request activity.
 - Android and desktop share `fast-scroll` as a validated manual-reposition input source.
 - Bounded Local Whisper telemetry records per-minute queue, latency, result, and narrator-status aggregates without per-chunk production logging.
+- Automatic USB tablet transport discovers an installed ADB, requires one authorized device or explicit selection, creates a reverse tunnel, and launches a validated typed-extra Android intent with bounded retry/backoff. Android authenticates before make-before-break promotion, generation-fences the retired socket/audio, and falls back to its stored LAN endpoint after USB loss.
 
 ## Current Active Bug/Fix Status
 
@@ -108,6 +109,7 @@ Normal mode shows Local Whisper and Manual in the provider selector. Mock and Op
 - Evaluate predictive Assist Scroll in real narration; it is intentionally conservative and may need speed/correction tuning.
 - Use the Developer-mode scroll proof buttons to tune Correction feel before blaming ASR/alignment for motion feel.
 - Use Developer-mode Movement decision diagnostics during Mock and Local Whisper following to separate ASR timing, alignment confidence, lookahead target choice, Assist cruise, correction retargeting, and suspicious jump candidates before changing alignment or jump-governor behavior.
+- Physically verify automatic USB preference and USB-to-LAN fallback on the paired tablet; unit tests use mocked ADB and do not touch a device.
 
 ## Local Whisper Manual Smoke-Test Steps
 

@@ -10,9 +10,11 @@ import type {
   PairRequestPayload,
   ProtocolEnvelope,
   ServerStatusSummary,
+  TabletRecoveryClaim,
   TabletManualRepositionPayload,
   TabletManualRepositionStatus,
-  TabletManualFollowDiagnosticPayload
+  TabletManualFollowDiagnosticPayload,
+  UsbTransportStatus
 } from '#prompter-shared/protocol/messages.js';
 import type { LocalWhisperSettings } from '#prompter-shared/domain/types.js';
 import type { MovementDecisionInfo } from '#prompter-shared/domain/movementDiagnostics.js';
@@ -37,6 +39,8 @@ import {
   type TabletSnapshot
 } from './TabletSnapshotTransport.js';
 import type { IncomingMessage } from 'node:http';
+import type { NarrationCheckpointStore } from './NarrationCheckpointStore.js';
+import type { RecoveryDecision } from './ServerSessionBridge.js';
 
 type Client = {
   socket: WebSocket;
@@ -54,6 +58,11 @@ type Client = {
   firstFrameSeen: boolean;
   audioFramesReceived: number;
   knownManuscriptHash: string | null;
+  recoveryClaim: TabletRecoveryClaim | null;
+  recoveryBlocked: boolean;
+  recoveryDecision: RecoveryDecision | null;
+  firstPositionSnapshotSent: boolean;
+  lastRecoverySignature: string | null;
 };
 
 export type PrompterServerOptions = {
@@ -72,6 +81,9 @@ export type PrompterServerOptions = {
   diagnostics?: DiagnosticSink;
   controllerDisconnectTimeoutMs?: number;
   buildInfo?: BuildIdentityPayload;
+  checkpoints?: NarrationCheckpointStore;
+  startupRecoveryTimeoutMs?: number;
+  onRecoveryAdopted?: (state: SessionCoordinatorState, decision: RecoveryDecision) => void;
 };
 
 const CLEARTEXT_WARNING = 'Authenticated cleartext WebSocket is for a trusted-LAN prototype only; certificate-pinned WSS is required before broader distribution.';
@@ -96,6 +108,11 @@ export class PrompterServer {
   private authenticationFailures = 0;
   private controllerDisconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly serverStartedAtMs = Date.now();
+  private usbTransport: UsbTransportStatus | undefined;
+  private startupRecoveryStarted = false;
+  private startupRecoveryResolved = false;
+  private startupRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastProjectedRecoverySignature: string | null = null;
 
   constructor(private readonly options: PrompterServerOptions) {
     this.auth = new AuthenticationService(options.serverId, options.devices);
@@ -125,22 +142,18 @@ export class PrompterServer {
       protocol: `${PROTOCOL_MAJOR}.${PROTOCOL_MINOR}`
     });
     const candidates = this.addresses();
-    if (!candidates.length) {
-      this.state = 'error';
-      this.lastError = 'No usable private IPv4 interface was found. Connect to a private LAN and try again.';
-      this.emitStatus();
-      throw new Error(this.lastError);
-    }
-    this.bindAddress = candidates[0];
+    this.bindAddress = candidates[0] ?? '127.0.0.1';
     try {
-      this.listener = await this.listen(this.bindAddress, this.options.port ?? 43127);
+      this.listener = await this.listen('0.0.0.0', this.options.port ?? 43127);
       const address = this.listener.address();
       this.boundPort = typeof address === 'object' && address ? address.port : (this.options.port ?? 43127);
       this.enabled = true;
       this.log({ component: 'server.listener', level: 'info', event: 'server.listener.started', message: 'Tablet WebSocket listener started.', localAddress: `${this.bindAddress}:${this.boundPort}` });
       this.state = 'available';
-      this.advertisedServiceName = `Prompter - ${this.options.computerName}`;
-      await this.options.discovery.start(this.advertisedServiceName, this.discoveryMetadata());
+      if (candidates.length) {
+        this.advertisedServiceName = `Prompter - ${this.options.computerName}`;
+        await this.options.discovery.start(this.advertisedServiceName, this.discoveryMetadata());
+      }
       this.heartbeat = setInterval(() => this.pingClients(), 15_000);
       this.emitStatus();
       return this.getStatus();
@@ -161,6 +174,8 @@ export class PrompterServer {
     this.options.pairing.stop();
     this.audio.stop();
     this.clearControllerDisconnectTimer();
+    if (this.startupRecoveryTimer) clearTimeout(this.startupRecoveryTimer);
+    this.startupRecoveryTimer = null;
     this.options.session.endTabletNarration('Server disabled');
     this.options.session.releaseController();
     for (const client of this.clients.values()) {
@@ -233,8 +248,8 @@ export class PrompterServer {
     return this.options.devices.forget(deviceId);
   }
 
-  selectTabletStartPolicy(policy: TabletNarrationStartPolicy) {
-    const status = this.options.session.selectTabletStartPolicy(policy);
+  selectTabletStartPolicy(policy: TabletNarrationStartPolicy, explicit = true) {
+    const status = this.options.session.selectTabletStartPolicy(policy, explicit);
     this.log({ component: 'server.session', level: 'info', event: 'session.position.initialized', message: status.startDescription, details: { policy, acceptedCharacter: status.acceptedCharacter, resumeAvailable: status.resumeAvailable } });
     this.emitStatus();
     return status;
@@ -250,6 +265,54 @@ export class PrompterServer {
   onStatus(listener: (status: ServerStatusSummary) => void) {
     this.statusListeners.add(listener);
     return () => this.statusListeners.delete(listener);
+  }
+
+  setUsbTransportStatus(status: UsbTransportStatus) {
+    this.usbTransport = status;
+    this.emitStatus();
+  }
+
+  beginStartupRecovery() {
+    const snapshot = this.options.session.getSnapshot();
+    if (this.startupRecoveryStarted || this.startupRecoveryResolved || !snapshot?.manuscript.normalizedContent?.trim()) return false;
+    this.startupRecoveryStarted = true;
+    for (const client of this.clients.values()) {
+      if (!client.authenticated) continue;
+      const decision = this.resolveClientRecovery(client);
+      if (!decision.blocked) this.sendSnapshot(client);
+    }
+    if (this.startupRecoveryResolved) return true;
+    this.startupRecoveryTimer = setTimeout(() => {
+      this.startupRecoveryTimer = null;
+      const current = this.options.session.getSnapshot();
+      if (!current || this.startupRecoveryResolved) return;
+      const checkpoint = this.options.checkpoints?.get(current.manuscript.contentHash) ?? null;
+      const decision = this.options.session.resolveRecovery('no-tablet-connected', null, null, checkpoint);
+      if (decision.accepted && decision.acceptedTokenIndex !== null && decision.acceptedCharacter !== null) {
+        this.scheduleCheckpoint(decision.acceptedTokenIndex, decision.acceptedCharacter);
+        this.projectRecoveryToRenderer(decision);
+        this.startupRecoveryResolved = true;
+      }
+      this.log({
+        component: 'server.session', level: decision.accepted ? 'info' : 'warn', event: 'session.recovery.decision',
+        message: decision.reason,
+        details: {
+          ...decision,
+          serverGeneration: this.serverStartedAtMs,
+          tabletIdentity: null,
+          narrationSessionIdAfter: this.options.session.getSnapshot()?.narrationSessionId ?? null,
+          validationResult: decision.accepted ? 'accepted' : 'rejected'
+        }
+      });
+      this.broadcastSnapshot();
+    }, Math.max(0, this.options.startupRecoveryTimeoutMs ?? 1_500));
+    return true;
+  }
+
+  checkpointDesktopNarrationPosition() {
+    const checkpoint = this.options.session.createDesktopNarrationCheckpoint();
+    if (checkpoint) this.options.checkpoints?.schedule(checkpoint);
+    return Boolean(checkpoint);
   }
 
   broadcastSnapshot() {
@@ -289,7 +352,8 @@ export class PrompterServer {
       safeStorageAvailable: storage.safeStorageAvailable,
       credentialStorage: storage.credentialStorage,
       cleartextTransportWarning: CLEARTEXT_WARNING,
-      lastError: this.lastError
+      lastError: this.lastError,
+      ...(this.usbTransport ? { usbTransport: this.usbTransport } : {})
     };
   }
 
@@ -337,6 +401,8 @@ export class PrompterServer {
       socket, connectionId, remoteAddress, authenticated: false, deviceId: null, displayName: null,
       sequence: -1, outgoingSequence: 0, pendingAudioMetadata: null, audioStreamId: null, alive: true,
       knownManuscriptHash: null,
+      recoveryClaim: null, recoveryBlocked: false, recoveryDecision: null,
+      firstPositionSnapshotSent: false, lastRecoverySignature: null,
       authenticationTimer: setTimeout(() => {
         this.log({ component: 'server.authentication', level: 'warn', event: 'authentication.timeout', message: 'Client did not pair or authenticate before timeout.', connectionId, remoteAddress });
         this.closeClient(client, 1008, 'Authentication timeout');
@@ -371,7 +437,8 @@ export class PrompterServer {
         protocolMajor: PROTOCOL_MAJOR,
         protocolMinor: PROTOCOL_MINOR
       },
-      serverStartedAtMs: this.serverStartedAtMs
+      serverStartedAtMs: this.serverStartedAtMs,
+      recoveryClaimRequested: true
     });
   }
 
@@ -546,6 +613,7 @@ export class PrompterServer {
         client.knownManuscriptHash = typeof authentication.cachedManuscriptHash === 'string'
           ? authentication.cachedManuscriptHash
           : null;
+        client.recoveryClaim = authentication.recoveryClaim ?? null;
         clearTimeout(client.authenticationTimer);
         this.send(client, 'authenticated', { deviceId: client.deviceId });
         if (this.options.session.getControllerDeviceId() === client.deviceId) {
@@ -559,7 +627,8 @@ export class PrompterServer {
             reason: 'Controller lease resumed; audio stream registration is required.'
           });
         }
-        this.sendSnapshot(client);
+        const recovery = this.resolveClientRecovery(client);
+        if (!recovery.blocked) this.sendSnapshot(client);
         this.log({ component: 'server.authentication', level: 'info', event: 'authentication.accepted', message: 'Paired device authenticated.', connectionId: client.connectionId, remoteAddress: client.remoteAddress, deviceId: client.deviceId });
         this.manualFollowLog('Authentication/controller lease result.', {
           connectionId: client.connectionId,
@@ -602,9 +671,12 @@ export class PrompterServer {
         }
         return;
       }
-      if (client.sequence >= 0 && sequence > client.sequence + 1) this.sendSnapshot(client);
+      if (client.sequence >= 0 && sequence > client.sequence + 1 && !client.recoveryBlocked) this.sendSnapshot(client);
       client.sequence = sequence;
-      if (action === 'requestSnapshot') this.sendSnapshot(client);
+      if (action === 'requestSnapshot') {
+        const recovery = this.resolveClientRecovery(client);
+        if (!recovery.blocked) this.sendSnapshot(client);
+      }
       else if (action === 'manualFollowDiagnostic') {
         this.options.protocolValidator?.assert('manualFollowDiagnostic', payload);
         const diagnostic = payload as unknown as TabletManualFollowDiagnosticPayload;
@@ -670,6 +742,7 @@ export class PrompterServer {
           }
         });
         const result = this.options.session.applyTabletManualReposition(client.deviceId, request);
+        if (result.accepted) this.scheduleCheckpoint(request.visibleTokenIndex, request.visibleCharacter);
         this.manualFollowLog('Anchor validation and SessionCoordinator rebase result.', {
           connectionId: client.connectionId,
           deviceId: client.deviceId,
@@ -700,6 +773,18 @@ export class PrompterServer {
       else if (action === 'audioStreamStart') {
         this.options.protocolValidator?.assert('audio', payload);
         const audioStart = payload as unknown as AudioStreamStartPayload;
+        const recovery = this.resolveClientRecovery(client);
+        if (recovery.blocked) {
+          this.send(client, 'controllerLease', {
+            granted: false,
+            deviceId: client.deviceId,
+            streamId: audioStart.streamId,
+            connectionGeneration: client.connectionId,
+            streamRegistered: false,
+            reason: recovery.reason
+          });
+          return;
+        }
         if (!this.options.session.acquireController(client.deviceId)) {
           const reason = 'Desktop transcription or another tablet currently owns the transcript source.';
           this.send(client, 'controllerLease', {
@@ -727,6 +812,7 @@ export class PrompterServer {
         this.clearControllerDisconnectTimer();
         try {
           const narration = this.options.session.startTabletNarration(client.deviceId, audioStart.streamId);
+          this.scheduleCheckpoint();
           this.log({ component: 'server.session', level: 'info', event: 'session.position.initialized', message: narration.continued ? 'Tablet narration session retained its active start position.' : `Tablet narration start position selected from ${narration.positionSource}.`, connectionId: client.connectionId, deviceId: client.deviceId, details: { manuscriptHash: narration.manuscriptHash, acceptedCharacter: narration.acceptedCharacter, estimatedCharacter: narration.estimatedCharacter, paragraphIndex: narration.paragraphIndex, lastAcceptedTranscriptAtMs: narration.lastAcceptedTranscriptAtMs, narrationSessionId: narration.narrationSessionId, policy: narration.policy, streamId: narration.streamId, leaseId: narration.leaseId, creationReason: narration.creationReason, transportSessionId: this.options.session.getSessionId(), manuscriptRevision: this.options.session.getState()?.manuscriptRevision ?? null } });
           this.log({ component: 'server.session', level: 'info', event: narration.continued ? 'session.position.preserved' : narration.positionSource === 'restored' ? 'session.position.restored' : 'session.position.reset', message: narration.continued ? 'Existing narration session preserved across reconnect.' : `Tablet narration position initialized from ${narration.positionSource}.`, connectionId: client.connectionId, deviceId: client.deviceId, details: { manuscriptHash: narration.manuscriptHash, acceptedCharacter: narration.acceptedCharacter, estimatedCharacter: narration.estimatedCharacter, paragraphIndex: narration.paragraphIndex, lastAcceptedTranscriptAtMs: narration.lastAcceptedTranscriptAtMs, narrationSessionId: narration.narrationSessionId, policy: narration.policy, streamId: narration.streamId, leaseId: narration.leaseId, creationReason: narration.creationReason, transportSessionId: this.options.session.getSessionId(), manuscriptRevision: this.options.session.getState()?.manuscriptRevision ?? null } });
           this.log({ component: 'server.audio', level: 'info', event: 'audio.stream.narration_started', message: narration.continued ? 'Tablet audio stream resumed the active narration session.' : 'Tablet audio stream started a new narration session.', connectionId: client.connectionId, deviceId: client.deviceId, details: { streamId: narration.streamId, narrationSessionId: narration.narrationSessionId, leaseId: narration.leaseId, acceptedCharacter: narration.acceptedCharacter } });
@@ -827,7 +913,7 @@ export class PrompterServer {
         this.audio.stop(client.deviceId, client.audioStreamId ?? undefined, client.connectionId);
         client.pendingAudioMetadata = null;
         client.audioStreamId = null;
-        this.selectTabletStartPolicy('resume');
+        this.selectTabletStartPolicy('resume', false);
         this.releaseTabletControl(client.deviceId, 'Tablet stopped its audio stream');
       }
     } catch (error) {
@@ -857,6 +943,7 @@ export class PrompterServer {
         if (!result.text.trim()) continue;
         this.log({ component: 'server.coordinator', level: 'info', event: 'coordinator.transcript.processed', message: 'Tablet transcript is ready for coordinator processing.', deviceId: chunk.deviceId, details: { audioSequence: chunk.lastSequence, transcriptCharacters: result.text.length } });
         const processed = this.options.session.processTabletTranscript(chunk.deviceId, result.text, chunk.lastSequence);
+        this.scheduleCheckpoint();
         const alignmentDebug = processed.state.alignmentBufferDebug;
         this.log({ component: 'server.coordinator', level: 'info', event: 'coordinator.position.accepted', message: 'Coordinator produced the authoritative accepted position.', deviceId: chunk.deviceId, details: { tokenIndex: processed.state.currentTokenIndex, character: processed.state.currentCharacter, sentenceIndex: processed.state.currentSentenceIndex, paragraphIndex: processed.state.currentParagraphIndex, sessionRevision: processed.state.sessionRevision, manuscriptRevision: processed.state.manuscriptRevision, selectedCandidateStartTokenIndex: alignmentDebug.selectedCandidateStartTokenIndex, selectedCandidateEndTokenIndex: alignmentDebug.selectedCandidateEndTokenIndex, newDeltaMatchedWordCount: alignmentDebug.newDeltaMatchedWordCount, newDeltaDistinctiveMatchedWordCount: alignmentDebug.newDeltaDistinctiveMatchedWordCount, commitAccepted: alignmentDebug.moveToTokenCalled, commitRejectedReason: alignmentDebug.commitRejectedReason, lowConfidenceCount: alignmentDebug.lowConfidenceCount, lostOrResyncing: alignmentDebug.lostOrResyncing } });
           if (processed.movement) this.log({ component: 'server.coordinator', level: 'info', event: 'coordinator.movement.produced', message: 'Coordinator produced a semantic movement decision.', deviceId: chunk.deviceId, details: { classification: processed.movement.classification, targetTokenIndex: processed.state.currentTokenIndex, confidence: processed.movement.confidence, manualRepositionStatus: processed.manualReposition?.status ?? null, manualAnchorTokenIndex: processed.manualReposition?.anchorTokenIndex ?? null, manualAnchorDistanceTokens: processed.manualReposition?.distanceTokens ?? null } });
@@ -910,8 +997,26 @@ export class PrompterServer {
   }
 
   private sendSnapshot(client: Client, provided?: TabletSnapshot | null) {
+    if (client.recoveryBlocked) return;
     const snapshot = provided ?? this.options.session.getSnapshot() as TabletSnapshot | null;
     if (!snapshot) return;
+    if (!client.firstPositionSnapshotSent) {
+      client.firstPositionSnapshotSent = true;
+      this.log({
+        component: 'server.session', level: 'info', event: 'session.recovery.first_snapshot',
+        message: 'First position-bearing snapshot sent after recovery resolution.',
+        connectionId: client.connectionId, deviceId: client.deviceId ?? undefined,
+        details: {
+          serverGeneration: this.serverStartedAtMs,
+          recoverySource: client.recoveryDecision?.source ?? 'no-valid-position',
+          manuscriptId: snapshot.manuscript.manuscriptId,
+          manuscriptRevision: snapshot.manuscriptRevision,
+          tokenIndex: snapshot.acceptedPosition.tokenIndex,
+          character: snapshot.acceptedPosition.character,
+          narrationSessionId: snapshot.narrationSessionId
+        }
+      });
+    }
     if (client.knownManuscriptHash === snapshot.manuscript.contentHash) {
       this.send(client, 'sessionState', compactSessionState(snapshot));
       return;
@@ -925,6 +1030,56 @@ export class PrompterServer {
       connectionId: client.connectionId, deviceId: client.deviceId ?? undefined,
       details: { contentHash: snapshot.manuscript.contentHash, messageCount: messages.length, chunked: messages.length > 1 }
     });
+  }
+
+  private resolveClientRecovery(client: Client) {
+    const snapshot = this.options.session.getSnapshot();
+    const checkpoint = snapshot ? this.options.checkpoints?.get(snapshot.manuscript.contentHash) ?? null : null;
+    const decision = this.options.session.resolveRecovery(
+      client.deviceId ?? 'unknown',
+      client.knownManuscriptHash,
+      client.recoveryClaim,
+      checkpoint
+    );
+    client.recoveryDecision = decision;
+    client.recoveryBlocked = decision.blocked;
+    if (decision.accepted && decision.acceptedTokenIndex !== null && decision.acceptedCharacter !== null) {
+      this.scheduleCheckpoint(decision.acceptedTokenIndex, decision.acceptedCharacter);
+      this.projectRecoveryToRenderer(decision);
+      this.startupRecoveryResolved = true;
+      if (this.startupRecoveryTimer) clearTimeout(this.startupRecoveryTimer);
+      this.startupRecoveryTimer = null;
+    }
+    const signature = JSON.stringify(decision);
+    if (signature !== client.lastRecoverySignature) {
+      client.lastRecoverySignature = signature;
+      this.log({
+        component: 'server.session', level: decision.accepted ? 'info' : 'warn', event: 'session.recovery.decision',
+        message: decision.reason, connectionId: client.connectionId, deviceId: client.deviceId ?? undefined,
+        details: {
+          ...decision,
+          serverGeneration: this.serverStartedAtMs,
+          tabletIdentity: client.deviceId,
+          narrationSessionIdAfter: this.options.session.getSnapshot()?.narrationSessionId ?? null,
+          validationResult: decision.accepted ? 'accepted' : 'rejected'
+        }
+      });
+    }
+    return decision;
+  }
+
+  private projectRecoveryToRenderer(decision: RecoveryDecision) {
+    const state = this.options.session.getState();
+    if (!state) return;
+    const signature = `${decision.manuscriptHash}:${decision.acceptedTokenIndex}:${decision.acceptedCharacter}:${decision.source}`;
+    if (signature === this.lastProjectedRecoverySignature) return;
+    this.lastProjectedRecoverySignature = signature;
+    this.options.onRecoveryAdopted?.(state, decision);
+  }
+
+  private scheduleCheckpoint(tokenIndex?: number, character?: number) {
+    const checkpoint = this.options.session.createCheckpoint(tokenIndex, Date.now(), character);
+    if (checkpoint) this.options.checkpoints?.schedule(checkpoint);
   }
 
   private send(client: Client, type: string, payload: unknown) {

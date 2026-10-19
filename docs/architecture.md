@@ -81,6 +81,16 @@ Language-neutral JSON Schemas and compatibility rules live under `shared/protoco
 
 `manualReposition.inputSource` is shared and validated as `touch`, `pointer`, `fast-scroll`, or `unknown`. Android's fast-scroll control uses `fast-scroll`; all variants still become semantic manual anchors rather than cross-platform pixel positions.
 
+## USB Tablet Transport
+
+`electron/usb/AdbTransportService.ts` is a bounded transport adapter around the installed ADB executable. It discovers ADB without downloading it, parses `adb devices -l`, requires a single authorized device or an explicit Advanced selection, applies a short stable-device interval, and owns reverse-rule setup/removal. The desktop listener binds all local IPv4 interfaces while DNS-SD continues to advertise only the selected private LAN address. This permits ADB's host-side loopback connection without weakening WebSocket authentication.
+
+The desktop launches the fixed `app.prompter.tablet.action.CONNECT_USB` action and explicit component with separately typed `usb_server_id`, integer `usb_port`, and `usb_mode` extras. Sender and receiver reject missing, duplicate, unknown, mistyped, out-of-range, or shell-hostile values. This avoids URI query metacharacters at the ADB remote-shell boundary. Credentials remain keyed to the server ID from the authenticated challenge; the intent carries no credential. Launch and handshake failures back off exponentially for a bounded attempt count, then require a meaningful topology change or explicit Advanced retry.
+
+`PairedDeviceStore` has only two record mutations: approved pairing saves/upserts a device and explicit tray Forget removes one. Writes use a same-directory temporary file plus atomic rename. Read, parse, or record-decryption failures block persistence so a damaged database cannot be replaced by a partial or empty in-memory view. Load, save, forget, and blocked-load audit events exclude credentials.
+
+Android treats a transport change as a socket handoff, not a session change. A second `WebSocketClient` authenticates while the current socket remains active. Matching server identity is required before atomic promotion, and only then is the retiring socket closed. A transport-generation fence rejects its late callbacks; existing audio generation and server connection-ID checks reject stale metadata/PCM. `PrompterServer` already retains a controller lease when an authenticated replacement connection for the same device exists, so the shared coordinator, narration session, manuscript position, and manual anchor are preserved. USB loss selects the stored LAN endpoint unless Advanced diagnostics explicitly selected USB only.
+
 ## UI and Debug Flow
 
 `src/components/ControlPanel.tsx` owns the main controls, compact ASR provider status, Mic Monitor controls, and the Developer-mode troubleshooting surfaces. Normal mode shows daily narrator controls only; Developer mode reveals Mock playback, Manual transcript injection, Local Whisper internals, bridge diagnostics, movement diagnostics, scroll proof controls, transcript history, shortcuts, torture tests, and raw debug output.

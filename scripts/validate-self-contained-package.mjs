@@ -7,6 +7,7 @@ const packageDir = path.join(root, 'release', 'win-unpacked');
 const resourcesDir = path.join(packageDir, 'resources');
 const sidecarDir = path.join(resourcesDir, 'whisper-sidecar');
 const sidecarExe = path.join(sidecarDir, 'whisper-sidecar.exe');
+const prepSidecarExe = path.join(resourcesDir, 'manuscript-prep-worker', 'manuscript-prep-worker.exe');
 const modelDir = path.join(resourcesDir, 'models', 'base.en');
 const requiredModelFiles = ['config.json', 'model.bin', 'tokenizer.json', 'vocabulary.txt'];
 const gpuFilePattern = /cuda|cudnn|cublas|cufft|curand|cusolver|cusparse|nvidia|rocm|hip/i;
@@ -16,6 +17,7 @@ const requiredPaths = [
   path.join(resourcesDir, 'app.asar'),
   path.join(resourcesDir, 'THIRD_PARTY_NOTICES.md'),
   sidecarExe,
+  prepSidecarExe,
   modelDir,
   ...requiredModelFiles.map((fileName) => path.join(modelDir, fileName))
 ];
@@ -61,4 +63,5 @@ if (gpuFiles.length > 0) {
 
 console.log('Self-contained package resources validated:');
 console.log(`- ${path.relative(root, sidecarExe)}`);
+console.log(`- ${path.relative(root, prepSidecarExe)}`);
 console.log(`- ${path.relative(root, modelDir)}`);

@@ -61,3 +61,7 @@ The Display panel's Movement decision area uses a 160 WPM expected-progress corr
 ## Generated and Local Files
 
 Build outputs, local env files, logs, temp audio chunks, Python caches, virtual environments, and `node_modules/` should remain uncommitted. Some smoke-test images under `logs/` may already be tracked from earlier work; do not remove tracked files unless the task explicitly asks.
+
+## USB Transport Requires Existing Platform Tools and Pairing
+
+Prompter does not bundle or download ADB. Automatic USB transport requires Android Platform Tools to be discoverable and USB debugging to be authorized. The tablet and desktop must both retain their matching pairing records because the USB launch intent deliberately contains no secret. Real cable behavior, OEM authorization prompts, Windows ADB-driver behavior, and make-before-break timing still require physical verification.

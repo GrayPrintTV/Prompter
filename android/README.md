@@ -36,6 +36,8 @@ The result is SHA-256 HMAC encoded as unpadded base64url. Unit tests use a vecto
 
 Android's network security XML cannot express RFC1918 CIDR ranges. Cleartext is enabled for this prototype at the manifest layer, while `PrompterConnectionRepository` refuses non-private IPv4 destinations before opening `ws://`. This is access scoping, not confidentiality: manuscript and microphone audio remain visible to a capable observer on the LAN. Certificate-pinned WSS is required before wider distribution.
 
+USB mode reuses the same authenticated protocol through `adb reverse`; it is not a second unauthenticated control path. The only loopback endpoint accepted comes from a fixed explicit action/component with validated server-ID, integer-port, and mode extras. The desktop normally discovers and launches it automatically. An authenticated USB candidate is promoted before the old LAN socket is retired, while socket/audio generations fence stale traffic.
+
 ## Physical SM-X200 workflow
 
 1. On the tablet, open Settings → About tablet → Software information and tap Build number seven times.
@@ -50,4 +52,6 @@ Android's network security XML cannot express RFC1918 CIDR ranges. Cleartext is 
 10. Grant microphone permission, tap **Start microphone**, narrate, and verify transcript and semantic scrolling.
 11. Disable/re-enable Wi-Fi or restart the Windows server and verify reconnect/snapshot restoration.
 
-The server is off after every Windows launch. The normal path uses DNS-SD `_prompter._tcp.local.`; manual private address and port 43127 are fallback only. VPN/virtual adapters on Windows may advertise an address the tablet cannot reach.
+The server normally starts off after each Windows launch; detection of one stable authorized USB tablet enables it automatically. The LAN path uses DNS-SD `_prompter._tcp.local.`; manual private address and port 43127 are fallback only. VPN/virtual adapters on Windows may advertise an address the tablet cannot reach.
+
+For USB verification after the tablet has been paired once, leave Prompter Tablet installed and USB debugging enabled, connect one authorized tablet, and start the desktop build. The desktop uses tablet-local port 43128 by default and enables its server automatically after the cable is stable. Do not run a manual `adb reverse` at the same time. Advanced diagnostics shows ADB/device/tunnel state and permits LAN-only or USB-only troubleshooting.

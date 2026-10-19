@@ -30,3 +30,7 @@ tmp-audio/
 chunk-*.webm
 chunk-*.wav
 chunk-*.ogg
+
+# Local Manuscript Prep project artifacts and author material.
+book-projects/
+manuscript-prep/

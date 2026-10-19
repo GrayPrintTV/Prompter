@@ -21,6 +21,24 @@
     "timestampMs": { "type": "integer", "minimum": 0 },
     "protocolMajor": { "type": "integer", "minimum": 0 },
     "protocolMinor": { "type": "integer", "minimum": 0 },
+    "cachedManuscriptHash": { "type": "string", "pattern": "^sha256:[A-Fa-f0-9]{64}$" },
+    "recoveryClaim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "manuscriptId", "contentHash", "manuscriptRevision", "tokenIndex", "character", "sentenceIndex", "paragraphIndex", "anchorFingerprint", "capturedAtMs"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "manuscriptId": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "contentHash": { "type": "string", "pattern": "^sha256:[A-Fa-f0-9]{64}$" },
+        "manuscriptRevision": { "type": "integer", "minimum": 0 },
+        "tokenIndex": { "type": "integer", "minimum": 0 },
+        "character": { "type": "integer", "minimum": 0 },
+        "sentenceIndex": { "type": "integer", "minimum": 0 },
+        "paragraphIndex": { "type": "integer", "minimum": 0 },
+        "anchorFingerprint": { "type": "string", "pattern": "^sha256:[A-Fa-f0-9]{64}$" },
+        "capturedAtMs": { "type": "integer", "minimum": 0 }
+      }
+    },
     "reason": { "type": "string", "minLength": 1, "maxLength": 500 }
   },
   "allOf": [

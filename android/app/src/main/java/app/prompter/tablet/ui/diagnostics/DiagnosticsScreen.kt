@@ -59,6 +59,9 @@ fun DiagnosticsScreen(state: MainUiState, viewModel: MainViewModel, onBack: () -
             item { Diagnostic("Controller lease", "${state.connectionDiagnostics.controllerLeaseState} (${state.connectionDiagnostics.controllerLease})") }
             item { Diagnostic("Registered audio stream", state.connectionDiagnostics.registeredAudioStreamId ?: "waiting for server acknowledgement") }
             item { Diagnostic("Audio socket generation", state.connectionDiagnostics.audioSocketGeneration?.toString() ?: "none") }
+            item { Diagnostic("Active transport", state.connectionDiagnostics.activeTransport) }
+            item { Diagnostic("Candidate transport", state.connectionDiagnostics.candidateTransport ?: "none") }
+            item { Diagnostic("Transport status", state.connectionDiagnostics.transportMessage ?: "—") }
             item { Diagnostic("Server audio connection", state.connectionDiagnostics.serverAudioConnectionGeneration ?: "none") }
             item { Diagnostic("Registration attempts", state.connectionDiagnostics.streamRegistrationAttempts.toString()) }
             item { Diagnostic("Queued manual anchor", state.connectionDiagnostics.pendingManualAnchorTokenIndex?.let { "token $it — ${state.connectionDiagnostics.pendingManualAnchorReason ?: "waiting"}" } ?: "—") }

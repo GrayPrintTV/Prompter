@@ -49,5 +49,8 @@ data class ConnectionDiagnostics(
     val serverProtocolMinor: Int? = null,
     val serverBuild: BuildIdentityPayload? = null,
     val serverStartedAtMs: Long? = null,
+    val activeTransport: String = "none",
+    val candidateTransport: String? = null,
+    val transportMessage: String? = null,
     val cleartextWarning: String = "Manuscript and microphone audio are authenticated but not encrypted in transit."
 )

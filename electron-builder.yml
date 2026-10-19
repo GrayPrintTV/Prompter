@@ -1,7 +1,7 @@
-appId: com.narrationprompter.prompter
-productName: Prompter
+appId: com.narrationprompter.prompter.candidate
+productName: Prompter Release Candidate
 executableName: Prompter
-artifactName: ${productName}-Setup-${version}-${arch}.${ext}
+artifactName: Prompter-Candidate-Setup-${version}-${arch}.${ext}
 directories:
   output: release
 asar: true
@@ -65,6 +65,12 @@ files:
   - '!**/test/**'
   - '!**/tests/**'
 extraResources:
+  - from: build/build-identity.json
+    to: build-identity.json
+  - from: packaging/licenses
+    to: licenses/upstream
+  - from: build/licenses
+    to: licenses
   - from: assets/icons
     to: assets/icons
     filter:
@@ -75,6 +81,10 @@ extraResources:
       - '*.json'
   - from: build/whisper-sidecar/dist/whisper-sidecar
     to: whisper-sidecar
+    filter:
+      - '**/*'
+  - from: build/manuscript-prep-worker/dist/manuscript-prep-worker
+    to: manuscript-prep-worker
     filter:
       - '**/*'
   - from: build/models/base.en
@@ -102,7 +112,7 @@ nsis:
   allowToChangeInstallationDirectory: true
   createStartMenuShortcut: true
   createDesktopShortcut: true
-  shortcutName: Prompter
-  uninstallDisplayName: Prompter
+  shortcutName: Prompter Release Candidate
+  uninstallDisplayName: Prompter Release Candidate
   deleteAppDataOnUninstall: false
   runAfterFinish: false

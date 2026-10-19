@@ -10,6 +10,7 @@ import { PairingService } from '../../electron/server/PairingService';
 import { PrompterServer } from '../../electron/server/PrompterServer';
 import { ProtocolValidator } from '../../electron/server/ProtocolValidator';
 import { ServerSessionBridge } from '../../electron/server/ServerSessionBridge';
+import { NarrationCheckpointStore } from '../../electron/server/NarrationCheckpointStore';
 import { DEFAULT_DISPLAY_SETTINGS } from '../state/appStore';
 import { PROTOCOL_MAJOR, PROTOCOL_MINOR } from '../../shared/protocol/protocol-version';
 
@@ -413,4 +414,139 @@ describe('Windows-only simulated tablet', () => {
     await server.disable();
     expect(discovery.stops).toBeGreaterThan(0);
   }, 15_000);
+
+  it('uses the authenticated tablet claim before the first snapshot after a Windows process restart', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'prompter-recovery-e2e-'));
+    const devices = new PairedDeviceStore(path.join(root, 'devices.json'), storage);
+    await devices.load();
+    const credential = 'restart-recovery-credential';
+    await devices.save({
+      deviceId: 'tablet-1', displayName: 'Galaxy Tab', model: 'SM-X200', credential,
+      createdAt: Date.now(), lastConnectedAt: null, lastKnownAddress: null,
+      protocolMajor: PROTOCOL_MAJOR, protocolMinor: PROTOCOL_MINOR
+    });
+    const session = new ServerSessionBridge();
+    session.applyRendererSync({
+      rendererRevision: 1,
+      manuscriptText: 'One two three. Four five six. Seven eight nine.',
+      manuscriptId: 'restart-book',
+      currentTokenIndex: 0,
+      followState: 'following',
+      displaySettings: DEFAULT_DISPLAY_SETTINGS,
+      selectedProviderId: 'manual',
+      transcriptSourceActive: false,
+      sessionResetId: 0
+    });
+    const retained = session.createCheckpoint(6, 123_000)!;
+    const claim = {
+      schemaVersion: 1 as const,
+      manuscriptId: retained.manuscriptId,
+      contentHash: retained.manuscriptHash,
+      manuscriptRevision: retained.manuscriptRevision,
+      tokenIndex: retained.tokenIndex,
+      character: retained.character,
+      sentenceIndex: retained.sentenceIndex,
+      paragraphIndex: retained.paragraphIndex,
+      anchorFingerprint: retained.anchorFingerprint,
+      capturedAtMs: 123_000
+    };
+    const events: Array<{ event: string; details?: Record<string, unknown> }> = [];
+    const localDiscovery = {
+      async start() {}, async update() {}, async stop() {},
+      diagnostics() { return { advertising: true, serviceType: '_prompter._tcp.local.', lastError: null }; }
+    };
+    const server = new PrompterServer({
+      serverId: 'server-1', productVersion: 'test', computerName: 'Test-PC', port: 0,
+      pairing: new PairingService(devices, async () => ({ approved: false })),
+      devices, discovery: localDiscovery as never, session,
+      protocolValidator: new ProtocolValidator(path.join(process.cwd(), 'shared', 'protocol', 'schemas')),
+      diagnostics: { record(input) { events.push({ event: input.event, details: input.details }); return {} as never; } },
+      enumerateAddresses: () => ['127.0.0.1'],
+      whisperSettings: { pythonExecutablePath: 'python', modelName: 'base.en', device: 'cpu', computeType: 'int8', chunkDurationSeconds: 2 },
+      transcribe: async () => ({ text: '' })
+    });
+    const status = await server.enable();
+    const tablet = client(`ws://127.0.0.1:${status.port}`);
+    await tablet.opened;
+    const challenge = await tablet.receive('serverChallenge');
+    const clientNonce = 'restart-nonce';
+    tablet.socket.send(envelope('authenticate', {
+      action: 'authenticate',
+      deviceId: 'tablet-1',
+      clientNonce,
+      timestampMs: Date.now(),
+      proof: AuthenticationService.createProof(
+        credential, challenge.payload.nonce, clientNonce, 'server-1', 'tablet-1', PROTOCOL_MAJOR,
+        AuthenticationService.recoveryClaimBinding(claim)
+      ),
+      protocolMajor: PROTOCOL_MAJOR,
+      protocolMinor: PROTOCOL_MINOR,
+      cachedManuscriptHash: claim.contentHash,
+      recoveryClaim: claim
+    }));
+    await tablet.receive('authenticated');
+    const firstPositionSnapshot = await tablet.receive('sessionState');
+    expect(firstPositionSnapshot.payload.acceptedPosition).toEqual(expect.objectContaining({
+      tokenIndex: claim.tokenIndex,
+      character: claim.character
+    }));
+    expect(firstPositionSnapshot.payload.acceptedPosition.tokenIndex).not.toBe(0);
+    expect(events.find((event) => event.event === 'session.recovery.decision')?.details).toEqual(expect.objectContaining({
+      source: 'tablet',
+      acceptedTokenIndex: claim.tokenIndex,
+      validationResult: 'accepted'
+    }));
+    expect(events.find((event) => event.event === 'session.recovery.first_snapshot')?.details).toEqual(expect.objectContaining({
+      recoverySource: 'tablet',
+      tokenIndex: claim.tokenIndex
+    }));
+    tablet.socket.close();
+    await server.disable();
+  }, 10_000);
+
+  it('completes bounded startup recovery from the durable checkpoint when no tablet is available', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'prompter-no-tablet-recovery-'));
+    const devices = new PairedDeviceStore(path.join(root, 'devices.json'), storage);
+    await devices.load();
+    const sync = {
+      rendererRevision: 1,
+      manuscriptText: 'One two three. Four five six. Seven eight nine.',
+      manuscriptId: 'restart-book',
+      currentTokenIndex: 0,
+      followState: 'following' as const,
+      displaySettings: DEFAULT_DISPLAY_SETTINGS,
+      selectedProviderId: 'manual' as const,
+      transcriptSourceActive: false,
+      sessionResetId: 0
+    };
+    const prior = new ServerSessionBridge();
+    prior.applyRendererSync(sync);
+    const retained = prior.createCheckpoint(6, 123_000)!;
+    const checkpoints = new NarrationCheckpointStore(path.join(root, 'checkpoints.json'), { debounceMs: 60_000 });
+    checkpoints.schedule(retained);
+    await checkpoints.flush();
+
+    const recovered = new ServerSessionBridge();
+    recovered.applyRendererSync(sync);
+    const projected: number[] = [];
+    const events: string[] = [];
+    const server = new PrompterServer({
+      serverId: 'server-1', productVersion: 'test', computerName: 'Test-PC', port: 0,
+      pairing: new PairingService(devices, async () => ({ approved: false })),
+      devices,
+      discovery: { async start() {}, async update() {}, async stop() {}, diagnostics: () => ({ advertising: false, serviceType: '_prompter._tcp.local.', lastError: null }) } as never,
+      session: recovered,
+      checkpoints,
+      startupRecoveryTimeoutMs: 0,
+      onRecoveryAdopted: (state) => projected.push(state.currentTokenIndex),
+      diagnostics: { record(input) { events.push(input.event); return {} as never; } },
+      whisperSettings: { pythonExecutablePath: 'python', modelName: 'base.en', device: 'cpu', computeType: 'int8', chunkDurationSeconds: 2 },
+      transcribe: async () => ({ text: '' })
+    });
+    expect(server.beginStartupRecovery()).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(recovered.getState()!.currentTokenIndex).toBe(retained.tokenIndex);
+    expect(projected).toEqual([retained.tokenIndex]);
+    expect(events).toContain('session.recovery.decision');
+  });
 });

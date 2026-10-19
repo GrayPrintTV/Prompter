@@ -26,10 +26,13 @@ if (!existsSync(pythonExe)) {
   process.exit(1);
 }
 
-if (process.env.WHISPER_SIDECAR_FORCE_REBUILD !== '1' && newerThanInputs(outputExe, [specPath, sidecarSource, lockFile])) {
+if (process.env.WHISPER_SIDECAR_ALLOW_REUSE === '1' && newerThanInputs(outputExe, [specPath, sidecarSource, lockFile])) {
   console.log(`Reusing existing Local Whisper sidecar: ${path.relative(root, outputExe)}`);
   process.exit(0);
 }
+
+const inventory = spawnSync(pythonExe, ['-B', path.join(root, 'scripts', 'collect-python-licenses.py')], { cwd: root, stdio: 'inherit', windowsHide: true });
+if (inventory.status !== 0) process.exit(inventory.status ?? 1);
 
 const result = spawnSync(
   pythonExe,

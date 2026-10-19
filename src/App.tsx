@@ -59,10 +59,11 @@ import {
   type SessionCoordinatorState,
   type VisibleReacquireAnchor
 } from './session/SessionCoordinator';
-import type { ServerStatusSummary, TabletModeStatus } from '../shared/protocol/messages';
+import type { ServerStatusSummary, TabletModeStatus, UsbTransportMode } from '../shared/protocol/messages';
 import { rendererProjectionForTabletUpdate } from './session/tabletAuthority';
 import type { ManualScrollInputSource } from './domain/manualFollow';
 import { LocalWhisperTelemetryAccumulator } from './diagnostics/LocalWhisperTelemetry';
+import { ManuscriptPrepWorkspace } from './components/ManuscriptPrepWorkspace';
 
 function emptyAlignment(model: ManuscriptModel, tokenIndex: number): AlignmentResult {
   const sentenceIndex = findSentenceIndexForToken(model, tokenIndex);
@@ -146,6 +147,8 @@ export default function App() {
   const initialProviderAllowedInNormalMode =
     initialStoredProviderId === 'manual' || initialStoredProviderId === 'local-whisper';
   const [projectTitle, setProjectTitle] = useState(stored?.projectTitle ?? 'Narration Session');
+  const [approvedManuscript, setApprovedManuscript] = useState(stored?.approvedManuscript);
+  const [approvalError, setApprovalError] = useState<string | null>(null);
   const [manuscriptText, setManuscriptText] = useState(stored?.manuscriptText ?? SAMPLE_MANUSCRIPT);
   const [displaySettings, setDisplaySettings] = useState<DisplaySettings>(() =>
     resolveInitialDisplaySettings(stored?.displaySettings, {
@@ -213,6 +216,7 @@ export default function App() {
     deviceName: null,
     reason: 'No tablet controller lease'
   });
+  const [manuscriptPrepOpen, setManuscriptPrepOpen] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const prompterStageRef = useRef<HTMLDivElement | null>(null);
@@ -608,11 +612,28 @@ export default function App() {
       const decision = result.state.movementDecision;
       const rejectedAsStale = result.state.alignmentBufferDebug.moveDecision === 'ignored stale pre-anchor transcript';
       const alignmentAccepted = decision?.finalMovement === 'accepted' || decision?.finalMovement === 'corrected';
+      const debug = result.state.alignmentBufferDebug;
+      const rejection = alignmentAccepted ? undefined : {
+        category: debug.rejectionCategory ?? (rejectedAsStale ? 'stale-pre-anchor' : 'unknown'),
+        currentTokenIndex: result.state.currentTokenIndex,
+        candidateStartTokenIndex: debug.selectedCandidateStartTokenIndex ?? null,
+        candidateEndTokenIndex: debug.selectedCandidateEndTokenIndex ?? null,
+        confidence: Number.isFinite(debug.confidence) ? Math.round(debug.confidence * 1_000) / 1_000 : null,
+        matchedWordCount: debug.newDeltaMatchedWordCount ?? null,
+        distinctiveMatchedWordCount: debug.newDeltaDistinctiveMatchedWordCount ?? null,
+        lowConfidenceCount: debug.lowConfidenceCount ?? null,
+        followState: result.state.followState,
+        transcriptAgeMs: delta.telemetry ? Math.max(0, acceptedAtMs - delta.telemetry.capturedAtMs) : null,
+        rendererBacklogMs: delta.telemetry
+          ? Math.max(0, delta.telemetry.rendererDispatchedAtMs - (delta.telemetry.capturedAtMs + delta.telemetry.audioDurationMs))
+          : null
+      };
       localWhisperTelemetryRef.current.recordCoordinatorResult({
         telemetry: delta.telemetry,
         acceptedAtMs,
         rejectedAsStale,
         alignmentAccepted,
+        rejection,
         visibleMovementExpected: Boolean(
           alignmentAccepted && decision && decision.confirmedTokenIndex !== decision.previousAnchorTokenIndex
         )
@@ -781,6 +802,7 @@ export default function App() {
     const timer = window.setTimeout(() => {
       saveSession({
         projectTitle,
+        approvedManuscript,
         manuscriptText,
         currentTokenIndex,
         currentSentenceIndex,
@@ -796,6 +818,7 @@ export default function App() {
     }, 300);
     return () => window.clearTimeout(timer);
   }, [
+    approvedManuscript,
     currentParagraphIndex,
     currentSentenceIndex,
     currentTokenIndex,
@@ -811,6 +834,13 @@ export default function App() {
   ]);
 
   const toggleFollow = useCallback(async () => {
+    if (approvedManuscript && !isListening && !isMockPlaying) {
+      try {
+        const verified = await window.prompterApi?.readPrepApproved(approvedManuscript.projectId, approvedManuscript.approvedId);
+        if (!verified || verified.textSha256 !== approvedManuscript.textSha256 || verified.text !== manuscriptText) throw new Error('Approved text identity no longer matches. Reselect the approval in Manuscript Prep.');
+        setApprovalError(null);
+      } catch (error) { setApprovalError(String(error)); return; }
+    }
     if (followStateRef.current === 'manual') {
       await requestStartupVisibleAnchor();
       enterFollowing();
@@ -1049,7 +1079,9 @@ export default function App() {
     requestStartupVisibleAnchor,
     sessionCoordinator,
     settleMicStartupGrace,
-    stopMock
+    stopMock,
+    approvedManuscript,
+    manuscriptText
   ]);
 
   const importTxt = useCallback(async () => {
@@ -1061,7 +1093,8 @@ export default function App() {
         if (!result) return;
         setManuscriptImportError(null);
         setProjectTitle(result.name.replace(/\.[^.]+$/, '') || result.name);
-        setManuscriptText(cleanupImportedManuscriptText(result.text, {
+        setApprovedManuscript(undefined);
+      setManuscriptText(cleanupImportedManuscriptText(result.text, {
           addExtraSpacingBetweenLines: displaySettings.addExtraSpacingOnImport
         }));
         resetAlignmentContext();
@@ -1093,6 +1126,7 @@ export default function App() {
     reader.onload = () => {
       setManuscriptImportError(null);
       setProjectTitle(file.name.replace(/\.[^.]+$/, '') || file.name);
+      setApprovedManuscript(undefined);
       setManuscriptText(cleanupImportedManuscriptText(String(reader.result ?? ''), {
         addExtraSpacingBetweenLines: displaySettings.addExtraSpacingOnImport
       }));
@@ -1133,6 +1167,30 @@ export default function App() {
   const prepareTablet = useCallback(() => {
     void window.prompterApi?.prepareTablet()
       .then(setTabletStatus)
+      .catch(() => undefined);
+  }, []);
+
+  const setTabletUsbMode = useCallback((mode: UsbTransportMode) => {
+    void window.prompterApi?.setTabletUsbMode(mode)
+      .then((usbTransport) => {
+        if (usbTransport) setTabletStatus((current) => current ? { ...current, usbTransport } : current);
+      })
+      .catch(() => undefined);
+  }, []);
+
+  const selectTabletUsbDevice = useCallback((serial: string | null) => {
+    void window.prompterApi?.selectTabletUsbDevice(serial)
+      .then((usbTransport) => {
+        if (usbTransport) setTabletStatus((current) => current ? { ...current, usbTransport } : current);
+      })
+      .catch(() => undefined);
+  }, []);
+
+  const retryTabletUsb = useCallback(() => {
+    void window.prompterApi?.retryTabletUsb()
+      .then((usbTransport) => {
+        if (usbTransport) setTabletStatus((current) => current ? { ...current, usbTransport } : current);
+      })
       .catch(() => undefined);
   }, []);
 
@@ -1379,12 +1437,21 @@ export default function App() {
           Tablet control — {tabletModeStatus.deviceName ?? 'Android tablet'} is running narration
         </div>
       )}
+      {approvalError && <p role="alert">{approvalError}</p>}
+      <p>{approvedManuscript ? `Approved manuscript · ${approvedManuscript.textSha256.slice(0, 12)}` : 'Unapproved reader text — use Manuscript Prep for a verified manuscript.'}</p>
+      {manuscriptPrepOpen && <ManuscriptPrepWorkspace onClose={() => setManuscriptPrepOpen(false)} onSelect={(value) => {
+        if (isListening || isMockPlaying || localWhisperStatus.listening || liveStatus.listening) { setApprovalError('Stop following before changing the approved manuscript.'); return; }
+        setApprovedManuscript({ projectId: value.projectId, approvedId: value.approvedId, textSha256: value.textSha256 });
+        setManuscriptText(value.text); setProjectTitle(value.sourceDisplayName); setApprovalError(null);
+        resetAlignmentContext(); moveToToken(0, 'manual'); setManuscriptPrepOpen(false);
+      }} />}
       <ControlPanel
         projectTitle={projectTitle}
         onProjectTitleChange={setProjectTitle}
         manuscriptText={manuscriptText}
         onManuscriptTextChange={(text) => {
           setManuscriptImportError(null);
+          setApprovedManuscript(undefined);
           setManuscriptText(text);
         }}
         onImportTxt={importTxt}
@@ -1455,6 +1522,9 @@ export default function App() {
         lastStartDiagnostic={lastStartDiagnostic}
         tabletStatus={tabletStatus}
         onPrepareTablet={prepareTablet}
+        onSetTabletUsbMode={setTabletUsbMode}
+        onSelectTabletUsbDevice={selectTabletUsbDevice}
+        onRetryTabletUsb={retryTabletUsb}
         onQuitPrompter={quitPrompter}
         providerControlsDisabled={tabletMode}
       />
@@ -1469,6 +1539,7 @@ export default function App() {
           onStartStop={toggleListening}
           isPaused={followState === 'paused'}
           onTogglePause={togglePause}
+          onOpenManuscriptPrep={() => setManuscriptPrepOpen(true)}
           onToggleControls={() => setControlsVisible((visible) => !visible)}
         />
         <PrompterView

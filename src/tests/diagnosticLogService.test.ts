@@ -13,6 +13,7 @@ describe('DiagnosticLogService', () => {
     log.record({ component: 'server', level: 'info', event: 'server.listener.started', message: 'ready' });
     expect(log.list()).toHaveLength(2);
     expect(log.format()).toContain('close=1008');
+    await log.flush();
     const persisted = await readFile(log.logPath, 'utf8');
     expect(persisted).not.toContain('012345');
     expect(persisted).not.toContain('secret');

@@ -62,7 +62,12 @@ describe('LocalWhisperTelemetryAccumulator', () => {
       acceptedAtMs: 4_700,
       rejectedAsStale: false,
       alignmentAccepted: false,
-      visibleMovementExpected: false
+      visibleMovementExpected: false,
+      rejection: {
+        category: 'stale-context', currentTokenIndex: 24, candidateStartTokenIndex: 12, candidateEndTokenIndex: 24,
+        confidence: 0.91, matchedWordCount: 0, distinctiveMatchedWordCount: 0, lowConfidenceCount: 2,
+        followState: 'holding', transcriptAgeMs: 3_700, rendererBacklogMs: 500
+      }
     });
     accumulator.recordNarratorStatus('Following');
     accumulator.recordNarratorStatus('Stalled');
@@ -101,6 +106,14 @@ describe('LocalWhisperTelemetryAccumulator', () => {
     expect(aggregate?.latencyMs.captureToTranscript).toEqual({ count: 2, p50: 3_500, p90: 3_500, max: 3_500 });
     expect(aggregate?.latencyMs.transcriptToCoordinatorAcceptance).toEqual({ count: 1, p50: 10, p90: 10, max: 10 });
     expect(aggregate?.latencyMs.coordinatorToVisibleMovement).toEqual({ count: 1, p50: 20, p90: 20, max: 20 });
+    expect(aggregate).toMatchObject({
+      schemaVersion: 2,
+      alignmentRejections: {
+        byCategory: { 'stale-context': 1 },
+        samples: [expect.objectContaining({ category: 'stale-context', currentTokenIndex: 24, confidence: 0.91 })],
+        droppedSamples: 0
+      }
+    });
   });
 
   it('bounds retained latency samples and resets each emitted window', () => {
@@ -143,5 +156,28 @@ describe('LocalWhisperTelemetryAccumulator', () => {
     nowMs += 1;
     accumulator.recordProviderEvent({ type: 'chunk-captured', audioDurationSeconds: 2, queueDepth: 0 });
     expect(accumulator.drain()?.narratorStatusTransitions.total).toBe(0);
+  });
+
+  it('counts every rejection while retaining only bounded, text-free samples', () => {
+    const accumulator = new LocalWhisperTelemetryAccumulator(() => 0);
+    for (let index = 0; index < 40; index += 1) {
+      accumulator.recordCoordinatorResult({
+        acceptedAtMs: index,
+        rejectedAsStale: false,
+        alignmentAccepted: false,
+        visibleMovementExpected: false,
+        rejection: {
+          category: 'low-confidence', currentTokenIndex: index, candidateStartTokenIndex: null, candidateEndTokenIndex: null,
+          confidence: 0.2, matchedWordCount: 1, distinctiveMatchedWordCount: 0, lowConfidenceCount: index,
+          followState: 'holding', transcriptAgeMs: 2_000, rendererBacklogMs: 100
+        }
+      });
+    }
+    const aggregate = accumulator.drain(60_000)!;
+    expect(aggregate.alignmentRejections).toMatchObject({
+      byCategory: { 'low-confidence': 40 }, droppedSamples: 8
+    });
+    expect(aggregate.alignmentRejections?.samples).toHaveLength(32);
+    expect(JSON.stringify(aggregate.alignmentRejections)).not.toContain('recognized speech');
   });
 });

@@ -40,6 +40,7 @@ describe('SessionCoordinator characterization', () => {
     expect(empty.state.currentTokenIndex).toBe(start);
     expect(empty.state.followState).toBe('holding');
     expect(empty.state.alignmentBufferDebug.retentionReason).toBe('empty transcript');
+    expect(empty.state.alignmentBufferDebug.rejectionCategory).toBe('empty-transcript');
 
     const noise = coordinator.processTranscript(delta('unrelated slate note from producer'));
     expect(noise.state.currentTokenIndex).toBe(start);
@@ -50,11 +51,12 @@ describe('SessionCoordinator characterization', () => {
     const model = buildManuscript(SAMPLE_MANUSCRIPT);
     const later = searchManuscript(model, 'By noon the manuscript', 1) ?? 0;
     const coordinator = createCoordinator(SAMPLE_MANUSCRIPT, later);
-    const result = coordinator.processTranscript(delta('The studio light blinked once', 'mock'));
+    const result = coordinator.processTranscript(delta('The studio light blinked once', 'local-whisper'));
 
     expect(result.state.currentTokenIndex).toBe(later);
     expect(result.state.followState).toBe('holding');
     expect(result.state.alignmentBufferDebug.moveDecision).toContain('auto-backward candidate held');
+    expect(result.state.alignmentBufferDebug.rejectionCategory).toBe('automatic-backward');
   });
 
   it('does not refresh a stale anchor and reaches existing lost progression after repeated stale local candidates', () => {
@@ -156,6 +158,7 @@ describe('SessionCoordinator characterization', () => {
     expect(stale.state.manualReacquireAnchor).toBeNull();
     expect(stale.state.movementDecision?.finalMovement).toBe('ignored');
     expect(stale.state.alignmentBufferDebug.moveDecision).toBe('ignored stale pre-anchor transcript');
+    expect(stale.state.alignmentBufferDebug.rejectionCategory).toBe('stale-pre-anchor');
   });
 
   it('resets transcript evidence and revisions when the manuscript changes', () => {

@@ -77,6 +77,27 @@ export type ServerStatusSummary = {
   credentialStorage: 'encrypted' | 'plaintext-fallback';
   cleartextTransportWarning: string;
   lastError: string | null;
+  usbTransport?: UsbTransportStatus;
+};
+
+export type UsbTransportMode = 'auto' | 'lan-only' | 'usb-only';
+
+export type UsbDeviceSummary = {
+  serial: string;
+  state: 'authorized' | 'unauthorized' | 'offline' | 'unknown';
+  model: string | null;
+};
+
+export type UsbTransportStatus = {
+  mode: UsbTransportMode;
+  state: 'idle' | 'adb-missing' | 'no-device' | 'unauthorized' | 'multiple-devices' | 'stabilizing' | 'setting-up' | 'awaiting-tablet' | 'connected' | 'error' | 'lan-only';
+  adbPath: string | null;
+  devices: UsbDeviceSummary[];
+  selectedSerial: string | null;
+  tabletLocalPort: number;
+  desktopServerPort: number | null;
+  message: string;
+  lastError: string | null;
 };
 
 export type PairRequestPayload = {
@@ -101,7 +122,28 @@ export type AuthenticatePayload = {
   protocolMinor: number;
   clientBuild?: BuildIdentityPayload;
   cachedManuscriptHash?: string;
+  recoveryClaim?: TabletRecoveryClaim;
 };
+
+export type TabletRecoveryClaim = {
+  schemaVersion: 1;
+  manuscriptId: string;
+  contentHash: string;
+  manuscriptRevision: number;
+  tokenIndex: number;
+  character: number;
+  sentenceIndex: number;
+  paragraphIndex: number;
+  anchorFingerprint: string;
+  capturedAtMs: number;
+};
+
+export type RecoverySource =
+  | 'explicit-beginning'
+  | 'tablet'
+  | 'durable-checkpoint'
+  | 'desktop'
+  | 'no-valid-position';
 
 export type AudioStreamStartPayload = {
   action: 'start';
