@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const packageJson = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'));
-const installerName = `Prompter-Setup-${packageJson.version}-x64.exe`;
+const installerName = `Prompter-Candidate-Setup-${packageJson.version}-x64.exe`;
 const installerPath = path.join(root, 'release', installerName);
 const sidecarDir = path.join(root, 'release', 'win-unpacked', 'resources', 'whisper-sidecar');
 const minimumInstallerSizeBytes = 200 * 1024 * 1024;

@@ -3,7 +3,7 @@ import { readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { listPackage, extractFile } from '@electron/asar';
+import { listPackage, extractFile, statFile } from '@electron/asar';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const dir = path.resolve(process.argv[2] || path.join(root, 'release', 'win-unpacked'));
@@ -22,8 +22,10 @@ walk(dir);
 const asar = path.join(dir, 'resources', 'app.asar');
 const entries = [];
 for (const name of listPackage(asar)) {
-  try { const bytes = extractFile(asar, name.replace(/^[/\\]/, '')); entries.push({ path: name.replaceAll('\\','/'), bytes: bytes.length, sha256: digest(bytes) }); }
-  catch (error) { if (!String(error).includes('is a directory')) throw error; }
+  const relative = name.replace(/^[/\\]/, '');
+  if (statFile(asar, relative).files) continue;
+  const bytes = extractFile(asar, relative);
+  entries.push({ path: name.replaceAll('\\','/'), bytes: bytes.length, sha256: digest(bytes) });
 }
 const lock = JSON.parse(readFileSync(path.join(root,'package-lock.json'),'utf8'));
 const sourceCommit = execFileSync('git', ['rev-parse','HEAD'], { cwd:root, encoding:'utf8' }).trim();
