@@ -38,7 +38,7 @@ import { LiveTabletLogWindow } from './server/LiveTabletLogWindow.js';
 import { TabletModeController } from './server/TabletModeController.js';
 import type { StructuredDiagnosticEvent } from '#prompter-shared/protocol/diagnostics.js';
 import { BufferedJsonlLog } from './diagnostics/BoundedJsonlLog.js';
-import { AdbTransportService } from './usb/AdbTransportService.js';
+import { AdbTransportService, tabletRouteForAppId } from './usb/AdbTransportService.js';
 import { NarrationCheckpointStore } from './server/NarrationCheckpointStore.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -47,6 +47,7 @@ const isReleaseCandidate = app.getVersion().includes('-rc.') || isVocalCandidate
 const APP_ID = isVocalCandidate
   ? 'com.narrationprompter.prompter.vocalcandidate'
   : isReleaseCandidate ? 'com.narrationprompter.prompter.candidate' : 'com.narrationprompter.prompter';
+const tabletRoute = tabletRouteForAppId(APP_ID);
 if (isReleaseCandidate) {
   const candidateDataDirectory = isVocalCandidate ? 'Prompter Vocal Design Candidate' : 'Prompter Release Candidate';
   app.setName('Prompter');
@@ -267,7 +268,7 @@ async function initializeTabletServer() {
   prompterServer = new PrompterServer({
     serverId, productVersion: app.getVersion(), computerName: hostname(),
     buildInfo: electronBuildIdentity(),
-    port: Number(process.env.PROMPTER_SERVER_PORT || 43127), pairing, devices, discovery, session: serverSession,
+    port: isVocalCandidate ? tabletRoute.desktopServerPort : Number(process.env.PROMPTER_SERVER_PORT || tabletRoute.desktopServerPort), pairing, devices, discovery, session: serverSession,
     checkpoints: narrationCheckpoints,
     protocolValidator: new ProtocolValidator(protocolSchemaRoot),
     diagnostics: tabletDiagnostics,
@@ -328,6 +329,7 @@ async function initializeTabletServer() {
   });
   usbTransport = new AdbTransportService({
     rootDirectory: app.getAppPath(),
+    route: tabletRoute,
     ensureServer: async () => {
       if (!prompterServer) throw new Error('Tablet server is unavailable.');
       if (!prompterServer.getStatus().enabled) await prompterServer.enable();

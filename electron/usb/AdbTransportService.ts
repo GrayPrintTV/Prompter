@@ -20,6 +20,17 @@ const DEFAULT_RETRY_MAX_ATTEMPTS = 3;
 const DEFAULT_RETRY_COOLDOWN_MS = 60_000;
 export const USB_CONNECT_ACTION = 'app.prompter.tablet.action.CONNECT_USB';
 export const USB_CONNECT_COMPONENT = 'app.prompter.tablet/.MainActivity';
+export const VOCAL_USB_CONNECT_COMPONENT = 'app.prompter.tablet.vocalcandidate/app.prompter.tablet.MainActivity';
+export const VOCAL_USB_TABLET_PORT = 43130;
+export const VOCAL_DESKTOP_SERVER_PORT = 43129;
+export type UsbAppRoute = { component: string; tabletLocalPort: number; desktopServerPort: number; noRebind: boolean };
+export function tabletRouteForAppId(appId: string): UsbAppRoute {
+  if (appId === 'com.narrationprompter.prompter.vocalcandidate') return {
+    component: VOCAL_USB_CONNECT_COMPONENT, tabletLocalPort: VOCAL_USB_TABLET_PORT,
+    desktopServerPort: VOCAL_DESKTOP_SERVER_PORT, noRebind: true
+  };
+  return { component: USB_CONNECT_COMPONENT, tabletLocalPort: DEFAULT_USB_TABLET_PORT, desktopServerPort: 43127, noRebind: false };
+}
 export const USB_EXTRA_SERVER_ID = 'usb_server_id';
 export const USB_EXTRA_PORT = 'usb_port';
 export const USB_EXTRA_MODE = 'usb_mode';
@@ -39,6 +50,7 @@ export type AdbTransportDependencies = {
   pollIntervalMs?: number;
   stabilityMs?: number;
   tabletLocalPort?: number;
+  route?: UsbAppRoute;
   handoffGraceMs?: number;
   handshakeTimeoutMs?: number;
   retryBaseMs?: number;
@@ -110,22 +122,22 @@ export function parseAdbDevices(output: string): ParsedAdbDevice[] {
     .filter((device) => Boolean(device.serial));
 }
 
-export function reverseArguments(serial: string, tabletLocalPort: number, desktopServerPort: number) {
-  return ['-s', serial, 'reverse', `tcp:${tabletLocalPort}`, `tcp:${desktopServerPort}`];
+export function reverseArguments(serial: string, tabletLocalPort: number, desktopServerPort: number, noRebind = false) {
+  return ['-s', serial, 'reverse', ...(noRebind ? ['--no-rebind'] : []), `tcp:${tabletLocalPort}`, `tcp:${desktopServerPort}`];
 }
 
 export function removeReverseArguments(serial: string, tabletLocalPort: number) {
   return ['-s', serial, 'reverse', '--remove', `tcp:${tabletLocalPort}`];
 }
 
-export function launchUsbArguments(serial: string, serverId: string, tabletLocalPort: number, mode: UsbTransportMode = 'auto') {
+export function launchUsbArguments(serial: string, serverId: string, tabletLocalPort: number, mode: UsbTransportMode = 'auto', component = USB_CONNECT_COMPONENT) {
   if (!/^[A-Za-z0-9._:/-]{1,200}$/.test(serverId)) throw new Error('USB server identifier is invalid.');
   if (!Number.isInteger(tabletLocalPort) || tabletLocalPort < 1 || tabletLocalPort > 65_535) throw new Error('USB endpoint port is invalid.');
   if (!['auto', 'lan-only', 'usb-only'].includes(mode)) throw new Error('USB transport mode is invalid.');
   if (!/^[A-Za-z0-9._:-]{1,200}$/.test(serial)) throw new Error('ADB device serial is invalid.');
   return [
     '-s', serial, 'shell', 'am', 'start', '-W',
-    '-n', USB_CONNECT_COMPONENT,
+    '-n', component,
     '-a', USB_CONNECT_ACTION,
     '--es', USB_EXTRA_SERVER_ID, serverId,
     '--ei', USB_EXTRA_PORT, String(tabletLocalPort),
@@ -165,7 +177,7 @@ export class AdbTransportService {
       return { stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
     });
     this.now = deps.now ?? (() => Date.now());
-    this.tabletLocalPort = deps.tabletLocalPort ?? DEFAULT_USB_TABLET_PORT;
+    this.tabletLocalPort = deps.route?.tabletLocalPort ?? deps.tabletLocalPort ?? DEFAULT_USB_TABLET_PORT;
     this.stabilityMs = deps.stabilityMs ?? DEFAULT_STABILITY_MS;
     this.status = this.makeStatus('idle', 'USB tablet discovery has not started.');
   }
@@ -316,7 +328,7 @@ export class AdbTransportService {
       server = await this.deps.ensureServer();
       if (lifecycleGeneration !== this.lifecycleGeneration) return;
       if (this.tunnel) await this.removeTunnel();
-      await this.run(this.adbPath!, reverseArguments(device.serial, this.tabletLocalPort, server.port));
+      await this.run(this.adbPath!, reverseArguments(device.serial, this.tabletLocalPort, server.port, this.deps.route?.noRebind));
       if (lifecycleGeneration !== this.lifecycleGeneration) {
         try {
           await this.run(this.adbPath!, removeReverseArguments(device.serial, this.tabletLocalPort));
@@ -333,7 +345,7 @@ export class AdbTransportService {
     this.tunnel = { serial: device.serial, desktopPort: server.port, serverId: server.serverId, configuredAtMs: this.now() };
     this.loopbackConnected = false;
     try {
-      await this.run(this.adbPath!, launchUsbArguments(device.serial, server.serverId, this.tabletLocalPort, this.mode));
+      await this.run(this.adbPath!, launchUsbArguments(device.serial, server.serverId, this.tabletLocalPort, this.mode, this.deps.route?.component));
       if (lifecycleGeneration !== this.lifecycleGeneration) return;
     } catch (error) {
       if (lifecycleGeneration !== this.lifecycleGeneration) return;
@@ -365,7 +377,8 @@ export class AdbTransportService {
         tunnel.serial,
         tunnel.serverId,
         this.tabletLocalPort,
-        this.mode
+        this.mode,
+        this.deps.route?.component
       ));
       if (lifecycleGeneration !== this.lifecycleGeneration || this.tunnel !== tunnel) return;
       tunnel.configuredAtMs = this.now();
@@ -385,7 +398,8 @@ export class AdbTransportService {
           tunnel.serial,
           tunnel.serverId,
           this.tabletLocalPort,
-          'lan-only'
+          'lan-only',
+          this.deps.route?.component
         ));
       } catch {
         // Removing the reverse rule still makes the USB path unavailable; Android's socket failure remains truthful.

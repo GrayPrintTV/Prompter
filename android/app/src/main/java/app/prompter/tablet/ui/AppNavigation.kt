@@ -20,6 +20,7 @@ fun AppNavigation(state: MainUiState, viewModel: MainViewModel, onRequestMicroph
     val readingScheme = darkColorScheme(
         primary = Color(0xFFE2CF9E), onPrimary = Color(0xFF2C202C),
         secondary = Color(0xFF745A70), onSecondary = Color(0xFFF6EDF0),
+        secondaryContainer = Color(0xFF443141), onSecondaryContainer = Color(0xFFF6EDF0),
         background = Color(0xFF2C202C), onBackground = Color(0xFFF6EDF0),
         surface = Color(0xFF443141), onSurface = Color(0xFFF6EDF0),
         surfaceVariant = Color(0xFF443141), onSurfaceVariant = Color(0xFFC7B4C5),
@@ -28,6 +29,7 @@ fun AppNavigation(state: MainUiState, viewModel: MainViewModel, onRequestMicroph
     val controllerDark = darkColorScheme(
         primary = Color(0xFFE2CF9E), onPrimary = Color(0xFF2C202C),
         secondary = Color(0xFF745A70), onSecondary = Color(0xFFF6EDF0),
+        secondaryContainer = Color(0xFF443141), onSecondaryContainer = Color(0xFFF6EDF0),
         background = Color(0xFF2C202C), onBackground = Color(0xFFF6EDF0),
         surface = Color(0xFF443141), onSurface = Color(0xFFF6EDF0),
         surfaceVariant = Color(0xFF443141), onSurfaceVariant = Color(0xFFC7B4C5),
@@ -36,6 +38,7 @@ fun AppNavigation(state: MainUiState, viewModel: MainViewModel, onRequestMicroph
     val controllerLight = lightColorScheme(
         primary = Color(0xFF641A34), onPrimary = Color(0xFFFFF7F2),
         secondary = Color(0xFFE8ADBA), onSecondary = Color(0xFF641A34),
+        secondaryContainer = Color(0xFFFFF7F2), onSecondaryContainer = Color(0xFF641A34),
         background = Color(0xFFF1D3DB), onBackground = Color(0xFF641A34),
         surface = Color(0xFFFFF7F2), onSurface = Color(0xFF641A34),
         surfaceVariant = Color(0xFFE8ADBA), onSurfaceVariant = Color(0xFF7B4A5E),

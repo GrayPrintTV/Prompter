@@ -6,6 +6,8 @@ import {
   parseAdbDevices,
   removeReverseArguments,
   reverseArguments,
+  tabletRouteForAppId,
+  VOCAL_USB_CONNECT_COMPONENT,
   USB_CONNECT_ACTION,
   USB_CONNECT_COMPONENT,
   USB_EXTRA_MODE,
@@ -14,6 +16,37 @@ import {
 } from '../../electron/usb/AdbTransportService';
 
 describe('ADB USB transport', () => {
+  it('keeps the ordinary target and isolates the Vocal candidate target and reverse port', () => {
+    const ordinary = tabletRouteForAppId('com.narrationprompter.prompter');
+    const vocal = tabletRouteForAppId('com.narrationprompter.prompter.vocalcandidate');
+    expect(ordinary).toEqual({ component: USB_CONNECT_COMPONENT, tabletLocalPort: 43128, desktopServerPort: 43127, noRebind: false });
+    expect(vocal).toEqual({ component: VOCAL_USB_CONNECT_COMPONENT, tabletLocalPort: 43130, desktopServerPort: 43129, noRebind: true });
+    expect(reverseArguments('A1', vocal.tabletLocalPort, vocal.desktopServerPort, vocal.noRebind)).toEqual([
+      '-s', 'A1', 'reverse', '--no-rebind', 'tcp:43130', 'tcp:43129'
+    ]);
+    expect(launchUsbArguments('A1', 'server-1', vocal.tabletLocalPort, 'auto', vocal.component)).toContain(VOCAL_USB_CONNECT_COMPONENT);
+  });
+
+  it('uses the Vocal route throughout setup and cleanup without touching the ordinary tunnel', async () => {
+    const commands: string[][] = [];
+    const route = tabletRouteForAppId('com.narrationprompter.prompter.vocalcandidate');
+    const service = new AdbTransportService({
+      rootDirectory: 'C:\\repo', route, environment: { PROMPTER_ADB_PATH: 'adb.exe' }, exists: () => true,
+      stabilityMs: 0, now: () => 10,
+      run: async (_executable, args) => {
+        commands.push(args);
+        return { stdout: args[0] === 'devices' ? 'List of devices attached\nA1\tdevice model:SM_X200\n' : '', stderr: '' };
+      },
+      ensureServer: async () => ({ serverId: 'server-1', port: route.desktopServerPort })
+    });
+    await service.poll();
+    await service.poll();
+    expect(commands).toContainEqual(reverseArguments('A1', 43130, 43129, true));
+    expect(commands).toContainEqual(launchUsbArguments('A1', 'server-1', 43130, 'auto', VOCAL_USB_CONNECT_COMPONENT));
+    await service.stop();
+    expect(commands).toContainEqual(removeReverseArguments('A1', 43130));
+    expect(commands.some((args) => args.includes('tcp:43128'))).toBe(false);
+  });
   it('constructs typed reverse, cleanup, and launch commands without shell interpolation', () => {
     expect(reverseArguments('R9 serial', 43128, 43127)).toEqual([
       '-s', 'R9 serial', 'reverse', 'tcp:43128', 'tcp:43127'

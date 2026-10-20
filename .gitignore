@@ -4,6 +4,7 @@ dist-electron/
 dist-shared/
 android/.gradle/
 android/.gradle-local/
+android/.kotlin/
 android/local.properties
 android/**/build/
 android/.idea/
