@@ -1388,8 +1388,8 @@ input:focus, textarea:focus, select:focus { border-color: #354db8; box-shadow: 0
 *::-webkit-scrollbar-track { background: #f2e1e5; }
 *::-webkit-scrollbar-thumb { border: 3px solid #f2e1e5; border-radius: 12px; background: #a46d83; }
 .app-shell { background: #f1d3db; }
-.control-panel { padding: 14px; border-right: 1px solid #cba2b1; background: #f1d3db; }
-.app-header { top: 0; margin: -14px -14px 12px; padding: 18px 34px; border: 1px solid #cba2b1; border-top: 0; border-radius: 0; background: #fff7f2; }
+.control-panel { padding: 0 14px 14px; border-right: 1px solid #cba2b1; background: #f1d3db; }
+.app-header { top: 0; margin: 0 -14px 12px; padding: 18px 34px; border: 1px solid #cba2b1; border-top: 0; border-radius: 0; background: #fff7f2; }
 .app-brand strong, h1, h2, h3, .panel-section h2 { color: #641a34; font-family: "Bricolage Grotesque", "DM Sans", Arial, sans-serif; letter-spacing: -.04em; }
 .app-brand span, .section-kicker { color: #7b4a5e; }
 .panel-section { margin: 10px 0; padding: 18px; border: 1px solid #cba2b1; border-radius: 12px 22px 12px 22px; background: #fff7f2; }

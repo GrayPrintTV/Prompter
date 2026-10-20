@@ -1,6 +1,6 @@
 {
   "name": "narration-prompter",
-  "version": "0.2.0-vocal.2",
+  "version": "0.2.0-vocal.3",
   "private": true,
   "productName": "Prompter",
   "description": "Windows desktop narration prompter for audiobook and voiceover work.",
