@@ -42,9 +42,16 @@ import { AdbTransportService } from './usb/AdbTransportService.js';
 import { NarrationCheckpointStore } from './server/NarrationCheckpointStore.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const isReleaseCandidate = app.getVersion().includes('-rc.');
-const APP_ID = isReleaseCandidate ? 'com.narrationprompter.prompter.candidate' : 'com.narrationprompter.prompter';
-if (isReleaseCandidate) { app.setName('Prompter Release Candidate'); app.setPath('userData', path.join(app.getPath('appData'), 'Prompter Release Candidate')); }
+const isVocalCandidate = app.getVersion().includes('-vocal.');
+const isReleaseCandidate = app.getVersion().includes('-rc.') || isVocalCandidate;
+const APP_ID = isVocalCandidate
+  ? 'com.narrationprompter.prompter.vocalcandidate'
+  : isReleaseCandidate ? 'com.narrationprompter.prompter.candidate' : 'com.narrationprompter.prompter';
+if (isReleaseCandidate) {
+  const candidateName = isVocalCandidate ? 'Prompter Vocal Design Candidate' : 'Prompter Release Candidate';
+  app.setName(candidateName);
+  app.setPath('userData', path.join(app.getPath('appData'), candidateName));
+}
 const isolatedUserData = process.env.PROMPTER_USER_DATA_DIR?.trim();
 if (isolatedUserData) {
   if (!path.isAbsolute(isolatedUserData)) throw new Error('PROMPTER_USER_DATA_DIR must be absolute.');

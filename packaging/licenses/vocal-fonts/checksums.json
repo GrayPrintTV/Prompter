@@ -1,0 +1,27 @@
+[
+  {
+    "file": "src/fonts/bricolage-grotesque-latin-700-normal.woff2",
+    "sha256": "4c373ce3c1cca41c864eb3e27c059a59fc6310547ab9c9b6cd780d387ba24206",
+    "bytes": 22384
+  },
+  {
+    "file": "src/fonts/bricolage-grotesque-latin-800-normal.woff2",
+    "sha256": "3e1b5f0a56ee995b7c1445bc54e6ec98c5dffb585ef5c4baf86731cf68e27c61",
+    "bytes": 21844
+  },
+  {
+    "file": "src/fonts/dm-sans-latin-400-normal.woff2",
+    "sha256": "4ab51eb2cd7305d177187908d6397474d4520663f6c6e572feb0a64f4fa80006",
+    "bytes": 14200
+  },
+  {
+    "file": "src/fonts/dm-sans-latin-500-normal.woff2",
+    "sha256": "19bf1984956517c35c2bd35b6cdedac12a21d6fcd3596c614ecdfb88b648909d",
+    "bytes": 14304
+  },
+  {
+    "file": "src/fonts/dm-sans-latin-600-normal.woff2",
+    "sha256": "6bb2b2645ba5eeaecf56322c543fa3a75b87b927977b9c03b1dabc4205089120",
+    "bytes": 14144
+  }
+]

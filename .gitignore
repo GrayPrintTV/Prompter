@@ -11,6 +11,7 @@ android/.idea/
 out/
 build/
 release/
+release-vocal/
 .vite/
 *.tsbuildinfo
 .env
@@ -34,3 +35,6 @@ chunk-*.ogg
 # Local Manuscript Prep project artifacts and author material.
 book-projects/
 manuscript-prep/
+
+review-evidence/
+test-tmp/

@@ -7,9 +7,9 @@ export function resolveInitialDeveloperMode(storedDeveloperMode?: boolean) {
 }
 
 export const DEFAULT_DISPLAY_SETTINGS: DisplaySettings = {
-  fontFamily: 'Georgia, Cambria, "Times New Roman", serif',
-  fontSizePx: 34,
-  lineHeight: 1.55,
+  fontFamily: 'DM Sans, Arial, sans-serif',
+  fontSizePx: 32,
+  lineHeight: 1.65,
   textWidthCh: 64,
   paragraphSpacingEm: 1.35,
   readingZonePercent: 38,
@@ -22,10 +22,10 @@ export const DEFAULT_DISPLAY_SETTINGS: DisplaySettings = {
   autoHideControlsOnStart: false,
   readingLookaheadTokens: 6,
   addExtraSpacingOnImport: true,
-  backgroundColor: '#111315',
-  textColor: '#F4EBDD',
-  highlightColor: '#80CBC4',
-  highlightOpacity: 0.14,
+  backgroundColor: '#2C202C',
+  textColor: '#F6EDF0',
+  highlightColor: '#E2CF9E',
+  highlightOpacity: 0,
   tabletFollowEnabled: true,
   tabletFollowDeadZoneDp: 18,
   tabletLargeCorrectionPolicy: 'animate'

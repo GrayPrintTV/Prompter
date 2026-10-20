@@ -3,6 +3,18 @@ import { DEFAULT_DISPLAY_SETTINGS } from '../state/appStore';
 import { runtimeSettingsFromDisplay } from '../../shared/protocol/runtime-settings';
 
 describe('tablet runtime settings', () => {
+  it('uses the approved quiet-narration reader defaults without changing tablet width calibration', () => {
+    expect(DEFAULT_DISPLAY_SETTINGS.fontFamily).toBe('DM Sans, Arial, sans-serif');
+    expect(DEFAULT_DISPLAY_SETTINGS.fontSizePx).toBe(32);
+    expect(DEFAULT_DISPLAY_SETTINGS.lineHeight).toBe(1.65);
+    expect(DEFAULT_DISPLAY_SETTINGS.textWidthCh).toBe(64);
+    expect(DEFAULT_DISPLAY_SETTINGS.readingZonePercent).toBe(38);
+    expect(DEFAULT_DISPLAY_SETTINGS.backgroundColor).toBe('#2C202C');
+    expect(DEFAULT_DISPLAY_SETTINGS.textColor).toBe('#F6EDF0');
+    expect(DEFAULT_DISPLAY_SETTINGS.highlightColor).toBe('#E2CF9E');
+    expect(DEFAULT_DISPLAY_SETTINGS.highlightOpacity).toBe(0);
+  });
+
   it('maps Windows typography and text width to calibrated tablet presentation values', () => {
     const settings = runtimeSettingsFromDisplay({ ...DEFAULT_DISPLAY_SETTINGS, fontSizePx: 34 }, 3, 100);
     expect(settings.display.fontSizeSp).toBe(34.6);

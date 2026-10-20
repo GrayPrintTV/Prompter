@@ -8,6 +8,8 @@ type Props = {
   controlsVisible: boolean;
   startStopDisabled: boolean;
   isPaused: boolean;
+  projectTitle: string;
+  manuscriptIdentity: string;
   onStartStop(): void;
   onTogglePause(): void;
   onOpenManuscriptPrep(): void;
@@ -22,6 +24,8 @@ export function NarrationBar({
   controlsVisible,
   startStopDisabled,
   isPaused,
+  projectTitle,
+  manuscriptIdentity,
   onStartStop,
   onTogglePause,
   onOpenManuscriptPrep,
@@ -29,6 +33,11 @@ export function NarrationBar({
 }: Props) {
   return (
     <div className={`narration-bar narration-${status.tone}`}>
+      <div className="reader-book" aria-live="polite">
+        <span className="reader-book-kicker">CURRENT MANUSCRIPT</span>
+        <strong title={projectTitle}>{projectTitle}</strong>
+        <span className="reader-book-identity">{manuscriptIdentity}</span>
+      </div>
       <button
         className="narration-primary"
         type="button"

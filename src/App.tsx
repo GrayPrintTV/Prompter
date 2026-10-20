@@ -1438,7 +1438,6 @@ export default function App() {
         </div>
       )}
       {approvalError && <p role="alert">{approvalError}</p>}
-      <p>{approvedManuscript ? `Approved manuscript · ${approvedManuscript.textSha256.slice(0, 12)}` : 'Unapproved reader text — use Manuscript Prep for a verified manuscript.'}</p>
       {manuscriptPrepOpen && <ManuscriptPrepWorkspace onClose={() => setManuscriptPrepOpen(false)} onSelect={(value) => {
         if (isListening || isMockPlaying || localWhisperStatus.listening || liveStatus.listening) { setApprovalError('Stop following before changing the approved manuscript.'); return; }
         setApprovedManuscript({ projectId: value.projectId, approvedId: value.approvedId, textSha256: value.textSha256 });
@@ -1538,33 +1537,51 @@ export default function App() {
           startStopDisabled={startStopDisabled}
           onStartStop={toggleListening}
           isPaused={followState === 'paused'}
+          projectTitle={projectTitle}
+          manuscriptIdentity={approvedManuscript
+            ? `Approved · ${approvedManuscript.textSha256.slice(0, 12)}`
+            : 'Unapproved text · review in Manuscript Prep'}
           onTogglePause={togglePause}
           onOpenManuscriptPrep={() => setManuscriptPrepOpen(true)}
           onToggleControls={() => setControlsVisible((visible) => !visible)}
         />
-        <PrompterView
-          model={manuscript}
-          currentSentenceIndex={currentSentenceIndex}
-          currentTokenIndex={currentTokenIndex}
-          followState={tabletMode ? 'paused' : followState}
-          confidence={alignment.confidence}
-          settings={displaySettings}
-          layoutMode={controlsVisible ? 'with-controls' : 'prompter-only'}
-          assistScrollLagging={localQueueLagging}
-          manualScrollTrackingEnabled={
-            !tabletMode
-          }
-          visibleReacquireActive={Boolean(manualReacquireAnchor)}
-          visibleReacquireSource={manualReacquireAnchor?.source}
-          startupVisibleAnchorRequestId={startupVisibleAnchorRequestId}
-          scrollTestRequest={scrollTestRequest}
-          onTraceScroll={onTraceScroll}
-          onAssistStatus={onAssistStatus}
-          onScrollAnimationStatus={onScrollAnimationStatus}
-          onStartupVisibleAnchor={onStartupVisibleAnchor}
-          onManualScroll={onManualScroll}
-          onAnchorDebug={onAnchorDebug}
-        />
+        <div className="reader-content">
+          <PrompterView
+            model={manuscript}
+            currentSentenceIndex={currentSentenceIndex}
+            currentTokenIndex={currentTokenIndex}
+            followState={tabletMode ? 'paused' : followState}
+            confidence={alignment.confidence}
+            settings={displaySettings}
+            layoutMode={controlsVisible ? 'with-controls' : 'prompter-only'}
+            assistScrollLagging={localQueueLagging}
+            manualScrollTrackingEnabled={!tabletMode}
+            visibleReacquireActive={Boolean(manualReacquireAnchor)}
+            visibleReacquireSource={manualReacquireAnchor?.source}
+            startupVisibleAnchorRequestId={startupVisibleAnchorRequestId}
+            scrollTestRequest={scrollTestRequest}
+            onTraceScroll={onTraceScroll}
+            onAssistStatus={onAssistStatus}
+            onScrollAnimationStatus={onScrollAnimationStatus}
+            onStartupVisibleAnchor={onStartupVisibleAnchor}
+            onManualScroll={onManualScroll}
+            onAnchorDebug={onAnchorDebug}
+          />
+        </div>
+        {!controlsVisible && (
+          <nav className="reader-footer" aria-label="Reading recovery controls">
+            <div className="reader-footer-group">
+              <button type="button" aria-label="Previous sentence" onClick={() => stepSentence(-1)}>Previous</button>
+              <button type="button" className="reader-resync" onClick={resync}>Resync</button>
+              <button type="button" aria-label="Next sentence" onClick={() => stepSentence(1)}>Next</button>
+            </div>
+            <div className="reader-footer-group reader-text-size" aria-label="Reading text size">
+              <span>Text size</span>
+              <button type="button" aria-label="Decrease reading text size" disabled={displaySettings.fontSizePx <= 24} onClick={() => setDisplaySettings((s) => ({ ...s, fontSizePx: Math.max(24, s.fontSizePx - 2) }))}>A−</button>
+              <button type="button" aria-label="Increase reading text size" disabled={displaySettings.fontSizePx >= 42} onClick={() => setDisplaySettings((s) => ({ ...s, fontSizePx: Math.min(42, s.fontSizePx + 2) }))}>A+</button>
+            </div>
+          </nav>
+        )}
       </div>
     </div>
   );

@@ -1,9 +1,9 @@
-appId: com.narrationprompter.prompter.candidate
-productName: Prompter Release Candidate
+appId: com.narrationprompter.prompter.vocalcandidate
+productName: Prompter
 executableName: Prompter
-artifactName: Prompter-Candidate-Setup-${version}-${arch}.${ext}
+artifactName: Prompter-Vocal-Design-${version}-${arch}.${ext}
 directories:
-  output: release
+  output: release-vocal
 asar: true
 files:
   - package.json
@@ -112,7 +112,7 @@ nsis:
   allowToChangeInstallationDirectory: true
   createStartMenuShortcut: true
   createDesktopShortcut: true
-  shortcutName: Prompter Release Candidate
-  uninstallDisplayName: Prompter Release Candidate
+  shortcutName: Prompter Vocal Design Candidate
+  uninstallDisplayName: Prompter Vocal Design Candidate
   deleteAppDataOnUninstall: false
   runAfterFinish: false

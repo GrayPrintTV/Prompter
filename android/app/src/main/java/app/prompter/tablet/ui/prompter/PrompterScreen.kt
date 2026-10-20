@@ -18,6 +18,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.IntOffset
@@ -347,10 +349,12 @@ fun PrompterScreen(state: MainUiState, viewModel: MainViewModel, requestMicropho
         }
     }
 
-    val background = runtimeDisplay?.backgroundColor?.toComposeColor() ?: if (state.display.darkTheme) Color(0xFF111315) else Color(0xFFF6F1E7)
-    val text = runtimeDisplay?.textColor?.toComposeColor() ?: if (state.display.darkTheme) Color(0xFFF4EBDD) else Color(0xFF20201D)
-    val highlight = runtimeDisplay?.highlightColor?.toComposeColor() ?: MaterialTheme.colorScheme.primary
-    val opacity = runtimeDisplay?.highlightOpacity ?: .09f
+    val background = runtimeDisplay?.backgroundColor?.toComposeColor()
+        ?: if (state.display.darkTheme) Color(0xFF2C202C) else Color(0xFFFFF7F2)
+    val text = runtimeDisplay?.textColor?.toComposeColor()
+        ?: if (state.display.darkTheme) Color(0xFFF6EDF0) else Color(0xFF641A34)
+    val highlight = runtimeDisplay?.highlightColor?.toComposeColor() ?: Color(0xFFE2CF9E)
+    val opacity = runtimeDisplay?.highlightOpacity ?: 0f
     val bandHeightPx = lineHeightPx * effectiveDisplay.readingBandHeightLines
     val paragraphSpacing = with(density) { (fontSizeSp * effectiveDisplay.paragraphSpacingEm).sp.toDp() }
     val bandFraction = effectiveDisplay.readingBandFraction
@@ -390,7 +394,11 @@ fun PrompterScreen(state: MainUiState, viewModel: MainViewModel, requestMicropho
             }
         }
         Box(Modifier.fillMaxWidth().height(with(density) { bandHeightPx.toDp() }).align(Alignment.TopCenter).offset { IntOffset(0, bandY - (bandHeightPx / 2).roundToInt()) }
-            .background(highlight.copy(alpha = opacity)))
+            .background(highlight.copy(alpha = opacity)).drawBehind {
+                val edgeColor = highlight.copy(alpha = .72f)
+                drawLine(edgeColor, Offset(0f, 0f), Offset(size.width, 0f), 1.dp.toPx())
+                drawLine(edgeColor, Offset(0f, size.height), Offset(size.width, size.height), 1.dp.toPx())
+            })
         ManuscriptFastScrollThumb(
             listState = listState,
             paragraphs = paragraphs,
