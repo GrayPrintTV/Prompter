@@ -10,6 +10,9 @@ Vocal is the selected art direction, not a product rename. The reader should bec
 - Desktop fonts: unmodified Vocal-package DM Sans 400/500/600 and Bricolage Grotesque 700/800 WOFF2, with their OFL notices. Tablet currently falls back to platform sans faces because no matching native font files are present and the task terminal has no network access.
 - Reader default: DM Sans 32px / 1.65, ~870px measure, 38% reading band. The band has thin static edges and no filled highlight by default.
 - Controller touch target minimum 44px; asymmetrical 14px/22px corners make buttons and panels recognizable without reducing contrast or click area.
+- Active controller values use the primary burgundy ink on paper surfaces; summary disclosures, tablet appearance, and advanced-mode controls use the same paper, border, and focus tokens as neighboring controls.
+- The reader toolbar adapts to the reader pane's measured width (which changes when the controller is visible), wrapping into two or three rows at 900px and 560px pane widths. The manuscript viewport begins after the toolbar's observed rendered height, so a wrap or resize does not cover text or change the configured reading-band percentage.
+- The pinned controller header is opaque and fills the scrollport's top edge, preventing moving section content from showing through gaps around the pinned surface while preserving keyboard and pointer access.
 
 ## Ownership and mapping
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ManualAsrProvider } from './asr/ManualAsrProvider';
 import { MockAsrProvider } from './asr/MockAsrProvider';
 import { DEFAULT_LOCAL_WHISPER_STATUS, LocalWhisperAsrProvider } from './asr/LocalWhisperAsrProvider';
@@ -220,6 +220,24 @@ export default function App() {
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const prompterStageRef = useRef<HTMLDivElement | null>(null);
+
+  useLayoutEffect(() => {
+    const stage = prompterStageRef.current;
+    const toolbar = stage?.querySelector<HTMLElement>('.narration-bar');
+    if (!stage || !toolbar) return;
+
+    const updateToolbarInset = () => {
+      const height = Math.ceil(toolbar.getBoundingClientRect().height);
+      stage.style.setProperty('--reader-toolbar-height', `${height}px`);
+    };
+    updateToolbarInset();
+
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(updateToolbarInset);
+    observer.observe(toolbar);
+    return () => observer.disconnect();
+  }, []);
+
   const manualProviderRef = useRef(new ManualAsrProvider());
   const mockProviderRef = useRef(new MockAsrProvider());
   const liveProviderRef = useRef(new OpenAiRealtimeAsrProvider());
