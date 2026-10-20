@@ -48,9 +48,9 @@ const APP_ID = isVocalCandidate
   ? 'com.narrationprompter.prompter.vocalcandidate'
   : isReleaseCandidate ? 'com.narrationprompter.prompter.candidate' : 'com.narrationprompter.prompter';
 if (isReleaseCandidate) {
-  const candidateName = isVocalCandidate ? 'Prompter Vocal Design Candidate' : 'Prompter Release Candidate';
-  app.setName(candidateName);
-  app.setPath('userData', path.join(app.getPath('appData'), candidateName));
+  const candidateDataDirectory = isVocalCandidate ? 'Prompter Vocal Design Candidate' : 'Prompter Release Candidate';
+  app.setName('Prompter');
+  app.setPath('userData', path.join(app.getPath('appData'), candidateDataDirectory));
 }
 const isolatedUserData = process.env.PROMPTER_USER_DATA_DIR?.trim();
 if (isolatedUserData) {
