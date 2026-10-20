@@ -66,7 +66,7 @@ internal fun manualFollowProductStatus(overrideState: String): String? = when (o
     "anchor selected", "anchor sent", "waiting for reacquire" -> "Finding your place…"
     "holding wrong-section" -> "Holding at your chosen position"
     "reacquired/resumed" -> "Following resumed"
-    "anchor queued during reconnect" -> "Position saved while reconnecting"
+    "anchor queued during reconnect" -> "Position saved; waiting for control"
     "anchor send failed" -> "Could not send the new position"
     else -> "Manual position active"
 }

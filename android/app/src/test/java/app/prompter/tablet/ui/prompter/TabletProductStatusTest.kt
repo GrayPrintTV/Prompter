@@ -18,6 +18,7 @@ class TabletProductStatusTest {
         assertNull(manualFollowProductStatus("normal"))
         assertEquals("Repositioning…", manualFollowProductStatus("user scrolling"))
         assertEquals("Finding your place…", manualFollowProductStatus("waiting for reacquire"))
+        assertEquals("Position saved; waiting for control", manualFollowProductStatus("anchor queued during reconnect"))
         assertEquals("Holding at your chosen position", manualFollowProductStatus("holding wrong-section"))
         assertEquals("Following resumed", manualFollowProductStatus("reacquired/resumed"))
     }
