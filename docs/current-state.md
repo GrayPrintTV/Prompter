@@ -38,6 +38,7 @@ Phase 1 is in progress. The app has Phase 0/0.5 manuscript alignment, torture-te
 - Narration status distinguishes `Stalled` and `Recovering` from ordinary silence using capture/request activity.
 - Android and desktop share `fast-scroll` as a validated manual-reposition input source.
 - Bounded Local Whisper telemetry records per-minute queue, latency, result, and narrator-status aggregates without per-chunk production logging.
+- Lost-state Local Whisper recovery can accept a recent phrase that overlaps the last anchor when at least four matched words, including three distinctive words, lie beyond it and the endpoint advances at least eight tokens. Existing score, uniqueness, bounded-window, rollback and manual-anchor fences remain enforced. The ordinary recovery fallback also respects the uniqueness requirement. Recovery diagnostics retain the actual attempt separately from the final ordinary-alignment outcome, with numeric-only summaries in telemetry.
 - Automatic USB tablet transport discovers an installed ADB, requires one authorized device or explicit selection, creates a reverse tunnel, and launches a validated typed-extra Android intent with bounded retry/backoff. Android authenticates before make-before-break promotion, generation-fences the retired socket/audio, and falls back to its stored LAN endpoint after USB loss.
 
 ## Current Active Bug/Fix Status

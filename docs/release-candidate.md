@@ -4,6 +4,8 @@ This candidate includes the reviewed local Prep, narration checkpoint and USB wo
 
 ## Build
 
+The Vocal branch currently prepares `0.2.0-vocal.5` under `release-vocal`. Its separately named installer is `Prompter-Vocal-Design-0.2.0-vocal.5-x64.exe`, with a separate NSIS registration and **Prompter Vocal .5 Follow Candidate** shortcut/uninstall entry so `.4` remains installed for rollback. Install into a new `installed-vocal.5` folder. This candidate changes lost-follow recovery and its diagnostic fidelity; live narrator acceptance must be repeated for this version. Vocal's default data directory remains `Prompter Vocal Design Candidate` under roaming application data; use only one Vocal version at a time with that profile. Use `PROMPTER_USER_DATA_DIR` for disposable package tests. The RC1 directory described below remains separate.
+
 Use Windows x64, Node and the locked npm dependencies (`npm ci`). Use Python 3.13.2 with `python/requirements-whisper-lock.txt` in a dedicated build environment. Set `LOCAL_WHISPER_BUILD_PYTHON` and `MANUSCRIPT_PREP_BUILD_PYTHON` to its Python executable. These are build inputs only; installed workers are self-contained. `collect-python-licenses.py` verifies exact installed versions and preserves their license files.
 
 Provision the exact model snapshot identified in `packaging/model-lock.json`, or set `LOCAL_WHISPER_MODEL_SOURCE_DIR` to its four verified files. Provisioning rejects any mismatched hash. No model download occurs during normal installed launch. Upstream model notices are in `packaging/licenses`.

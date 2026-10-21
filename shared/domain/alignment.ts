@@ -32,6 +32,7 @@ type Candidate = {
   duplicateJumpPenaltyApplied: boolean;
   duplicateJumpCandidateRejected: boolean;
   matchedFragmentIndexes: number[];
+  matchedManuscriptIndexes: number[];
 };
 
 const DEFAULT_BACKWARD_WINDOW = 300;
@@ -107,6 +108,7 @@ function candidateScore(
   const matchedWords: string[] = [];
   const matchedTokenTexts: string[] = [];
   const matchedFragmentIndexes: number[] = [];
+  const matchedManuscriptIndexes: number[] = [];
   const totalWeight = fragment.reduce((sum, token) => sum + wordWeight(model, token), 0);
 
   for (let fragmentIndex = 0; fragmentIndex < fragment.length; fragmentIndex += 1) {
@@ -134,6 +136,7 @@ function candidateScore(
       matchedWords.push(model.tokens[matchedIndex].originalText);
       matchedTokenTexts.push(model.tokens[matchedIndex].text);
       matchedFragmentIndexes.push(fragmentIndex);
+      matchedManuscriptIndexes.push(matchedIndex);
 
       gapPenalty += Math.max(0, bestOffset - 1) * 0.016;
       consecutive = bestOffset <= 1 ? consecutive + 1 : 1;
@@ -227,7 +230,8 @@ function candidateScore(
     retakeBiasApplied: false,
     duplicateJumpPenaltyApplied: false,
     duplicateJumpCandidateRejected: false,
-    matchedFragmentIndexes
+    matchedFragmentIndexes,
+    matchedManuscriptIndexes
   };
 }
 
@@ -402,7 +406,8 @@ export function alignTranscript(
       selectedDirection: best.direction,
       selectedCandidateStartTokenIndex: best.startIndex,
       selectedCandidateEndTokenIndex: best.endIndex,
-      selectedTranscriptTokenIndexes: best.matchedFragmentIndexes
+      selectedTranscriptTokenIndexes: best.matchedFragmentIndexes,
+      selectedManuscriptTokenIndexes: best.matchedManuscriptIndexes
       ,runnerUpConfidence: runnerUp?.confidence ?? null
     },
     searchWindow: { fromToken, toToken }

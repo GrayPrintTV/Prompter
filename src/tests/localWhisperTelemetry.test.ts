@@ -66,7 +66,13 @@ describe('LocalWhisperTelemetryAccumulator', () => {
       rejection: {
         category: 'stale-context', currentTokenIndex: 24, candidateStartTokenIndex: 12, candidateEndTokenIndex: 24,
         confidence: 0.91, matchedWordCount: 0, distinctiveMatchedWordCount: 0, lowConfidenceCount: 2,
-        followState: 'holding', transcriptAgeMs: 3_700, rendererBacklogMs: 500
+        followState: 'holding', transcriptAgeMs: 3_700, rendererBacklogMs: 500,
+        reacquireAttempt: {
+          accepted: false, anchorTokenIndex: 24, evidenceTokenCount: 12,
+          candidateStartTokenIndex: 22, candidateEndTokenIndex: 30, confidence: .92,
+          separation: .2, forwardMatchedWordCount: 6, forwardDistinctiveWordCount: 2,
+          failedChecks: ['forward-progress', 'forward-evidence']
+        }
       }
     });
     accumulator.recordNarratorStatus('Following');
@@ -110,7 +116,14 @@ describe('LocalWhisperTelemetryAccumulator', () => {
       schemaVersion: 2,
       alignmentRejections: {
         byCategory: { 'stale-context': 1 },
-        samples: [expect.objectContaining({ category: 'stale-context', currentTokenIndex: 24, confidence: 0.91 })],
+        samples: [expect.objectContaining({
+          category: 'stale-context', currentTokenIndex: 24, confidence: 0.91,
+          reacquireAttempt: expect.objectContaining({
+            candidateStartTokenIndex: 22, candidateEndTokenIndex: 30,
+            evidenceTokenCount: 12, forwardDistinctiveWordCount: 2,
+            failedChecks: ['forward-progress', 'forward-evidence']
+          })
+        })],
         droppedSamples: 0
       }
     });

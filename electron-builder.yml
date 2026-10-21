@@ -103,6 +103,8 @@ win:
       arch:
         - x64
 nsis:
+  # Separate review registration preserves the installed Vocal .4 rollback.
+  guid: d91a8bc4-a692-420e-9c24-0bf2f11c8a5c
   installerIcon: assets/icons/prompter.ico
   uninstallerIcon: assets/icons/prompter.ico
   installerHeaderIcon: assets/icons/prompter.ico
@@ -112,7 +114,7 @@ nsis:
   allowToChangeInstallationDirectory: true
   createStartMenuShortcut: true
   createDesktopShortcut: true
-  shortcutName: Prompter Vocal Design Candidate
-  uninstallDisplayName: Prompter Vocal Design Candidate
+  shortcutName: Prompter Vocal .5 Follow Candidate
+  uninstallDisplayName: Prompter Vocal .5 Follow Candidate
   deleteAppDataOnUninstall: false
   runAfterFinish: false

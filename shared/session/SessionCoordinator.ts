@@ -28,12 +28,15 @@ import { COMMON_WORDS, transcriptToTokens } from '../domain/normalize.js';
 import { HIGH_CONFIDENCE, stateFromAlignment } from '../domain/scrollModel.js';
 import type {
   AlignmentBufferDebug,
+  BoundedReacquireAttempt,
   AlignmentResult,
   DisplaySettings,
   FollowState,
   ManuscriptModel,
   TranscriptDelta
 } from '../domain/types.js';
+
+const REACQUIRE_MIN_SEPARATION = .08;
 
 export type { AsrProviderId, DisplaySettings, FollowState, TranscriptSource } from '../domain/types.js';
 
@@ -480,23 +483,27 @@ export class SessionCoordinator {
     const wasResyncing = this.resyncArmed;
     const wasLost = this.followState === 'lost';
     const manualAnchor = this.manualAnchor;
+    let attempt: BoundedReacquireAttempt | undefined;
     if (wasLost && !manualAnchor) {
       this.reacquireEvidenceTokens = [...this.reacquireEvidenceTokens, ...words].slice(-28);
-      const attempt = this.tryBoundedForwardReacquire(previousToken);
+      attempt = this.tryBoundedForwardReacquire(previousToken);
       traces.push(`bounded reacquire evidence=${this.reacquireEvidenceTokens.length} ${attempt.reason}`);
-      if (attempt.result) {
-        this.alignment = attempt.result;
-        this.currentTokenIndex = this.clampToken(attempt.result.tokenIndex);
+      traces.push(`bounded reacquire recent evidence=[${attempt.evidenceTokens.join(' ')}]`);
+      if (attempt.accepted && attempt.candidate) {
+        const result = attempt.candidate;
+        this.alignment = result;
+        this.currentTokenIndex = this.clampToken(result.tokenIndex);
         this.followState = 'following';
         this.lowConfidenceCount = 0;
-        this.localAlignmentBuffer = { committedTokens: transcriptToTokens(attempt.result.matchedText).slice(-28), provisionalTokens: [], consecutiveOffScriptDeltas: 0 };
+        this.localAlignmentBuffer = { committedTokens: transcriptToTokens(result.matchedText).slice(-28), provisionalTokens: [], consecutiveOffScriptDeltas: 0 };
         this.transcriptBuffer = alignmentBufferTokens(this.localAlignmentBuffer);
         this.reacquireEvidenceTokens = [];
-        this.recordMovement({ source: delta.source, previousTokenIndex: previousToken, result: attempt.result, followState: 'following', finalMovement: 'accepted', engineReason: attempt.result.reason, alignmentContext: 'bounded forward reacquired from recent Local Whisper evidence', markFreshAnchor: true });
-        this.alignmentBufferDebug = this.reacquireDebug(delta, words, attempt.result, 'accepted', attempt.reason);
+        this.recordMovement({ source: delta.source, previousTokenIndex: previousToken, result, followState: 'following', finalMovement: 'accepted', engineReason: result.reason, alignmentContext: 'bounded forward reacquired from recent Local Whisper evidence', markFreshAnchor: true });
+        this.alignmentBufferDebug = this.reacquireDebug(delta, words, attempt);
         return;
       }
     }
+    const priorBuffer = this.localAlignmentBuffer;
     const decision = evaluateProvisionalAlignmentBuffer(
       this.model, this.localAlignmentBuffer, words, manualAnchor?.visibleTokenIndex ?? previousToken,
       {
@@ -521,7 +528,18 @@ export class SessionCoordinator {
     let finalMovement: MovementDecisionOutcome = 'held';
     let movementContext = '';
     let rejectionCategory: AlignmentBufferDebug['rejectionCategory'];
-    const freshHighConfidenceMatch = decision.moveRecommended && decision.result.confidence >= HIGH_CONFIDENCE;
+    // The ordinary fallback may use retained context to disambiguate a recovery,
+    // but must not bypass recovery's existing uniqueness requirement.
+    const ambiguousLostCandidate = wasLost && !manualAnchor && decision.moveRecommended && decision.result.confidence >= HIGH_CONFIDENCE &&
+      decision.result.confidence - (decision.result.diagnostics?.runnerUpConfidence ?? 0) < REACQUIRE_MIN_SEPARATION;
+    if (ambiguousLostCandidate) {
+      this.localAlignmentBuffer = priorBuffer;
+      this.transcriptBuffer = alignmentBufferTokens(priorBuffer);
+      traces.push('ordinary recovery candidate ambiguous: retained context unchanged');
+    }
+    const retainedDelta = decision.retainedDelta && !ambiguousLostCandidate;
+    const retentionReason = ambiguousLostCandidate ? 'ambiguous ordinary recovery candidate discarded' : decision.retentionReason;
+    const freshHighConfidenceMatch = decision.moveRecommended && decision.result.confidence >= HIGH_CONFIDENCE && !ambiguousLostCandidate;
     const nearManualAnchor = Boolean(manualAnchor && isNearManualVisibleAnchor(decision.result.tokenIndex, manualAnchor.visibleTokenIndex));
     const allowsBackward = Boolean(manualAnchor && visibleReacquireAllowsBackward(manualAnchor.source, manualAnchor.hadFreshConfirmedAnchor));
     const startupBackwardBlocked = Boolean(manualAnchor?.source === 'startup' && !allowsBackward && decision.result.tokenIndex < previousToken);
@@ -587,60 +605,80 @@ export class SessionCoordinator {
       // A high score from old committed context is not a fresh alignment. Let the existing
       // low-confidence/lost progression handle it instead of refreshing the anchor forever.
       const nextState = stateFromAlignment(
-        staleHighConfidence ? { ...decision.result, confidence: 0 } : decision.result,
+        staleHighConfidence || ambiguousLostCandidate ? { ...decision.result, confidence: 0 } : decision.result,
         previousToken,
         wasResyncing,
         this.lowConfidenceCount
       );
       this.followState = nextState; movementFollowState = nextState;
-      moveDecision = staleHighConfidence ? 'held: current delta did not contribute a manuscript anchor' : `held state=${nextState} confidence below threshold`;
+      moveDecision = ambiguousLostCandidate ? 'held: ordinary recovery candidate is ambiguous' : staleHighConfidence ? 'held: current delta did not contribute a manuscript anchor' : `held state=${nextState} confidence below threshold`;
       movementContext = moveDecision;
       rejectionCategory = staleHighConfidence ? 'stale-context' : 'low-confidence';
-      traces.push(staleHighConfidence ? `moveToToken called: NO state=${nextState} (stale context)` : `moveToToken called: NO state=${nextState} (low-conf)`);
+      traces.push(`moveToToken called: NO state=${nextState} (${ambiguousLostCandidate ? 'ambiguous recovery' : staleHighConfidence ? 'stale context' : 'low-conf'})`);
     }
 
     this.recordMovement({
       source: delta.source, previousTokenIndex: previousToken, result: decision.result,
       followState: movementFollowState, finalMovement, engineReason: decision.result.reason,
-      alignmentContext: `${movementContext || moveDecision}; ${decision.retainedDelta ? 'retained' : 'discarded'}: ${decision.retentionReason}`,
+      alignmentContext: `${movementContext || moveDecision}; ${retainedDelta ? 'retained' : 'discarded'}: ${retentionReason}`,
       markFreshAnchor: moved, visibleAnchorTokenIndex: manualAnchor?.visibleTokenIndex
     });
+    if (moved) this.reacquireEvidenceTokens = [];
     this.alignmentBufferDebug = {
       source: delta.source, rawTranscript: delta.text, normalizedTokens: words,
-      retainedTokens: decision.retainedTokens, rollingBufferTokens: decision.state.committedTokens,
-      provisionalBufferTokens: decision.state.provisionalTokens, evaluationBufferTokens: decision.evaluationTokens,
+      retainedTokens: retainedDelta ? decision.retainedTokens : [], rollingBufferTokens: this.localAlignmentBuffer.committedTokens,
+      provisionalBufferTokens: this.localAlignmentBuffer.provisionalTokens, evaluationBufferTokens: decision.evaluationTokens,
       matchedText: decision.result.matchedText, confidence: decision.result.confidence,
       moveDecision, moveToTokenCalled: moved,
-      retentionDecision: decision.retainedDelta ? 'retained' : 'discarded', retentionReason: decision.retentionReason,
+      retentionDecision: retainedDelta ? 'retained' : 'discarded', retentionReason,
       selectedCandidateStartTokenIndex: decision.selectedCandidateStartTokenIndex,
       selectedCandidateEndTokenIndex: decision.selectedCandidateEndTokenIndex,
       newDeltaMatchedWordCount: decision.newDeltaMatchedWordCount,
       newDeltaDistinctiveMatchedWordCount: decision.newDeltaDistinctiveMatchedWordCount,
-      commitRejectedReason: decision.commitRejectedReason ?? undefined,
+      commitRejectedReason: ambiguousLostCandidate ? 'ordinary recovery candidate is ambiguous' : decision.commitRejectedReason ?? undefined,
       lowConfidenceCount: this.lowConfidenceCount,
       lostOrResyncing: this.followState === 'lost' || this.followState === 'resyncing',
-      rejectionCategory: moved ? undefined : (wasLost ? 'bounded-reacquire' : rejectionCategory ?? 'unknown')
+      rejectionCategory: moved ? undefined : (wasLost ? 'bounded-reacquire' : rejectionCategory ?? 'unknown'),
+      ...(attempt ? { reacquireAttempt: attempt, reacquireEvent: 'rejected', reacquireReason: attempt.reason } : {})
     };
-    if (wasLost) Object.assign(this.alignmentBufferDebug, this.reacquireDebug(delta, words, decision.result, 'rejected', 'bounded forward candidate did not meet strong evidence requirements'));
   }
 
-  private tryBoundedForwardReacquire(anchorToken: number): { result: AlignmentResult | null; reason: string } {
-    if (this.reacquireEvidenceTokens.length < 8) return { result: null, reason: 'waiting for at least 8 recent evidence tokens' };
-    const result = alignTranscript(this.model, this.reacquireEvidenceTokens, anchorToken, { backwardWindow: 80, forwardWindow: 360, maxTranscriptTokens: 28 });
+  private tryBoundedForwardReacquire(anchorToken: number): BoundedReacquireAttempt {
+    // Snapshot evidence before either acceptance path clears the live buffer.
+    const evidenceTokens = [...this.reacquireEvidenceTokens];
+    const base = { accepted: false, anchorTokenIndex: anchorToken, evidenceTokenCount: evidenceTokens.length, evidenceTokens };
+    if (evidenceTokens.length < 8) return { ...base, candidate: null, candidateStartTokenIndex: null, candidateEndTokenIndex: null, confidence: null, separation: null, forwardMatchedWordCount: 0, forwardDistinctiveWordCount: 0, failedChecks: ['evidence-length'], reason: 'waiting for at least 8 recent evidence tokens' };
+    const result = alignTranscript(this.model, evidenceTokens, anchorToken, { backwardWindow: 80, forwardWindow: 360, maxTranscriptTokens: 28 });
     const indexes = result.diagnostics?.selectedTranscriptTokenIndexes ?? [];
+    const manuscriptIndexes = result.diagnostics?.selectedManuscriptTokenIndexes ?? [];
     const matched = indexes.length;
-    const distinctive = indexes.map((index) => this.reacquireEvidenceTokens[index]).filter((token) => token && token.length >= 4 && !COMMON_WORDS.has(token)).length;
+    const distinctive = indexes.map((index) => evidenceTokens[index]).filter((token) => token && token.length >= 4 && !COMMON_WORDS.has(token)).length;
+    const forwardWords = indexes.filter((_, index) => manuscriptIndexes[index] > anchorToken).map(index => evidenceTokens[index]);
+    const forwardDistinctive = forwardWords.filter(token => token && token.length >= 4 && !COMMON_WORDS.has(token)).length;
     const start = result.diagnostics?.selectedCandidateStartTokenIndex ?? result.tokenIndex;
     const separation = result.confidence - (result.diagnostics?.runnerUpConfidence ?? 0);
-    const valid = result.confidence >= .84 && matched >= 4 && distinctive >= 3 && start >= anchorToken + 8 && result.tokenIndex <= anchorToken + 360 && separation >= .08;
-    if (!valid) return { result: null, reason: `rejected candidate t${start}-${result.tokenIndex} conf=${result.confidence.toFixed(2)} matched=${matched} distinctive=${distinctive} separation=${separation.toFixed(2)}` };
-    return { result, reason: `accepted candidate t${start}-${result.tokenIndex} conf=${result.confidence.toFixed(2)} matched=${matched} distinctive=${distinctive} separation=${separation.toFixed(2)}` };
+    // A retake may overlap the last anchor. Require strong matched evidence AFTER
+    // that anchor, rather than waiting for the entire 28-word span to roll past it.
+    const failedChecks = [
+      ...(result.confidence < .84 ? ['confidence'] : []),
+      ...(matched < 4 || distinctive < 3 ? ['matched-evidence'] : []),
+      ...(result.tokenIndex < anchorToken + 8 ? ['forward-progress'] : []),
+      ...(forwardWords.length < 4 || forwardDistinctive < 3 ? ['forward-evidence'] : []),
+      ...(result.tokenIndex > anchorToken + 360 ? ['forward-window'] : []),
+      ...(separation < REACQUIRE_MIN_SEPARATION ? ['ambiguity'] : [])
+    ];
+    const accepted = failedChecks.length === 0;
+    const reason = `${accepted ? 'accepted' : 'rejected'} candidate t${start}-${result.tokenIndex} conf=${result.confidence.toFixed(2)} matched=${matched} distinctive=${distinctive} forward=${forwardWords.length}/${forwardDistinctive} separation=${separation.toFixed(2)}${accepted ? '' : ` failed=${failedChecks.join(',')}`}`;
+    return { ...base, accepted, candidate: result, candidateStartTokenIndex: start, candidateEndTokenIndex: result.tokenIndex, confidence: result.confidence, separation, forwardMatchedWordCount: forwardWords.length, forwardDistinctiveWordCount: forwardDistinctive, failedChecks, reason };
   }
 
-  private reacquireDebug(delta: TranscriptDelta, words: string[], result: AlignmentResult, event: 'accepted' | 'rejected', reason: string): AlignmentBufferDebug {
+  private reacquireDebug(delta: TranscriptDelta, words: string[], attempt: BoundedReacquireAttempt): AlignmentBufferDebug {
+    const result = attempt.candidate!;
+    const { evidenceTokens, reason } = attempt;
     const indexes = result.diagnostics?.selectedTranscriptTokenIndexes ?? [];
-    const distinctive = indexes.map((index) => this.reacquireEvidenceTokens[index]).filter((token) => token && token.length >= 4 && !COMMON_WORDS.has(token)).length;
-    return { ...EMPTY_SESSION_ALIGNMENT_DEBUG, source: delta.source, rawTranscript: delta.text, normalizedTokens: words, evaluationBufferTokens: [...this.reacquireEvidenceTokens], matchedText: result.matchedText, confidence: result.confidence, moveDecision: event === 'accepted' ? `bounded forward reacquired at token ${result.tokenIndex}` : 'bounded forward reacquire held', moveToTokenCalled: event === 'accepted', retentionDecision: event, retentionReason: reason, selectedCandidateStartTokenIndex: result.diagnostics?.selectedCandidateStartTokenIndex, selectedCandidateEndTokenIndex: result.diagnostics?.selectedCandidateEndTokenIndex, newDeltaMatchedWordCount: indexes.length, newDeltaDistinctiveMatchedWordCount: distinctive, commitRejectedReason: event === 'rejected' ? reason : undefined, lowConfidenceCount: this.lowConfidenceCount, lostOrResyncing: this.followState === 'lost' || this.followState === 'resyncing', reacquireEvent: event, reacquireReason: reason };
+    const currentDeltaWords = indexes.filter(index => index >= evidenceTokens.length - words.length).map(index => evidenceTokens[index]);
+    const distinctive = currentDeltaWords.filter(token => token && token.length >= 4 && !COMMON_WORDS.has(token)).length;
+    return { ...EMPTY_SESSION_ALIGNMENT_DEBUG, source: delta.source, rawTranscript: delta.text, normalizedTokens: words, retainedTokens: currentDeltaWords, rollingBufferTokens: [...this.transcriptBuffer], evaluationBufferTokens: evidenceTokens, matchedText: result.matchedText, confidence: result.confidence, moveDecision: `bounded forward reacquired at token ${result.tokenIndex}`, moveToTokenCalled: true, retentionDecision: 'accepted', retentionReason: reason, selectedCandidateStartTokenIndex: result.diagnostics?.selectedCandidateStartTokenIndex, selectedCandidateEndTokenIndex: result.diagnostics?.selectedCandidateEndTokenIndex, newDeltaMatchedWordCount: currentDeltaWords.length, newDeltaDistinctiveMatchedWordCount: distinctive, lowConfidenceCount: this.lowConfidenceCount, lostOrResyncing: false, reacquireEvent: 'accepted', reacquireReason: reason, reacquireAttempt: attempt };
   }
 
   private processStandardProvider(delta: TranscriptDelta, words: string[], traces: string[]) {

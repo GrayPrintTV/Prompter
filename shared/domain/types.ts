@@ -58,6 +58,8 @@ export type LocalWhisperAlignmentRejectionSample = {
   followState: FollowState;
   transcriptAgeMs: number | null;
   rendererBacklogMs: number | null;
+  // Numeric-only recovery evidence; never put transcript/manuscript text in telemetry.
+  reacquireAttempt?: BoundedReacquireSummary;
 };
 
 export type LocalWhisperTelemetryAggregate = {
@@ -171,12 +173,32 @@ export type AlignmentResult = {
     selectedCandidateStartTokenIndex?: number;
     selectedCandidateEndTokenIndex?: number;
     selectedTranscriptTokenIndexes?: number[];
+    selectedManuscriptTokenIndexes?: number[];
     runnerUpConfidence?: number | null;
   };
   searchWindow: {
     fromToken: number;
     toToken: number;
   };
+};
+
+export type BoundedReacquireSummary = {
+  accepted: boolean;
+  anchorTokenIndex: number;
+  evidenceTokenCount: number;
+  candidateStartTokenIndex: number | null;
+  candidateEndTokenIndex: number | null;
+  confidence: number | null;
+  separation: number | null;
+  forwardMatchedWordCount: number;
+  forwardDistinctiveWordCount: number;
+  failedChecks: string[];
+};
+
+export type BoundedReacquireAttempt = BoundedReacquireSummary & {
+  evidenceTokens: string[];
+  candidate: AlignmentResult | null;
+  reason: string;
 };
 
 export type AlignmentBufferDebug = {
@@ -202,6 +224,7 @@ export type AlignmentBufferDebug = {
   lostOrResyncing?: boolean;
   reacquireEvent?: 'search' | 'candidate' | 'accepted' | 'rejected';
   reacquireReason?: string;
+  reacquireAttempt?: BoundedReacquireAttempt;
   rejectionCategory?: AlignmentRejectionCategory;
 };
 

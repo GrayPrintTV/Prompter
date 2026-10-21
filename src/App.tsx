@@ -631,6 +631,7 @@ export default function App() {
       const rejectedAsStale = result.state.alignmentBufferDebug.moveDecision === 'ignored stale pre-anchor transcript';
       const alignmentAccepted = decision?.finalMovement === 'accepted' || decision?.finalMovement === 'corrected';
       const debug = result.state.alignmentBufferDebug;
+      const attempt = debug.reacquireAttempt;
       const rejection = alignmentAccepted ? undefined : {
         category: debug.rejectionCategory ?? (rejectedAsStale ? 'stale-pre-anchor' : 'unknown'),
         currentTokenIndex: result.state.currentTokenIndex,
@@ -644,7 +645,17 @@ export default function App() {
         transcriptAgeMs: delta.telemetry ? Math.max(0, acceptedAtMs - delta.telemetry.capturedAtMs) : null,
         rendererBacklogMs: delta.telemetry
           ? Math.max(0, delta.telemetry.rendererDispatchedAtMs - (delta.telemetry.capturedAtMs + delta.telemetry.audioDurationMs))
-          : null
+          : null,
+        reacquireAttempt: attempt ? {
+          accepted: attempt.accepted, anchorTokenIndex: attempt.anchorTokenIndex,
+          evidenceTokenCount: attempt.evidenceTokenCount,
+          candidateStartTokenIndex: attempt.candidateStartTokenIndex,
+          candidateEndTokenIndex: attempt.candidateEndTokenIndex,
+          confidence: attempt.confidence, separation: attempt.separation,
+          forwardMatchedWordCount: attempt.forwardMatchedWordCount,
+          forwardDistinctiveWordCount: attempt.forwardDistinctiveWordCount,
+          failedChecks: attempt.failedChecks
+        } : undefined
       };
       localWhisperTelemetryRef.current.recordCoordinatorResult({
         telemetry: delta.telemetry,
