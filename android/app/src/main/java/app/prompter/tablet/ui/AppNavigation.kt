@@ -9,13 +9,18 @@ import androidx.compose.runtime.Composable
 import app.prompter.tablet.ui.connection.ConnectionScreen
 import app.prompter.tablet.ui.diagnostics.DiagnosticsScreen
 import app.prompter.tablet.ui.prompter.PrompterScreen
+import app.prompter.tablet.ui.prompter.ReaderViewportCache
+import app.prompter.tablet.ui.prompter.readerManuscriptKey
 import app.prompter.tablet.ui.settings.SettingsScreen
 import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.unit.dp
+import androidx.compose.runtime.remember
 
 @Composable
 fun AppNavigation(state: MainUiState, viewModel: MainViewModel, onRequestMicrophonePermission: () -> Unit) {
+    val readerViewport = remember { ReaderViewportCache() }
+        .forManuscript(readerManuscriptKey(state.session.snapshot))
     val runtime = state.session.runtimeSettings
     val readingScheme = darkColorScheme(
         primary = Color(0xFFE2CF9E), onPrimary = Color(0xFF2C202C),
@@ -61,7 +66,7 @@ fun AppNavigation(state: MainUiState, viewModel: MainViewModel, onRequestMicroph
     ) {
         when (state.screen) {
             Screen.CONNECTION -> ConnectionScreen(state, viewModel)
-            Screen.PROMPTER -> PrompterScreen(state, viewModel) {
+            Screen.PROMPTER -> PrompterScreen(state, viewModel, readerViewport) {
                 if (viewModel.hasMicrophonePermission()) viewModel.requestMicrophone() else onRequestMicrophonePermission()
             }
             Screen.DIAGNOSTICS -> DiagnosticsScreen(state, viewModel) { viewModel.show(if (state.session.snapshot == null) Screen.CONNECTION else Screen.PROMPTER) }

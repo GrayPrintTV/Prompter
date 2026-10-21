@@ -55,10 +55,19 @@ data class MainUiState(
     val pairingCode: String = "",
     val manualAddress: String = "",
     val microphonePermissionDenied: Boolean = false,
+    val microphonePreparing: Boolean = false,
     val lastError: String? = null,
     val diagnosticEvents: List<AndroidDiagnosticEvent> = emptyList(),
     val manualFollow: ManualFollowUiDiagnostics = ManualFollowUiDiagnostics()
 )
+
+internal const val MICROPHONE_PERMISSION_DENIED_ERROR = "Microphone permission was denied."
+
+internal fun permissionErrorAfterResult(granted: Boolean, currentError: String?): String? = when {
+    !granted -> MICROPHONE_PERMISSION_DENIED_ERROR
+    currentError == MICROPHONE_PERMISSION_DENIED_ERROR -> null
+    else -> currentError
+}
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val services = (application as PrompterApplication).services
@@ -470,12 +479,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun hasMicrophonePermission(): Boolean = ContextCompat.checkSelfPermission(getApplication(), Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
     fun onMicrophonePermissionResult(granted: Boolean) {
-        update { copy(microphonePermissionDenied = !granted, lastError = if (granted) lastError else "Microphone permission was denied.") }
+        update { copy(microphonePermissionDenied = !granted, lastError = permissionErrorAfterResult(granted, lastError)) }
         if (granted) requestMicrophone()
     }
 
     fun requestMicrophone() {
         if (!hasMicrophonePermission()) { update { copy(microphonePermissionDenied = true) }; return }
+        update { copy(microphonePermissionDenied = false, lastError = permissionErrorAfterResult(true, lastError)) }
         if (_ui.value.connection !is ConnectionState.Connected) { update { copy(lastError = "Connect and authenticate before starting the microphone.") }; return }
         if (services.audio.diagnostics.value.active) return
         if (pendingAudio != null) {
@@ -486,7 +496,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         val prepared = services.audio.prepare().getOrElse { update { copy(lastError = it.message) }; return }
         pendingAudio = prepared
-        if (!services.connections.requestController(prepared.first, prepared.second)) update { copy(lastError = "Could not request the controller lease.") }
+        update { copy(microphonePreparing = true) }
+        if (!services.connections.requestController(prepared.first, prepared.second)) {
+            pendingAudio = null
+            services.audio.stop()
+            update { copy(microphonePreparing = false, lastError = "Could not request the controller lease.") }
+        }
     }
 
     fun stopMicrophone() {
@@ -494,6 +509,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         diagnostics.streamId?.let { services.connections.stopController(it, diagnostics.lastSequence.coerceAtLeast(0)) }
         pendingAudio = null
         services.audio.stop()
+        update { copy(microphonePreparing = false) }
     }
 
     fun updateDisplay(transform: (TabletDisplaySettings) -> TabletDisplaySettings) {
@@ -524,7 +540,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun startPreparedAudio() {
         val (streamId, rate) = pendingAudio ?: return
         services.audio.start(streamId, rate) { metadata, bytes -> services.connections.sendAudio(metadata, bytes) }
-            .onFailure { update { copy(lastError = it.message) } }
+            .onSuccess { update { copy(microphonePreparing = false) } }
+            .onFailure { update { copy(microphonePreparing = false, lastError = it.message) } }
     }
 
     private fun update(transform: MainUiState.() -> MainUiState) { _ui.value = _ui.value.transform() }

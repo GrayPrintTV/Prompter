@@ -9,12 +9,10 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -50,12 +48,14 @@ internal fun tabletNarrationStatus(
     reconnecting: Boolean,
     controllerReady: Boolean,
     streamRegistered: Boolean,
-    audioActive: Boolean
+    audioActive: Boolean,
+    microphonePreparing: Boolean
 ) = when {
     connected && audioActive -> "Following narration"
+    connected && microphonePreparing -> "Preparing microphone"
     connected && streamRegistered -> "Microphone ready"
     connected && controllerReady -> "Ready to start"
-    connected -> "Connected — preparing microphone"
+    connected -> "Connected — microphone stopped"
     reconnecting -> "Reconnecting…"
     else -> "Disconnected"
 }
@@ -72,18 +72,19 @@ internal fun manualFollowProductStatus(overrideState: String): String? = when (o
 }
 
 @Composable
-fun PrompterScreen(state: MainUiState, viewModel: MainViewModel, requestMicrophone: () -> Unit) {
+internal fun PrompterScreen(state: MainUiState, viewModel: MainViewModel, viewport: ReaderViewportState?, requestMicrophone: () -> Unit) {
     val snapshot = state.session.snapshot
     if (snapshot == null) { LaunchedEffect(Unit) { viewModel.show(Screen.CONNECTION) }; return }
+    val readerViewport = requireNotNull(viewport)
     val chunks = remember(snapshot.manuscript.contentHash) { manuscriptChunks(snapshot) }
     val paragraphs = remember(snapshot.manuscript.contentHash) { visualParagraphs(snapshot, chunks) }
     val navigationIndex = remember(snapshot.manuscript.contentHash) {
         ManuscriptNavigationIndex.build(paragraphs, snapshot.manuscript.normalizedContent?.length ?: 0)
     }
-    val listState = rememberLazyListState()
+    val listState = readerViewport.listState
     val fastScrollScope = rememberCoroutineScope()
     val fastScrollJob = remember { arrayOfNulls<Job>(1) }
-    val followController = remember { MovementFollowController() }
+    val followController = readerViewport.followController
     val assistCruise = remember { AssistCruiseController() }
     val runtime = state.session.runtimeSettings
     val runtimeDisplay = runtime?.display
@@ -91,11 +92,6 @@ fun PrompterScreen(state: MainUiState, viewModel: MainViewModel, requestMicropho
     var viewportHeight by remember { mutableIntStateOf(0) }
     var viewportWidth by remember { mutableIntStateOf(0) }
     val paragraphLayouts = remember { mutableStateMapOf<String, TextLayoutResult>() }
-    var manualTouchGeneration by rememberSaveable { mutableIntStateOf(0) }
-    var manualScrollObserved by remember { mutableStateOf(false) }
-    var manualDetectedAtMs by remember { mutableLongStateOf(0L) }
-    var manualInputSource by remember { mutableStateOf("unknown") }
-    var fastScrollDragging by remember { mutableStateOf(false) }
     val movement = state.session.latestMovement
     val manualRepositionResult = state.session.manualRepositionResult
     val snapshotAnchor = state.session.snapshotAnchor
@@ -120,30 +116,30 @@ fun PrompterScreen(state: MainUiState, viewModel: MainViewModel, requestMicropho
         }
         viewModel.logRelayoutStarted(runtime?.settingsRevision, effectiveTarget?.targetCharacter, effectiveDisplay.layoutKey)
     }
-    LaunchedEffect(manualTouchGeneration) {
-        if (manualTouchGeneration <= 0 || !followController.isManualHoldActive()) return@LaunchedEffect
+    LaunchedEffect(readerViewport.manualTouchGeneration) {
+        if (readerViewport.manualTouchGeneration <= 0 || !followController.isManualHoldActive()) return@LaunchedEffect
         delay(850)
         if (
-            !manualScrollObserved &&
+            !readerViewport.manualScrollObserved &&
             !listState.isScrollInProgress &&
             followController.cancelTouchWithoutScroll()
         ) {
             viewModel.logManualTouchWithoutScroll()
-            manualTouchGeneration += 1
+            readerViewport.manualTouchGeneration += 1
         }
     }
-    LaunchedEffect(listState.isScrollInProgress, fastScrollDragging, manualTouchGeneration) {
-        if (manualTouchGeneration <= 0 || !followController.isManualHoldActive()) return@LaunchedEffect
-        if (listState.isScrollInProgress || fastScrollDragging) {
-            if (fastScrollDragging) return@LaunchedEffect
+    LaunchedEffect(listState.isScrollInProgress, readerViewport.fastScrollDragging, readerViewport.manualTouchGeneration) {
+        if (readerViewport.manualTouchGeneration <= 0 || !followController.isManualHoldActive()) return@LaunchedEffect
+        if (listState.isScrollInProgress || readerViewport.fastScrollDragging) {
+            if (readerViewport.fastScrollDragging) return@LaunchedEffect
             followController.recordScrollObserved()
-            if (!manualScrollObserved) viewModel.logTabletScrollObserved()
-            manualScrollObserved = true
+            if (!readerViewport.manualScrollObserved) viewModel.logTabletScrollObserved()
+            readerViewport.manualScrollObserved = true
             return@LaunchedEffect
         }
-        if (!manualScrollObserved || viewportHeight <= 0) return@LaunchedEffect
+        if (!readerViewport.manualScrollObserved || viewportHeight <= 0) return@LaunchedEffect
         delay(180)
-        if (listState.isScrollInProgress || fastScrollDragging) return@LaunchedEffect
+        if (listState.isScrollInProgress || readerViewport.fastScrollDragging) return@LaunchedEffect
         viewModel.logTabletMomentumSettled()
         val layoutInfo = listState.layoutInfo
         val readingBandY = (viewportHeight * effectiveDisplay.readingBandFraction).roundToInt()
@@ -183,8 +179,8 @@ fun PrompterScreen(state: MainUiState, viewModel: MainViewModel, requestMicropho
             anchor,
             snapshot.manuscriptRevision,
             direction,
-            manualInputSource,
-            manualDetectedAtMs
+            readerViewport.manualInputSource,
+            readerViewport.manualDetectedAtMs
         )
         if (
             sendOutcome is app.prompter.tablet.connection.ManualRepositionSendOutcome.Failed &&
@@ -192,7 +188,7 @@ fun PrompterScreen(state: MainUiState, viewModel: MainViewModel, requestMicropho
         ) {
             viewModel.logTabletManualOverrideCleared("manual anchor send failed: ${sendOutcome.reason}")
         }
-        manualScrollObserved = false
+        readerViewport.manualScrollObserved = false
     }
     LaunchedEffect(
         manualRepositionResult?.accepted,
@@ -202,12 +198,16 @@ fun PrompterScreen(state: MainUiState, viewModel: MainViewModel, requestMicropho
         val result = manualRepositionResult ?: return@LaunchedEffect
         if (followController.recordCoordinatorResult(result.accepted, result.visibleTokenIndex)) {
             viewModel.logTabletManualCoordinatorResult(result, followController.manualOverrideState())
-            manualTouchGeneration += 1
+            readerViewport.manualTouchGeneration += 1
         }
     }
-    LaunchedEffect(movement?.targetTokenIndex, movement?.targetCharacter, movement?.sessionRevision, movement?.manuscriptRevision, movement?.classification, movement?.confidence, movement?.manualRepositionStatus, movement?.manualAnchorTokenIndex, snapshotAnchor?.identity, snapshotAnchor?.consumed, effectiveTargetCharacter, state.connection, state.connectionDiagnostics.controllerLease, state.audio.active, runtimeFollow, manualTouchGeneration, effectiveDisplay.layoutKey, viewportHeight, viewportWidth, targetLayout) {
+    LaunchedEffect(movement?.targetTokenIndex, movement?.targetCharacter, movement?.sessionRevision, movement?.manuscriptRevision, movement?.classification, movement?.confidence, movement?.manualRepositionStatus, movement?.manualAnchorTokenIndex, snapshotAnchor?.identity, snapshotAnchor?.consumed, effectiveTargetCharacter, state.connection, state.connectionDiagnostics.controllerLease, state.audio.active, runtimeFollow, readerViewport.manualTouchGeneration, effectiveDisplay.layoutKey, viewportHeight, viewportWidth, targetLayout) {
         if (viewportHeight <= 0) { viewModel.logMovementGeometryRetry("viewport unavailable"); return@LaunchedEffect }
         val target = effectiveTarget ?: return@LaunchedEffect
+        val renderedKey = movement?.let {
+            RenderedMovementKey(state.session.sessionId, state.session.latestMovementEventId, it, effectiveDisplay.layoutKey, viewportWidth, viewportHeight)
+        }
+        if (renderedKey != null && readerViewport.renderedMovement == renderedKey) return@LaunchedEffect
         val applyingAnchor = movement == null && snapshotAnchor != null && !snapshotAnchor.consumed
         if (movement == null && snapshotAnchor?.consumed == true) { viewModel.logSnapshotAnchorIgnored(snapshotAnchor.identity); return@LaunchedEffect }
         if (state.connection !is ConnectionState.Connected || !state.connectionDiagnostics.controllerLease) {
@@ -282,6 +282,7 @@ fun PrompterScreen(state: MainUiState, viewModel: MainViewModel, requestMicropho
                         viewModel.logMovementAnimationCompleted(target, paragraphItemIndex, plan.policy, 0, distance)
                     }
                     viewModel.logRelayoutAlignmentCompleted(target.targetCharacter)
+                    if (renderedKey != null) readerViewport.renderedMovement = renderedKey
                     if (applyingAnchor) {
                         assistCruise.reset(clearPace = true)
                         viewModel.logAssistCruiseReset("new snapshot anchor")
@@ -372,12 +373,12 @@ fun PrompterScreen(state: MainUiState, viewModel: MainViewModel, requestMicropho
             modifier = Modifier.fillMaxSize().pointerInput(Unit) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
-                    manualDetectedAtMs = System.currentTimeMillis()
-                    manualInputSource = if (down.type == PointerType.Touch) "touch" else "pointer"
+                    readerViewport.manualDetectedAtMs = System.currentTimeMillis()
+                    readerViewport.manualInputSource = if (down.type == PointerType.Touch) "touch" else "pointer"
                       val replaced = followController.recordUserTouch()
-                      viewModel.logManualScrollStarted(manualInputSource, "prompter-lazy-column")
+                      viewModel.logManualScrollStarted(readerViewport.manualInputSource, "prompter-lazy-column")
                       if (replaced) viewModel.logTabletManualOverrideReplaced()
-                      manualTouchGeneration += 1
+                      readerViewport.manualTouchGeneration += 1
                 }
             }
         ) {
@@ -404,21 +405,21 @@ fun PrompterScreen(state: MainUiState, viewModel: MainViewModel, requestMicropho
             paragraphs = paragraphs,
             manuscriptLength = manuscriptLength,
             navigationIndex = navigationIndex,
-            dragging = fastScrollDragging,
+            dragging = readerViewport.fastScrollDragging,
             color = text,
             onDragStart = {
-                manualDetectedAtMs = System.currentTimeMillis()
-                manualInputSource = "fast-scroll"
-                manualScrollObserved = false
-                fastScrollDragging = true
+                readerViewport.manualDetectedAtMs = System.currentTimeMillis()
+                readerViewport.manualInputSource = "fast-scroll"
+                readerViewport.manualScrollObserved = false
+                readerViewport.fastScrollDragging = true
                 val replaced = followController.recordUserTouch()
-                viewModel.logManualScrollStarted(manualInputSource, "prompter-lazy-column")
+                viewModel.logManualScrollStarted(readerViewport.manualInputSource, "prompter-lazy-column")
                 if (replaced) viewModel.logTabletManualOverrideReplaced()
-                manualTouchGeneration += 1
+                readerViewport.manualTouchGeneration += 1
             },
             onFractionChanged = { fraction ->
-                if (!manualScrollObserved) viewModel.logTabletScrollObserved()
-                manualScrollObserved = true
+                if (!readerViewport.manualScrollObserved) viewModel.logTabletScrollObserved()
+                readerViewport.manualScrollObserved = true
                 followController.recordScrollObserved()
                 fastScrollJob[0]?.cancel()
                 fastScrollJob[0] = fastScrollScope.launch {
@@ -449,8 +450,8 @@ fun PrompterScreen(state: MainUiState, viewModel: MainViewModel, requestMicropho
                 val finalJump = fastScrollJob[0]
                 fastScrollScope.launch {
                     finalJump?.join()
-                    fastScrollDragging = false
-                    manualTouchGeneration += 1
+                    readerViewport.fastScrollDragging = false
+                    readerViewport.manualTouchGeneration += 1
                 }
             },
             modifier = Modifier
@@ -467,7 +468,8 @@ fun PrompterScreen(state: MainUiState, viewModel: MainViewModel, requestMicropho
                             reconnecting = state.connection is ConnectionState.Reconnecting,
                             controllerReady = state.connectionDiagnostics.controllerLease,
                             streamRegistered = state.connectionDiagnostics.registeredAudioStreamId != null,
-                            audioActive = state.audio.active
+                            audioActive = state.audio.active,
+                            microphonePreparing = state.microphonePreparing
                         ))
                     })
                     Spacer(Modifier.weight(1f))

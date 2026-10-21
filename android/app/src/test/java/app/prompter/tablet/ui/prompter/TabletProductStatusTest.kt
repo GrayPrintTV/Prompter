@@ -6,12 +6,13 @@ import org.junit.Test
 
 class TabletProductStatusTest {
     @Test fun `normal tablet status uses narrator language`() {
-        assertEquals("Disconnected", tabletNarrationStatus(false, false, false, false, false))
-        assertEquals("Reconnecting…", tabletNarrationStatus(false, true, false, false, false))
-        assertEquals("Connected — preparing microphone", tabletNarrationStatus(true, false, false, false, false))
-        assertEquals("Ready to start", tabletNarrationStatus(true, false, true, false, false))
-        assertEquals("Microphone ready", tabletNarrationStatus(true, false, true, true, false))
-        assertEquals("Following narration", tabletNarrationStatus(true, false, true, true, true))
+        assertEquals("Disconnected", tabletNarrationStatus(false, false, false, false, false, false))
+        assertEquals("Reconnecting…", tabletNarrationStatus(false, true, false, false, false, false))
+        assertEquals("Connected — microphone stopped", tabletNarrationStatus(true, false, false, false, false, false))
+        assertEquals("Preparing microphone", tabletNarrationStatus(true, false, false, false, false, true))
+        assertEquals("Ready to start", tabletNarrationStatus(true, false, true, false, false, false))
+        assertEquals("Microphone ready", tabletNarrationStatus(true, false, true, true, false, false))
+        assertEquals("Following narration", tabletNarrationStatus(true, false, true, true, true, false))
     }
 
     @Test fun `manual reposition status stays simple and normal following stays quiet`() {
