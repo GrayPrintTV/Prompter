@@ -89,8 +89,6 @@ internal fun PrompterScreen(state: MainUiState, viewModel: MainViewModel, viewpo
     val runtime = state.session.runtimeSettings
     val runtimeDisplay = runtime?.display
     val runtimeFollow = runtime?.follow
-    var viewportHeight by remember { mutableIntStateOf(0) }
-    var viewportWidth by remember { mutableIntStateOf(0) }
     val paragraphLayouts = remember { mutableStateMapOf<String, TextLayoutResult>() }
     val movement = state.session.latestMovement
     val manualRepositionResult = state.session.manualRepositionResult
@@ -109,8 +107,8 @@ internal fun PrompterScreen(state: MainUiState, viewModel: MainViewModel, viewpo
     val lineSpacing = effectiveDisplay.lineSpacing
     val lineHeightPx = with(density) { (fontSizeSp * lineSpacing).sp.toPx() }
     val targetLayout = paragraphs.firstOrNull { it.paragraphIndex == effectiveTargetParagraph }?.let { paragraphLayouts[it.key] }
-    LaunchedEffect(effectiveDisplay.layoutKey, viewportHeight, viewportWidth, snapshot.manuscript.contentHash) {
-        if (viewportHeight > 0 && viewportWidth > 0) {
+    LaunchedEffect(effectiveDisplay.layoutKey, readerViewport.viewportHeight, readerViewport.viewportWidth, snapshot.manuscript.contentHash) {
+        if (readerViewport.viewportHeight > 0 && readerViewport.viewportWidth > 0) {
             assistCruise.reset(clearPace = true)
             viewModel.logAssistCruiseReset("layout or viewport changed")
         }
@@ -137,12 +135,12 @@ internal fun PrompterScreen(state: MainUiState, viewModel: MainViewModel, viewpo
             readerViewport.manualScrollObserved = true
             return@LaunchedEffect
         }
-        if (!readerViewport.manualScrollObserved || viewportHeight <= 0) return@LaunchedEffect
+        if (!readerViewport.manualScrollObserved || readerViewport.viewportHeight <= 0) return@LaunchedEffect
         delay(180)
         if (listState.isScrollInProgress || readerViewport.fastScrollDragging) return@LaunchedEffect
         viewModel.logTabletMomentumSettled()
         val layoutInfo = listState.layoutInfo
-        val readingBandY = (viewportHeight * effectiveDisplay.readingBandFraction).roundToInt()
+        val readingBandY = (readerViewport.viewportHeight * effectiveDisplay.readingBandFraction).roundToInt()
         val candidates = layoutInfo.visibleItemsInfo.flatMap { item ->
             val paragraph = paragraphs.getOrNull(item.index) ?: return@flatMap emptyList()
             val layout = paragraphLayouts[paragraph.key] ?: return@flatMap emptyList()
@@ -201,11 +199,11 @@ internal fun PrompterScreen(state: MainUiState, viewModel: MainViewModel, viewpo
             readerViewport.manualTouchGeneration += 1
         }
     }
-    LaunchedEffect(movement?.targetTokenIndex, movement?.targetCharacter, movement?.sessionRevision, movement?.manuscriptRevision, movement?.classification, movement?.confidence, movement?.manualRepositionStatus, movement?.manualAnchorTokenIndex, snapshotAnchor?.identity, snapshotAnchor?.consumed, effectiveTargetCharacter, state.connection, state.connectionDiagnostics.controllerLease, state.audio.active, runtimeFollow, readerViewport.manualTouchGeneration, effectiveDisplay.layoutKey, viewportHeight, viewportWidth, targetLayout) {
-        if (viewportHeight <= 0) { viewModel.logMovementGeometryRetry("viewport unavailable"); return@LaunchedEffect }
+    LaunchedEffect(movement?.targetTokenIndex, movement?.targetCharacter, movement?.sessionRevision, movement?.manuscriptRevision, movement?.classification, movement?.confidence, movement?.manualRepositionStatus, movement?.manualAnchorTokenIndex, snapshotAnchor?.identity, snapshotAnchor?.consumed, effectiveTargetCharacter, state.connection, state.connectionDiagnostics.controllerLease, state.audio.active, runtimeFollow, readerViewport.manualTouchGeneration, effectiveDisplay.layoutKey, readerViewport.viewportHeight, readerViewport.viewportWidth, targetLayout) {
+        if (readerViewport.viewportHeight <= 0) { viewModel.logMovementGeometryRetry("viewport unavailable"); return@LaunchedEffect }
         val target = effectiveTarget ?: return@LaunchedEffect
         val renderedKey = movement?.let {
-            RenderedMovementKey(state.session.sessionId, state.session.latestMovementEventId, it, effectiveDisplay.layoutKey, viewportWidth, viewportHeight)
+            RenderedMovementKey(state.session.sessionId, state.session.latestMovementEventId, it, effectiveDisplay.layoutKey, readerViewport.viewportWidth, readerViewport.viewportHeight)
         }
         if (renderedKey != null && readerViewport.renderedMovement == renderedKey) return@LaunchedEffect
         val applyingAnchor = movement == null && snapshotAnchor != null && !snapshotAnchor.consumed
@@ -248,7 +246,7 @@ internal fun PrompterScreen(state: MainUiState, viewModel: MainViewModel, viewpo
                 }
                 val item = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == paragraphItemIndex }
                     ?: run { viewModel.logMovementUnresolved("item lookup failure", target); return@LaunchedEffect }
-                val bandY = ((viewportHeight.takeIf { it > 0 } ?: listState.layoutInfo.viewportEndOffset) * effectiveDisplay.readingBandFraction).roundToInt()
+                val bandY = ((readerViewport.viewportHeight.takeIf { it > 0 } ?: listState.layoutInfo.viewportEndOffset) * effectiveDisplay.readingBandFraction).roundToInt()
                 val layout = paragraphLayouts[visualParagraph.key]
                     ?: run { viewModel.logMovementGeometryRetry("paragraph text layout unavailable; retry scheduled"); return@LaunchedEffect }
                 val lineIndex = layout.getLineForOffset(localCharacterOffset.coerceAtMost((visualParagraph.text.length - 1).coerceAtLeast(0)))
@@ -359,14 +357,14 @@ internal fun PrompterScreen(state: MainUiState, viewModel: MainViewModel, viewpo
     val bandHeightPx = lineHeightPx * effectiveDisplay.readingBandHeightLines
     val paragraphSpacing = with(density) { (fontSizeSp * effectiveDisplay.paragraphSpacingEm).sp.toDp() }
     val bandFraction = effectiveDisplay.readingBandFraction
-    val bandY = (bandFraction * viewportHeight).roundToInt()
+    val bandY = (bandFraction * readerViewport.viewportHeight).roundToInt()
     val topContentPaddingPx = max(0, bandY - (lineHeightPx / 2).roundToInt())
-    val bottomContentPaddingPx = max(0, viewportHeight - bandY - (lineHeightPx / 2).roundToInt())
+    val bottomContentPaddingPx = max(0, readerViewport.viewportHeight - bandY - (lineHeightPx / 2).roundToInt())
     val sideMargins = with(density) {
-        ((viewportWidth * (1f - effectiveDisplay.contentWidthFraction) / 2f).roundToInt()).toDp()
+        ((readerViewport.viewportWidth * (1f - effectiveDisplay.contentWidthFraction) / 2f).roundToInt()).toDp()
     }
     val manuscriptLength = snapshot.manuscript.normalizedContent?.length ?: 0
-    Box(Modifier.fillMaxSize().background(background).onSizeChanged { viewportHeight = it.height; viewportWidth = it.width }) {
+    Box(Modifier.fillMaxSize().background(background).onSizeChanged { readerViewport.viewportHeight = it.height; readerViewport.viewportWidth = it.width }) {
         LazyColumn(
             state = listState,
             contentPadding = PaddingValues(top = with(density) { topContentPaddingPx.toDp() }, bottom = with(density) { bottomContentPaddingPx.toDp() }, start = sideMargins, end = sideMargins),

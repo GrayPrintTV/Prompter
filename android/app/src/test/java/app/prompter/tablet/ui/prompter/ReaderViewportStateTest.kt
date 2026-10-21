@@ -11,12 +11,16 @@ class ReaderViewportStateTest {
         val key = ReaderManuscriptKey("book-a", "hash-a", 3)
         val reader = requireNotNull(cache.forManuscript(key))
         reader.followController.recordUserTouch()
+        reader.viewportHeight = 1920
+        reader.viewportWidth = 1200
         reader.manualTouchGeneration = 1
 
         val returned = requireNotNull(cache.forManuscript(key))
         assertSame(reader, returned)
         assertSame(reader.followController, returned.followController)
         assertEquals(TabletManualOverrideState.USER_SCROLLING, returned.followController.manualOverrideState())
+        assertEquals(1920, returned.viewportHeight)
+        assertEquals(1200, returned.viewportWidth)
         assertEquals(1, returned.manualTouchGeneration)
     }
 

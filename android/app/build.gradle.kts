@@ -30,8 +30,8 @@ android {
         applicationId = "app.prompter.tablet.vocalcandidate"
         minSdk = 26
         targetSdk = 36
-        versionCode = 5
-        versionName = "0.2.0-vocal.3-tab.3"
+        versionCode = 6
+        versionName = "0.2.0-vocal.3-tab.4"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
         buildConfigField("String", "BUILD_TIMESTAMP", "\"$buildTimestamp\"")

@@ -24,6 +24,8 @@ internal class ReaderViewportState(
     val listState: LazyListState = LazyListState(),
     val followController: MovementFollowController = MovementFollowController()
 ) {
+    var viewportHeight by mutableIntStateOf(0)
+    var viewportWidth by mutableIntStateOf(0)
     var manualTouchGeneration by mutableIntStateOf(0)
     var manualScrollObserved by mutableStateOf(false)
     var manualDetectedAtMs by mutableLongStateOf(0L)
