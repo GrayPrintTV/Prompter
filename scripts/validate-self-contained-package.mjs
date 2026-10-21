@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const packageDir = path.join(root, 'release', 'win-unpacked');
+const packageDir = path.resolve(process.argv[2] || path.join(root, 'release', 'win-unpacked'));
 const resourcesDir = path.join(packageDir, 'resources');
 const sidecarDir = path.join(resourcesDir, 'whisper-sidecar');
 const sidecarExe = path.join(sidecarDir, 'whisper-sidecar.exe');

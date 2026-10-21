@@ -5,9 +5,14 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const packageJson = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'));
-const installerName = `Prompter-Candidate-Setup-${packageJson.version}-x64.exe`;
-const installerPath = path.join(root, 'release', installerName);
-const sidecarDir = path.join(root, 'release', 'win-unpacked', 'resources', 'whisper-sidecar');
+const requestedReleaseDir = process.argv[2] ? path.resolve(process.argv[2]) : null;
+const releaseDir = requestedReleaseDir || path.join(root, 'release');
+const packageDir = path.join(releaseDir, 'win-unpacked');
+const installerName = requestedReleaseDir
+  ? `Prompter-Vocal-Design-${packageJson.version}-x64.exe`
+  : `Prompter-Candidate-Setup-${packageJson.version}-x64.exe`;
+const installerPath = path.join(releaseDir, installerName);
+const sidecarDir = path.join(packageDir, 'resources', 'whisper-sidecar');
 const minimumInstallerSizeBytes = 200 * 1024 * 1024;
 const gpuFilePattern = /cuda|cudnn|cublas|cufft|curand|cusolver|cusparse|nvidia|rocm|hip/i;
 
@@ -16,7 +21,7 @@ function fail(message) {
   process.exit(1);
 }
 
-const selfContainedValidation = spawnSync(process.execPath, [path.join(root, 'scripts', 'validate-self-contained-package.mjs')], {
+const selfContainedValidation = spawnSync(process.execPath, [path.join(root, 'scripts', 'validate-self-contained-package.mjs'), packageDir], {
   cwd: root,
   encoding: 'utf8',
   stdio: 'inherit',
